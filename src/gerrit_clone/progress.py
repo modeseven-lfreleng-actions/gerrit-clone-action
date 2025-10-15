@@ -290,6 +290,38 @@ class ProgressTracker:
         """Start text-only progress logging."""
         logger.info(f"Starting clone of {len(projects)} repositories")
 
+    def update_for_retry(self, retry_projects: list[Project]) -> None:
+        """Update progress tracker for retry operations without resetting display.
+
+        Args:
+            retry_projects: List of projects to retry
+        """
+        with self._lock:
+            # Reset only the retry projects' status to pending, keep existing results
+            for project in retry_projects:
+                if project.name in self._results:
+                    # Update existing result to pending status for retry
+                    # Preserve attempts count and nested_under info for accurate retry tracking
+                    existing_result = self._results[project.name]
+                    self._results[project.name] = CloneResult(
+                        project=project,
+                        status=CloneStatus.PENDING,
+                        path=existing_result.path,
+                        started_at=None,
+                        completed_at=None,
+                        error_message=None,
+                        attempts=existing_result.attempts,  # Preserve attempt count for accurate retry metrics
+                        nested_under=existing_result.nested_under,  # Preserve nested dependency information
+                        first_started_at=existing_result.first_started_at
+                        or existing_result.started_at,  # Preserve original start time
+                        retry_count=existing_result.retry_count
+                        + 1,  # Increment retry counter
+                        last_attempt_duration=existing_result.last_attempt_duration,  # Preserve last attempt duration
+                    )
+
+            # Don't reset progress bar - keep existing total and continue from current state
+            # The progress will be updated as retry operations complete
+
     def stop(self) -> None:
         """Stop progress tracking."""
         with self._lock:
@@ -349,6 +381,9 @@ class ProgressTracker:
             now = datetime.now(UTC)
             if status == CloneStatus.CLONING and not result.started_at:
                 result.started_at = now
+                # Set first_started_at if this is the very first attempt
+                if not result.first_started_at:
+                    result.first_started_at = now
             elif status in (
                 CloneStatus.SUCCESS,
                 CloneStatus.FAILED,
@@ -358,7 +393,17 @@ class ProgressTracker:
                 if not result.completed_at:
                     result.completed_at = now
                     if result.started_at:
-                        result.duration_seconds = (
+                        # Calculate duration from first attempt to completion
+                        if result.first_started_at:
+                            result.duration_seconds = (
+                                result.completed_at - result.first_started_at
+                            ).total_seconds()
+                        else:
+                            result.duration_seconds = (
+                                result.completed_at - result.started_at
+                            ).total_seconds()
+                        # Track duration of just this final attempt
+                        result.last_attempt_duration = (
                             result.completed_at - result.started_at
                         ).total_seconds()
 
@@ -402,7 +447,9 @@ class ProgressTracker:
 
                 # Calculate elapsed time
                 if self._start_time:
-                    elapsed_seconds = (datetime.now(UTC) - self._start_time).total_seconds()
+                    elapsed_seconds = (
+                        datetime.now(UTC) - self._start_time
+                    ).total_seconds()
                     elapsed_minutes, secs = divmod(int(elapsed_seconds), 60)
                     elapsed_hours, mins = divmod(elapsed_minutes, 60)
                     if elapsed_hours > 0:
@@ -412,7 +459,9 @@ class ProgressTracker:
                 else:
                     elapsed_str = "0:00"
 
-                self._progress.update(self._main_task, completed=summary["completed"], elapsed=elapsed_str)
+                self._progress.update(
+                    self._main_task, completed=summary["completed"], elapsed=elapsed_str
+                )
 
     def _update_display(self) -> None:
         """Update the display based on current mode."""
@@ -441,12 +490,16 @@ class ProgressTracker:
                     self._last_update_time = now
                 except Exception as e:
                     logger.warning(f"Error updating periodic display: {e}")
-        elif self._mode == ProgressMode.RICH_SIMPLE and self._progress and RICH_AVAILABLE:
+        elif (
+            self._mode == ProgressMode.RICH_SIMPLE and self._progress and RICH_AVAILABLE
+        ):
             # Handle RICH_SIMPLE mode - just update the progress bar, no custom display
             if self._main_task:
                 summary = self._get_summary_unsafe()
                 try:
-                    self._progress.update(self._main_task, completed=summary["completed"])
+                    self._progress.update(
+                        self._main_task, completed=summary["completed"]
+                    )
                 except Exception as e:
                     logger.debug(f"Error updating simple progress: {e}")
 
@@ -498,8 +551,9 @@ class ProgressTracker:
         """
         # Strip ANSI codes and emojis that might interfere with Rich formatting
         import re
-        clean_message = re.sub(r'\x1b\[[0-9;]*m', '', message)
-        clean_message = re.sub(r'[🌐🔍✅🚀🎉❌⚠️]', '', clean_message).strip()
+
+        clean_message = re.sub(r"\x1b\[[0-9;]*m", "", message)
+        clean_message = re.sub(r"[🌐🔍✅🚀🎉❌⚠️]", "", clean_message).strip()
 
         self.update_log_message(clean_message)
 
@@ -653,7 +707,13 @@ class ProgressTracker:
         if self._progress:
             # Create fresh progress bar with current values
             summary = self._get_summary_unsafe()
-            from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, SpinnerColumn
+            from rich.progress import (
+                Progress,
+                BarColumn,
+                TextColumn,
+                MofNCompleteColumn,
+                SpinnerColumn,
+            )
 
             # Calculate manual elapsed time to avoid reset
             if self._start_time:
@@ -675,11 +735,20 @@ class ProgressTracker:
                 TextColumn("[progress.elapsed]{task.fields[elapsed]}"),
                 expand=True,
             )
-            task = fresh_progress.add_task("Cloning repositories", completed=summary["completed"], total=summary["total"], elapsed=elapsed_str)
+            task = fresh_progress.add_task(
+                "Cloning repositories",
+                completed=summary["completed"],
+                total=summary["total"],
+                elapsed=elapsed_str,
+            )
             content_parts.append(fresh_progress)
 
         # Add project table if reasonable number of projects and terminal is wide enough
-        if len(self._results) <= MAX_PROJECTS_FOR_TABLE and self.console and self.console.size.width > MIN_CONSOLE_WIDTH_FOR_TABLE:
+        if (
+            len(self._results) <= MAX_PROJECTS_FOR_TABLE
+            and self.console
+            and self.console.size.width > MIN_CONSOLE_WIDTH_FOR_TABLE
+        ):
             content_parts.append(self._create_project_table())
 
         # Combine content
@@ -697,7 +766,7 @@ class ProgressTracker:
         log_message = self.get_current_log_message()
         log_line = Text.from_markup(
             f"[dim]ℹ️  {log_message}[/dim]" if log_message else "[dim]Ready...[/dim]",
-            overflow="ellipsis",
+            overflow="fold",
         )
 
         # Combine progress and log message

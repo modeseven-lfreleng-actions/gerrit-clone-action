@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -75,7 +76,7 @@ def setup_logging(
 
     handler = GerritRichHandler(
         console=console,
-        show_time=False,   # Keep output compact for tests
+        show_time=False,  # Keep output compact for tests
         show_level=True,
         show_path=False,
         markup=True,
@@ -109,4 +110,58 @@ def get_logger(name: str | None = None) -> logging.Logger:
         else:
             caller_name = "gerrit_clone"
         name = caller_name
+
     return logging.getLogger(name)
+
+
+class _SuppressConsoleFilter(logging.Filter):
+    """Thread-safe filter to suppress console output during Rich display.
+
+    This filter blocks all log records when suppression is active.
+    It's designed to be added/removed from handlers in a thread-safe manner.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Block all records when this filter is active."""
+        return False
+
+
+@contextmanager
+def suppress_console_logging(verbose: bool = False) -> Iterator[None]:
+    """Context manager to temporarily suppress console logging handlers.
+
+    This is used during Rich Live display to prevent log messages from
+    interfering with the progress display. File logging continues normally.
+
+    Uses a logging.Filter approach which is thread-safe and doesn't mutate
+    handler state directly.
+
+    Args:
+        verbose: If True, don't suppress logging (useful for debugging)
+
+    Yields:
+        None
+    """
+    # In verbose mode, don't suppress logging - users want to see everything
+    if verbose:
+        yield
+        return
+
+    root = logging.getLogger()
+
+    # Find all RichHandler instances
+    rich_handlers = [h for h in root.handlers if isinstance(h, RichHandler)]
+
+    # Create a single filter instance to share across handlers
+    suppress_filter = _SuppressConsoleFilter()
+
+    # Add filter to all RichHandler instances
+    for handler in rich_handlers:
+        handler.addFilter(suppress_filter)
+
+    try:
+        yield
+    finally:
+        # Remove filter from all handlers
+        for handler in rich_handlers:
+            handler.removeFilter(suppress_filter)

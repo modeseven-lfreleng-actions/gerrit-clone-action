@@ -23,6 +23,14 @@ class ProjectState(str, Enum):
     HIDDEN = "HIDDEN"
 
 
+class DiscoveryMethod(str, Enum):
+    """Method for discovering Gerrit projects."""
+
+    SSH = "ssh"
+    HTTP = "http"
+    BOTH = "both"
+
+
 class CloneStatus(str, Enum):
     """Clone operation status."""
 
@@ -94,6 +102,9 @@ class Config:
     base_url: str | None = None
     ssh_user: str | None = None
 
+    # Discovery settings
+    discovery_method: DiscoveryMethod = DiscoveryMethod.SSH
+
     # Clone behavior
     path_prefix: Path = field(default_factory=lambda: Path())
     skip_archived: bool = True
@@ -157,8 +168,6 @@ class Config:
                     normalized.append(clean)
                     seen.add(clean)
             object.__setattr__(self, "include_projects", normalized)
-
-
 
         # Ensure path_prefix is absolute
         self.path_prefix = self.path_prefix.resolve()
@@ -283,6 +292,10 @@ class CloneResult:
     completed_at: datetime | None = None
     # Name of ancestor (parent) project if this repository was cloned nested under a parent
     nested_under: str | None = None
+    # Retry tracking fields for complete attempt history
+    first_started_at: datetime | None = None
+    retry_count: int = 0
+    last_attempt_duration: float = 0.0
 
     @property
     def success(self) -> bool:
@@ -312,6 +325,12 @@ class CloneResult:
             "completed_at": self.completed_at.isoformat()
             if self.completed_at
             else None,
+            "nested_under": self.nested_under,
+            "first_started_at": self.first_started_at.isoformat()
+            if self.first_started_at
+            else None,
+            "retry_count": self.retry_count,
+            "last_attempt_duration_s": round(self.last_attempt_duration, 3),
         }
         if self.nested_under:
             data["nested_under"] = self.nested_under

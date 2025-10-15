@@ -108,14 +108,19 @@ Options:
                                   Skip archived and inactive repositories
                                   [default: skip-archived]
   --include-project TEXT          Restrict cloning to specific project(s)
+  --discovery-method TEXT         Method for discovering projects: ssh (default),
+                                  http (REST API), or both (union of both methods
+                                  with SSH metadata preferred)
   --ssh-debug                     Enable verbose SSH (-vvv) for troubleshooting
   --allow-nested-git / --no-allow-nested-git
                                   Allow nested git working trees when cloning
-                                  both parent and child repositories [default: allow-nested-git]
+                                  both parent and child repositories
+                                  [default: allow-nested-git]
   --nested-protection / --no-nested-protection
                                   Auto-add nested child repo paths to parent
                                   .git/info/exclude [default: nested-protection]
-  --move-conflicting              Move conflicting files/directories in parent
+  --move-conflicting / --no-move-conflicting
+                                  Move conflicting files/directories in parent
                                   repos to [NAME].parent to allow nested cloning
   -t, --threads INTEGER           Number of concurrent clone threads
   -d, --depth INTEGER             Create shallow clone with given depth
@@ -134,6 +139,8 @@ Options:
   --retry-max-delay FLOAT         Max retry delay in seconds [default: 30.0]
   --manifest-filename TEXT        Output manifest filename [default: clone-manifest.json]
   -c, --config-file PATH          Configuration file path (YAML or JSON)
+  --cleanup / --no-cleanup        Remove cloned repositories (path-prefix) after
+                                  run completes (success or failure)
   --exit-on-error                 Exit when first error occurs
   --log-file PATH                 Custom log file path
   --disable-log-file              Disable creation of log file
@@ -146,7 +153,8 @@ Options:
 
 ### Environment Variables
 
-You can configure all CLI options through environment variables with `GERRIT_` prefix:
+You can configure all CLI options through environment variables with
+`GERRIT_` prefix:
 
 ```bash
 export GERRIT_HOST=gerrit.example.org
@@ -161,6 +169,8 @@ export GERRIT_BRANCH=main
 export GERRIT_STRICT_HOST=1
 export GERRIT_CLONE_TIMEOUT=300
 export GERRIT_RETRY_ATTEMPTS=5
+export GERRIT_DISCOVERY_METHOD=ssh
+export GERRIT_CLEANUP=0
 
 gerrit-clone  # Uses environment variables
 ```
@@ -196,7 +206,8 @@ Or JSON format `~/.config/gerrit-clone/config.json`:
 }
 ```
 
-Configuration precedence: CLI arguments > Environment variables > Config file > Defaults
+Configuration precedence: CLI arguments > Environment variables > Config file >
+Defaults
 
 ## Nested Repository Support
 
@@ -205,8 +216,8 @@ hierarchical names like `parent/child`):
 
 ### Automatic Detection
 
-- **Dependency Ordering**: Parent repositories are automatically cloned before
-  their children
+- **Dependency Ordering**: The tool automatically clones parent repositories
+  before their children
 - **Conflict Detection**: Identifies when parent repo content conflicts with
   nested directory structure
 - **Smart Batching**: Uses dependency-aware batching to prevent race conditions
@@ -238,7 +249,7 @@ repository availability** for reporting and analysis purposes.
 - Child repo `test/test` needs directory `test/`
 - With move-conflicting enabled (default): File `test` → `test.parent`,
   directory created for child repo
-- Result: Both repositories cloned with complete history preserved
+- Result: The tool clones both repositories with complete history preservation
 
 ### Configuration
 
@@ -458,11 +469,13 @@ configuration detection:
 The following SSH authentication options are available across all interfaces:
 
 <!-- markdownlint-disable MD013 -->
+
 | Option | CLI | Environment | Action | Description |
 |--------|-----|-------------|--------|-------------|
 | SSH User | `-u` | `GERRIT_SSH_USER` | `ssh-user` | SSH username |
 | SSH Key | `-i` (file) | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Private key |
 | Host Check | `--strict-host` | `GERRIT_STRICT_HOST` | `strict-host` | Key check |
+
 <!-- markdownlint-enable MD013 -->
 
 ### Authentication Methods
@@ -643,9 +656,42 @@ ssh-keyscan -H -p 29418 gerrit.example.org >> ~/.ssh/known_hosts
 
 ### Exit Codes
 
-- `0`: Success (all repositories cloned)
-- `1`: Failure (one or more repositories failed to clone)
-- `130`: Interrupted by user (Ctrl+C)
+The tool uses standardized exit codes for different failure types, making
+it easier to handle errors in automation and CI/CD pipelines:
+
+<!-- markdownlint-disable MD013 -->
+
+| Exit Code | Description | Common Causes | Resolution |
+| --------- | ----------- | ------------- | ---------- |
+| **0** | Success | All repositories cloned | N/A |
+| **1** | General Error | Unexpected operational failure | Check logs |
+| **2** | Configuration Error | Invalid or missing settings | Verify inputs |
+| **3** | Discovery Error | Failed to discover projects | Check network and API |
+| **4** | Gerrit Connection Error | SSH auth or connection failed | Verify SSH keys |
+| **5** | Network Error | Network connectivity issues | Check connection |
+| **6** | Repository Error | Git operation failed | Verify permissions |
+| **7** | Clone Error | Clone operations failed | Check access |
+| **8** | Validation Error | Input validation failed | Check parameters |
+| **9** | Filesystem Error | Filesystem access issues | Check disk space |
+| **130** | Interrupted | Cancelled by user (Ctrl+C) | N/A |
+
+<!-- markdownlint-enable MD013 -->
+
+### Discovery Method Improvements
+
+When using `--discovery-method both`, the tool now:
+
+- **Attempts both HTTP and SSH discovery** methods simultaneously
+- **Creates a union of all projects** found by either method when both succeed
+- **Prefers SSH metadata** for duplicate projects (same name) as SSH typically
+  provides more complete information
+- **Continues with working method** if one fails, logging a warning
+- **Exits with code 3** if both methods fail (fatal discovery error)
+- **Includes warnings in output** about any discovery method failures and
+  discrepancies
+
+This provides better reliability and completeness by ensuring all projects get
+cloned, while maintaining visibility into discovery issues between the two methods.
 
 ## Development
 

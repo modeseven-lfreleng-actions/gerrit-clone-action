@@ -47,10 +47,10 @@ class GerritAPIClient:
         self.config = config
         self.base_url = config.base_url
         self.timeout = httpx.Timeout(
-            timeout=90.0,      # Increased from 30s for slow/loaded servers
-            connect=15.0,      # Increased from 10s for better connection reliability
-            read=75.0,         # Explicit read timeout for large project lists
-            pool=10.0          # Pool timeout for connection reuse
+            timeout=90.0,  # Increased from 30s for slow/loaded servers
+            connect=15.0,  # Increased from 10s for better connection reliability
+            read=75.0,  # Explicit read timeout for large project lists
+            pool=10.0,  # Pool timeout for connection reuse
         )
 
         # Create HTTP client with reasonable defaults
@@ -61,9 +61,7 @@ class GerritAPIClient:
             timeout=self.timeout,
             follow_redirects=True,
             limits=httpx.Limits(
-                max_keepalive_connections=5,
-                max_connections=10,
-                keepalive_expiry=30.0
+                max_keepalive_connections=5, max_connections=10, keepalive_expiry=30.0
             ),
             headers={
                 "User-Agent": "gerrit-clone/0.1.0",
@@ -94,7 +92,7 @@ class GerritAPIClient:
             GerritAPIError: If API request fails or response is invalid
         """
         logger.debug("Discovering projects on %s", self.config.host)
-        discovering_projects(self.config.host)
+        discovering_projects(self.config.host, method="http")
 
         try:
             # Execute with retry for transient failures
@@ -108,7 +106,7 @@ class GerritAPIClient:
             projects = self._parse_projects_response(response_data)
 
             logger.debug("Found %d projects to process", len(projects))
-            projects_found(len(projects))
+            projects_found(len(projects), method="http")
             return projects
 
         except Exception as e:
@@ -169,16 +167,24 @@ class GerritAPIClient:
 
         except httpx.ConnectError as e:
             elapsed = time.time() - start_time
-            logger.error(f"Connection failed to {self.config.host} after {elapsed:.2f}s: {e}")
+            logger.error(
+                f"Connection failed to {self.config.host} after {elapsed:.2f}s: {e}"
+            )
             raise GerritConnectionError(f"Connection failed: {e}") from e
         except httpx.TimeoutException as e:
             elapsed = time.time() - start_time
-            logger.error(f"Request timeout to {self.config.host} after {elapsed:.2f}s: {e}")
-            logger.error(f"Timeout config was: connect={self.timeout.connect}s, read={self.timeout.read}s, pool={self.timeout.pool}s")
+            logger.error(
+                f"Request timeout to {self.config.host} after {elapsed:.2f}s: {e}"
+            )
+            logger.error(
+                f"Timeout config was: connect={self.timeout.connect}s, read={self.timeout.read}s, pool={self.timeout.pool}s"
+            )
             raise GerritConnectionError(f"Request timeout: {e}") from e
         except httpx.NetworkError as e:
             elapsed = time.time() - start_time
-            logger.error(f"Network error to {self.config.host} after {elapsed:.2f}s: {e}")
+            logger.error(
+                f"Network error to {self.config.host} after {elapsed:.2f}s: {e}"
+            )
             raise GerritConnectionError(f"Network error: {e}") from e
         except httpx.HTTPError as e:
             elapsed = time.time() - start_time
@@ -316,7 +322,9 @@ class GerritAPIClient:
 
         return projects
 
-    def filter_projects(self, projects: list[Project]) -> tuple[list[Project], dict[str, int]]:
+    def filter_projects(
+        self, projects: list[Project]
+    ) -> tuple[list[Project], dict[str, int]]:
         """Filter projects based on configuration.
 
         Args:
@@ -337,7 +345,7 @@ class GerritAPIClient:
         stats = {
             "total": len(projects),
             "filtered": len(filtered),
-            "skipped": skipped_count
+            "skipped": skipped_count,
         }
 
         return filtered, stats

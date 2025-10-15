@@ -43,7 +43,9 @@ def status(message: str, temp: bool = True) -> None:
         temp: If True, message is temporary and will be replaced by next update
     """
     with _status_lock:
-        if _current_progress_tracker and hasattr(_current_progress_tracker, 'set_status'):
+        if _current_progress_tracker and hasattr(
+            _current_progress_tracker, "set_status"
+        ):
             _current_progress_tracker.set_status(message, temp=temp)
 
 
@@ -59,7 +61,9 @@ def persistent_status(message: str) -> None:
 def clear_status() -> None:
     """Clear the current status message."""
     with _status_lock:
-        if _current_progress_tracker and hasattr(_current_progress_tracker, 'clear_status'):
+        if _current_progress_tracker and hasattr(
+            _current_progress_tracker, "clear_status"
+        ):
             _current_progress_tracker.clear_status()
 
 
@@ -75,7 +79,9 @@ def print_status_message(message: str, console: Optional[Console] = None) -> Non
     console.print(message)
 
 
-def connecting_to_server(host: str, port: int, console: Optional[Console] = None) -> None:
+def connecting_to_server(
+    host: str, port: int, console: Optional[Console] = None
+) -> None:
     """Show connecting to server status."""
     # Try to send to progress tracker first
     status(f"Connecting to Gerrit server {host}:{port}")
@@ -83,23 +89,45 @@ def connecting_to_server(host: str, port: int, console: Optional[Console] = None
     print_status_message(f"🌐 Connecting to Gerrit server {host}:{port}", console)
 
 
-def discovering_projects(host: str, console: Optional[Console] = None) -> None:
-    """Show discovering projects status."""
+def discovering_projects(
+    host: str, method: str = "", console: Optional[Console] = None
+) -> None:
+    """Show discovering projects status.
+
+    Args:
+        host: Gerrit server hostname
+        method: Discovery method (e.g., "HTTP", "SSH")
+        console: Optional Rich console instance
+    """
     # Try to send to progress tracker first
-    status(f"Discovering projects on {host}")
+    method_suffix = f" [{method.upper()}]" if method else ""
+    status(f"Discovering projects on {host}{method_suffix}")
     # Also show as standalone message
-    print_status_message(f"🔍 Discovering projects on {host}", console)
+    print_status_message(f"🔍 Discovering projects on {host}{method_suffix}", console)
 
 
-def projects_found(count: int, console: Optional[Console] = None) -> None:
-    """Show projects found status."""
+def projects_found(
+    count: int, method: str = "", console: Optional[Console] = None
+) -> None:
+    """Show projects found status.
+
+    Args:
+        count: Number of projects found
+        method: Discovery method (e.g., "HTTP", "SSH")
+        console: Optional Rich console instance
+    """
     # Try to send to progress tracker first
     status(f"Found {count} projects to process")
     # Also show as standalone message
     print_status_message(f"✅ Found {count} projects to process", console)
 
 
-def starting_clone(filtered_count: int, threads: int, skipped_count: int = 0, console: Optional[Console] = None) -> None:
+def starting_clone(
+    filtered_count: int,
+    threads: int,
+    skipped_count: int = 0,
+    console: Optional[Console] = None,
+) -> None:
     """Show starting clone operation status."""
     if skipped_count > 0:
         message = f"Cloning {filtered_count} active projects with {threads} workers (skipping {skipped_count} archived)"
@@ -110,6 +138,21 @@ def starting_clone(filtered_count: int, threads: int, skipped_count: int = 0, co
     status(message)
     # Also show as standalone message
     print_status_message(f"🚀 {message}...", console)
+
+
+def retrying_failed_clones(
+    failed_count: int, threads: int, console: Optional[Console] = None
+) -> None:
+    """Show retrying failed clones status.
+
+    Args:
+        failed_count: Number of failed clones to retry
+        threads: Number of worker threads for retry
+        console: Optional Rich console instance
+    """
+    message = f"Retrying {failed_count} failed clone(s) with {threads} workers"
+    status(message)
+    print_status_message(f"🔄 {message}...", console)
     # Add extra line separation before progress bar
     if console is None:
         console = Console(stderr=True)
@@ -132,7 +175,9 @@ def success_rate(rate: float, failed_count: int) -> None:
     status(f"{emoji} Success rate: {rate:.1f}%")
 
 
-def show_error_summary(console: Console, errors: list[str], warnings: list[str] | None = None) -> None:
+def show_error_summary(
+    console: Console, errors: list[str], warnings: list[str] | None = None
+) -> None:
     """Show error summary in a Rich panel at the end of execution.
 
     Args:
@@ -165,7 +210,9 @@ def show_error_summary(console: Console, errors: list[str], warnings: list[str] 
         summary_text = Text.from_markup("\n".join(content_lines))
         panel = Panel(
             summary_text,
-            title="[bold red]Issues Summary[/bold red]" if errors else "[bold yellow]Warnings Summary[/bold yellow]",
+            title="[bold red]Issues Summary[/bold red]"
+            if errors
+            else "[bold yellow]Warnings Summary[/bold yellow]",
             border_style="red" if errors else "yellow",
             padding=(1, 2),
         )
@@ -173,7 +220,9 @@ def show_error_summary(console: Console, errors: list[str], warnings: list[str] 
         console.print(panel)
 
 
-def show_final_results(console: Console, batch_result: Any, log_file_path: Optional[str] = None) -> None:
+def show_final_results(
+    console: Console, batch_result: Any, log_file_path: Optional[str] = None
+) -> None:
     """Show final results summary in a Rich panel.
 
     Args:
@@ -182,7 +231,7 @@ def show_final_results(console: Console, batch_result: Any, log_file_path: Optio
         log_file_path: Path to log file, if created
     """
     # Calculate duration
-    if hasattr(batch_result, 'started_at') and hasattr(batch_result, 'completed_at'):
+    if hasattr(batch_result, "started_at") and hasattr(batch_result, "completed_at"):
         duration = batch_result.completed_at - batch_result.started_at
         duration_str = f"{duration.total_seconds():.1f}s"
     else:
@@ -192,14 +241,16 @@ def show_final_results(console: Console, batch_result: Any, log_file_path: Optio
     content_lines = []
 
     # Summary statistics
-    content_lines.extend([
-        f"[bold]Duration:[/bold] {duration_str}",
-        f"[bold]Total Repositories:[/bold] {batch_result.total_count}",
-        f"[green]Successfully Cloned:[/green] {batch_result.success_count}",
-        f"[blue]Already Existed:[/blue] {getattr(batch_result, 'already_exists_count', 0)}",
-        f"[red]Failed:[/red] {batch_result.failed_count}",
-        f"[dim]Skipped:[/dim] {getattr(batch_result, 'skipped_count', 0)}",
-    ])
+    content_lines.extend(
+        [
+            f"[bold]Duration:[/bold] {duration_str}",
+            f"[bold]Total Repositories:[/bold] {batch_result.total_count}",
+            f"[green]Successfully Cloned:[/green] {batch_result.success_count}",
+            f"[blue]Already Existed:[/blue] {getattr(batch_result, 'already_exists_count', 0)}",
+            f"[red]Failed:[/red] {batch_result.failed_count}",
+            f"[dim]Skipped:[/dim] {getattr(batch_result, 'skipped_count', 0)}",
+        ]
+    )
 
     # Success rate
     if batch_result.total_count > 0:
@@ -212,7 +263,11 @@ def show_final_results(console: Console, batch_result: Any, log_file_path: Optio
 
     # Create panel
     title_color = "green" if batch_result.failed_count == 0 else "yellow"
-    title_text = "✅ Clone Completed Successfully" if batch_result.failed_count == 0 else "⚠️ Clone Completed with Issues"
+    title_text = (
+        "✅ Clone Completed Successfully"
+        if batch_result.failed_count == 0
+        else "⚠️ Clone Completed with Issues"
+    )
 
     summary_text = Text.from_markup("\n".join(content_lines))
     panel = Panel(
@@ -226,7 +281,9 @@ def show_final_results(console: Console, batch_result: Any, log_file_path: Optio
     console.print(panel)
 
 
-def handle_crash_display(console: Console, exception: Exception, log_file_path: Optional[str] = None) -> None:
+def handle_crash_display(
+    console: Console, exception: Exception, log_file_path: Optional[str] = None
+) -> None:
     """Display crash information in a tidy Rich panel.
 
     Args:
@@ -242,7 +299,7 @@ def handle_crash_display(console: Console, exception: Exception, log_file_path: 
 
     if tb:
         last_frame = tb[-1]
-        filename = last_frame.filename.split('/')[-1]
+        filename = last_frame.filename.split("/")[-1]
         crash_context = f"{last_frame.name}() at {filename}:{last_frame.lineno}"
 
     # Build crash content
@@ -288,7 +345,12 @@ class RichStatusManager:
             _current_progress_tracker = self.progress_tracker
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: object | None) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object | None,
+    ) -> None:
         """Exit context and restore previous tracker."""
         global _current_progress_tracker
         with _status_lock:
