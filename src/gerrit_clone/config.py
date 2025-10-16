@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from gerrit_clone.models import Config, RetryPolicy
+from gerrit_clone.models import Config, DiscoveryMethod, RetryPolicy
 
 
 class ConfigurationError(Exception):
@@ -38,6 +38,7 @@ class ConfigManager:
         ssh_identity_file: str | Path | None = None,
         path_prefix: str | Path | None = None,
         skip_archived: bool | None = None,
+        discovery_method: str | None = None,
         allow_nested_git: bool | None = None,
         nested_protection: bool | None = None,
         move_conflicting: bool | None = None,
@@ -73,6 +74,7 @@ class ConfigManager:
             ssh_identity_file: SSH private key file for authentication
             path_prefix: Base directory for clones
             skip_archived: Skip non-active repositories
+            discovery_method: Method for discovering projects (ssh/http/both)
             allow_nested_git: Permit nested git working trees
             nested_protection: Auto-add nested child paths to parent .git/info/exclude
             move_conflicting: Move conflicting files/directories in parent repos to [NAME].parent
@@ -116,7 +118,7 @@ class ConfigManager:
             ssh_identity_file=ssh_identity_file,
             path_prefix=path_prefix,
             skip_archived=skip_archived,
-
+            discovery_method=discovery_method,
             allow_nested_git=allow_nested_git,
             nested_protection=nested_protection,
             move_conflicting=move_conflicting,
@@ -293,7 +295,9 @@ class ConfigManager:
         if exit_on_error_str := (
             os.getenv("GERRIT_EXIT_ON_ERROR") or os.getenv("GERRIT_STOP_ON_FIRST_ERROR")
         ):
-            config["exit_on_error"] = self._parse_bool(exit_on_error_str, "GERRIT_EXIT_ON_ERROR")
+            config["exit_on_error"] = self._parse_bool(
+                exit_on_error_str, "GERRIT_EXIT_ON_ERROR"
+            )
 
     def _build_cli_config(self, **kwargs: Any) -> dict[str, Any]:
         """Build configuration dict from CLI arguments."""
@@ -337,6 +341,17 @@ class ConfigManager:
         # Handle ssh_identity_file conversion
         if "ssh_identity_file" in config_dict:
             config_dict["ssh_identity_file"] = Path(config_dict["ssh_identity_file"])
+
+        # Handle discovery_method conversion
+        if "discovery_method" in config_dict:
+            dm = config_dict["discovery_method"]
+            if isinstance(dm, str):
+                try:
+                    config_dict["discovery_method"] = DiscoveryMethod(dm.lower())
+                except ValueError:
+                    raise ConfigurationError(
+                        f"Invalid discovery_method '{dm}'. Must be one of: ssh, http, both"
+                    )
 
         # Smart port defaulting based on protocol
         use_https = config_dict.get("use_https", False)

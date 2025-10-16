@@ -18,7 +18,13 @@ from rich.text import Text
 from gerrit_clone import __version__
 from gerrit_clone.clone_manager import clone_repositories
 from gerrit_clone.config import ConfigurationError, load_config
+from gerrit_clone.error_codes import (
+    ExitCode,
+    exit_for_configuration_error,
+    DiscoveryError,
+)
 from gerrit_clone.file_logging import init_logging, cli_args_to_dict
+from gerrit_clone.models import DiscoveryMethod
 from gerrit_clone.rich_status import (
     create_status_manager,
     show_error_summary,
@@ -47,7 +53,7 @@ def version_callback(value: bool) -> None:
     """Show version information."""
     if value:
         console = Console()
-        console.print(f"gerrit-clone version [cyan]{__version__}[/cyan]")
+        console.print(f"🏷️ gerrit-clone version [cyan]{__version__}[/cyan]")
         raise typer.Exit()
 
 
@@ -143,7 +149,12 @@ def clone(
         help="Enable verbose SSH (-vvv) for troubleshooting authentication (single or few projects).",
         envvar="GERRIT_SSH_DEBUG",
     ),
-
+    discovery_method: str = typer.Option(
+        "ssh",
+        "--discovery-method",
+        help="Method for discovering projects: ssh (default), http (REST API only), or both (union of both methods with SSH metadata preferred)",
+        envvar="GERRIT_DISCOVERY_METHOD",
+    ),
     allow_nested_git: bool = typer.Option(
         True,
         "--allow-nested-git/--no-allow-nested-git",
@@ -338,7 +349,7 @@ def clone(
             console.print(
                 "[red]Error:[/red] --verbose and --quiet cannot be used together"
             )
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Prepare CLI arguments for logging
         cli_args = cli_args_to_dict(
@@ -390,6 +401,7 @@ def clone(
 
         # Set log_file_path for error handling compatibility
         from gerrit_clone.file_logging import get_default_log_path
+
         log_file_path = log_file if log_file else get_default_log_path(host)
 
         # Log version to file in GitHub Actions environment (file only, no console)
@@ -398,6 +410,23 @@ def clone(
                 file_logger.debug("gerrit-clone version %s", __version__)
             except Exception:
                 file_logger.warning("Version information not available")
+
+        # Parse discovery method
+        try:
+            discovery_method_enum = DiscoveryMethod(discovery_method.lower())
+        except ValueError:
+            console = Console()
+            console.print(
+                Panel(
+                    Text(
+                        f"Invalid discovery method '{discovery_method}'\nMust be one of: ssh, http, both",
+                        style="bold red",
+                    ),
+                    title="Configuration Error",
+                    border_style="red",
+                )
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Load and validate configuration
         try:
@@ -409,7 +438,6 @@ def clone(
                 ssh_identity_file=ssh_identity_file,
                 path_prefix=path_prefix,
                 skip_archived=skip_archived,
-
                 allow_nested_git=allow_nested_git,
                 nested_protection=nested_protection,
                 move_conflicting=move_conflicting,
@@ -431,31 +459,56 @@ def clone(
                 include_projects=include_project,
                 ssh_debug=ssh_debug,
                 exit_on_error=exit_on_error,
+                discovery_method=discovery_method_enum,
             )
         except ConfigurationError as e:
             if file_logger:
                 file_logger.error("Configuration error: %s", str(e))
-            console.print(f"[red]Configuration error:[/red] {e}")
             if error_collector and log_file_path:
                 error_collector.write_summary_to_file(log_file_path)
-            raise typer.Exit(1) from None
-
-
+            console = Console()
+            console.print(
+                Panel(
+                    Text(str(e), style="bold red"),
+                    title="Configuration Error",
+                    border_style="red",
+                )
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Show startup banner if not quiet
         if not quiet:
             _show_startup_banner(console, config)
 
         # Execute clone operation with Rich status integration
-        batch_result = clone_repositories(config)
+        try:
+            batch_result = clone_repositories(config)
+        except DiscoveryError as e:
+            console = Console()
+            console.print(
+                Panel(
+                    Text(
+                        f"{e.message}\n{e.details}" if e.details else str(e.message),
+                        style="bold red",
+                    ),
+                    title="Discovery Error",
+                    border_style="red",
+                )
+            )
+            raise typer.Exit(ExitCode.DISCOVERY_ERROR)
 
         # Show final results summary using Rich
         if not quiet:
-            show_final_results(console, batch_result, str(log_file_path) if log_file_path else None)
+            show_final_results(
+                console, batch_result, str(log_file_path) if log_file_path else None
+            )
 
         # Show error summary if there were issues
         if error_collector and not quiet:
-            errors = [record.message for record in error_collector.errors + error_collector.critical_errors]
+            errors = [
+                record.message
+                for record in error_collector.errors + error_collector.critical_errors
+            ]
             warnings = [record.message for record in error_collector.warnings]
             if errors or warnings:
                 show_error_summary(console, errors, warnings)
@@ -463,20 +516,28 @@ def clone(
         # Determine exit code based on results
         if batch_result.failed_count > 0:
             if file_logger:
-                file_logger.debug("Clone completed with %d failures", batch_result.failed_count)
-            exit_code = 1
+                file_logger.debug(
+                    "Clone completed with %d failures", batch_result.failed_count
+                )
+            exit_code = int(ExitCode.CLONE_ERROR)
         else:
             if file_logger:
                 file_logger.debug("Clone completed successfully")
-            exit_code = 0
+            exit_code = int(ExitCode.SUCCESS)
 
         # Optional cleanup
         if cleanup:
             from shutil import rmtree
+
             try:
                 if file_logger:
-                    file_logger.debug("Cleanup enabled - removing cloned directory: %s", config.path_prefix)
-                console.print(f"[yellow]🧹 Cleanup enabled - removing cloned directory: {config.path_prefix}[/yellow]")
+                    file_logger.debug(
+                        "Cleanup enabled - removing cloned directory: %s",
+                        config.path_prefix,
+                    )
+                console.print(
+                    f"[yellow]🧹 Cleanup enabled - removing cloned directory: {config.path_prefix}[/yellow]"
+                )
                 rmtree(config.path_prefix, ignore_errors=True)
                 if file_logger:
                     file_logger.debug("Cleanup completed successfully")
@@ -500,7 +561,7 @@ def clone(
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
-        raise typer.Exit(130) from None  # Standard exit code for SIGINT
+        raise typer.Exit(int(ExitCode.INTERRUPT)) from None
     except typer.Exit:
         # Re-raise typer.Exit exceptions without catching them as generic exceptions
         if error_collector and log_file_path:
@@ -520,15 +581,19 @@ def clone(
             last_frame = tb[-1]
             crash_file = last_frame.filename
             crash_line = last_frame.lineno or 0
-            crash_context = f"{last_frame.name}() at {crash_file.split('/')[-1]}:{crash_line}"
+            crash_context = (
+                f"{last_frame.name}() at {crash_file.split('/')[-1]}:{crash_line}"
+            )
 
         if file_logger:
-            file_logger.critical("Tool crashed in %s: %s", crash_context, str(e), exc_info=True)
+            file_logger.critical(
+                "Tool crashed in %s: %s", crash_context, str(e), exc_info=True
+            )
         if error_collector:
             error_collector.add_critical_error(
                 f"Tool crashed: {type(e).__name__}: {str(e)}",
                 context=f"function: {crash_context}",
-                exception=e
+                exception=e,
             )
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
@@ -538,13 +603,13 @@ def clone(
 
         if verbose:
             console.print_exception()
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from None
 
 
 def _show_startup_banner(console: Console, config: Any) -> None:
     """Show startup banner with configuration summary."""
     # Show version first
-    console.print(f"[bold]gerrit-clone[/bold] version [cyan]{__version__}[/cyan]")
+    console.print(f"🏷️ [bold]gerrit-clone[/bold] version [cyan]{__version__}[/cyan]")
     console.print()
 
     # Create summary text
@@ -568,14 +633,15 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     lines.extend(
         [
+            f"Discovery Method: [cyan]{str(getattr(config, 'discovery_method', DiscoveryMethod.SSH).value).upper()}[/cyan]",
             f"Skip Archived: [cyan]{config.skip_archived}[/cyan]",
             f"Allow Nested Git: [cyan]{getattr(config, 'allow_nested_git', False)}[/cyan]",
             f"Nested Protection: [cyan]{getattr(config, 'nested_protection', False)}[/cyan]",
             f"Move Conflicting: [cyan]{getattr(config, 'move_conflicting', True)}[/cyan]",
             f"Strict Host Check: [cyan]{config.strict_host_checking}[/cyan]",
-            f"Include Filter: [cyan]{', '.join(config.include_projects) if getattr(config,'include_projects', []) else '—'}[/cyan]",
-            f"SSH Debug: [cyan]{getattr(config,'ssh_debug', False)}[/cyan]",
-            f"Exit on Error: [cyan]{getattr(config,'exit_on_error', False)}[/cyan]",
+            f"Include Filter: [cyan]{', '.join(config.include_projects) if getattr(config, 'include_projects', []) else '—'}[/cyan]",
+            f"SSH Debug: [cyan]{getattr(config, 'ssh_debug', False)}[/cyan]",
+            f"Exit on Error: [cyan]{getattr(config, 'exit_on_error', False)}[/cyan]",
         ]
     )
 
@@ -667,11 +733,18 @@ def show_config(
         console.print(panel)
 
     except ConfigurationError as e:
-        console.print(f"[red]Configuration error:[/red] {e}")
-        raise typer.Exit(1) from None
+        console = Console()
+        console.print(
+            Panel(
+                Text(str(e), style="bold red"),
+                title="Configuration Error",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from None
 
 
 if __name__ == "__main__":

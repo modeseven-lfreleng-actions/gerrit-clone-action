@@ -22,7 +22,11 @@ else:
 
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project
-from gerrit_clone.pathing import check_path_conflicts, get_project_path, move_conflicting_path
+from gerrit_clone.pathing import (
+    check_path_conflicts,
+    get_project_path,
+    move_conflicting_path,
+)
 
 logger = get_logger(__name__)
 
@@ -139,6 +143,7 @@ class CloneWorker:
             status=CloneStatus.PENDING,
             path=target_path,
             started_at=started_at,
+            first_started_at=started_at,
         )
 
         try:
@@ -190,8 +195,12 @@ class CloneWorker:
                 result.status = CloneStatus.FAILED
                 result.error_message = f"Nested clone forbidden (ancestor git repo at {ancestor_repo.name})"
                 result.completed_at = datetime.now(UTC)
-                result.duration_seconds = (result.completed_at - started_at).total_seconds()
-                logger.error(f"❌ Nested clone blocked for {project.name} (ancestor={ancestor_repo.name}, allow_nested_git=False)")
+                result.duration_seconds = (
+                    result.completed_at - started_at
+                ).total_seconds()
+                logger.error(
+                    f"❌ Nested clone blocked for {project.name} (ancestor={ancestor_repo.name}, allow_nested_git=False)"
+                )
                 return result
 
             if ancestor_repo and allow_nested:
@@ -199,13 +208,19 @@ class CloneWorker:
                 try:
                     rel = ancestor_repo.relative_to(self.config.path_prefix)
                     result.nested_under = rel.as_posix()
-                    logger.debug(f"🧬 Nested repo detected early: {project.name} (parent={result.nested_under})")
+                    logger.debug(
+                        f"🧬 Nested repo detected early: {project.name} (parent={result.nested_under})"
+                    )
                 except Exception:
                     # Fallback to directory name
                     result.nested_under = ancestor_repo.name
-                    logger.debug(f"🧬 Nested repo detected early (fallback): {project.name} (parent={result.nested_under})")
+                    logger.debug(
+                        f"🧬 Nested repo detected early (fallback): {project.name} (parent={result.nested_under})"
+                    )
             elif depth > 0:
-                logger.debug(f"No early ancestor detected for candidate nested project {project.name} (depth={depth})")
+                logger.debug(
+                    f"No early ancestor detected for candidate nested project {project.name} (depth={depth})"
+                )
 
             # Check for path conflicts at the precise target
             is_nested = result.nested_under is not None
@@ -217,37 +232,54 @@ class CloneWorker:
                     result.duration_seconds = (
                         result.completed_at - started_at
                     ).total_seconds()
-                    logger.debug(f"✓ Repository {project.name} already exists - skipped")
+                    logger.debug(
+                        f"✓ Repository {project.name} already exists - skipped"
+                    )
                     return result
                 elif conflict == "incomplete_clone":
                     # Handle content conflict - could be incomplete clone or nested repo content from parent
                     if result.nested_under:
-                        logger.info(f"🧹 Replacing parent repository content with nested repository for {project.name}")
+                        logger.info(
+                            f"🧹 Replacing parent repository content with nested repository for {project.name}"
+                        )
                     else:
-                        logger.warning(f"🧹 Cleaning up incomplete clone for {project.name}")
+                        logger.warning(
+                            f"🧹 Cleaning up incomplete clone for {project.name}"
+                        )
                     try:
                         import shutil
+
                         shutil.rmtree(target_path)
-                        logger.debug(f"✓ Cleaned up incomplete clone directory: {target_path}")
+                        logger.debug(
+                            f"✓ Cleaned up incomplete clone directory: {target_path}"
+                        )
                     except Exception as cleanup_error:
                         result.status = CloneStatus.FAILED
-                        result.error_message = f"Failed to cleanup incomplete clone: {cleanup_error}"
+                        result.error_message = (
+                            f"Failed to cleanup incomplete clone: {cleanup_error}"
+                        )
                         result.completed_at = datetime.now(UTC)
                         result.duration_seconds = (
                             result.completed_at - started_at
                         ).total_seconds()
-                        logger.error(f"Cleanup failed for {project.name}: {cleanup_error}")
+                        logger.error(
+                            f"Cleanup failed for {project.name}: {cleanup_error}"
+                        )
                         return result
                     # Continue with normal clone after cleanup
                 elif conflict == "nested_file_conflict":
                     # Handle nested repo file conflict
-                    move_conflicting_enabled = getattr(self.config, "move_conflicting", True)
+                    move_conflicting_enabled = getattr(
+                        self.config, "move_conflicting", True
+                    )
                     if move_conflicting_enabled:
                         # Try to move the conflicting file/directory
                         try:
                             if move_conflicting_path(target_path, is_nested_repo=True):
                                 parent_name = result.nested_under or "parent"
-                                logger.warning(f"⚠️ Moved conflicting content in parent repository '{parent_name}' to allow cloning of nested repository [project]{project.name}[/project]")
+                                logger.warning(
+                                    f"⚠️ Moved conflicting content in parent repository '{parent_name}' to allow cloning of nested repository [project]{project.name}[/project]"
+                                )
                                 # Continue with normal clone after moving conflict
                             else:
                                 # Move failed, skip gracefully
@@ -258,8 +290,10 @@ class CloneWorker:
                                     result.completed_at - started_at
                                 ).total_seconds()
                                 parent_name = result.nested_under or "parent"
-                                logger.warning(f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
-                                             f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure (could not move)")
+                                logger.warning(
+                                    f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
+                                    f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure (could not move)"
+                                )
                                 return result
                         except Exception as move_error:
                             # Move failed with exception, skip gracefully
@@ -270,20 +304,26 @@ class CloneWorker:
                                 result.completed_at - started_at
                             ).total_seconds()
                             parent_name = result.nested_under or "parent"
-                            logger.warning(f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
-                                         f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure (move failed: {move_error})")
+                            logger.warning(
+                                f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
+                                f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure (move failed: {move_error})"
+                            )
                             return result
                     else:
                         # Move conflicting disabled, skip gracefully
                         result.status = CloneStatus.SKIPPED
-                        result.error_message = f"Skipped due to file conflict with parent repository"
+                        result.error_message = (
+                            f"Skipped due to file conflict with parent repository"
+                        )
                         result.completed_at = datetime.now(UTC)
                         result.duration_seconds = (
                             result.completed_at - started_at
                         ).total_seconds()
                         parent_name = result.nested_under or "parent"
-                        logger.warning(f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
-                                     f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure")
+                        logger.warning(
+                            f"⚠️ Skipping nested repository [project]{project.name}[/project]: "
+                            f"Parent repository '{parent_name}' contains a file that conflicts with nested directory structure"
+                        )
                         return result
                 else:
                     result.status = CloneStatus.FAILED
@@ -292,7 +332,9 @@ class CloneWorker:
                     result.duration_seconds = (
                         result.completed_at - started_at
                     ).total_seconds()
-                    logger.error(f"Path conflict for [project]{project.name}[/project]: {conflict}")
+                    logger.error(
+                        f"Path conflict for [project]{project.name}[/project]: {conflict}"
+                    )
                     return result
 
             # Ensure parent directories exist (safe due to dependency batching)
@@ -306,33 +348,49 @@ class CloneWorker:
                     exclude_file.parent.mkdir(parents=True, exist_ok=True)
                     existing_lines: list[str] = []
                     if exclude_file.exists():
-                        existing_lines = exclude_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        existing_lines = exclude_file.read_text(
+                            encoding="utf-8", errors="ignore"
+                        ).splitlines()
                     if str(rel_child) not in existing_lines:
                         with exclude_file.open("a", encoding="utf-8") as ef:
-                            ef.write(f"\n# auto-added to ignore nested repo\n{rel_child}\n")
-                        logger.debug(f"Added nested protection exclude entry for {project.name} under {result.nested_under}")
+                            ef.write(
+                                f"\n# auto-added to ignore nested repo\n{rel_child}\n"
+                            )
+                        logger.debug(
+                            f"Added nested protection exclude entry for {project.name} under {result.nested_under}"
+                        )
                     else:
-                        logger.debug(f"Nested protection exclude already present for {project.name}")
+                        logger.debug(
+                            f"Nested protection exclude already present for {project.name}"
+                        )
                 except Exception as e:
-                    logger.warning(f"Could not apply nested protection for {project.name}: {e}")
+                    logger.warning(
+                        f"Could not apply nested protection for {project.name}: {e}"
+                    )
 
             # Update status to cloning
             result.status = CloneStatus.CLONING
 
             # Instrumentation: mark potential nested candidate if depth > 0 and still no ancestor
             if depth > 0 and result.nested_under is None:
-                logger.debug(f"Nested candidate (no parent yet): {project.name} (will re-check before clone subprocess)")
+                logger.debug(
+                    f"Nested candidate (no parent yet): {project.name} (will re-check before clone subprocess)"
+                )
 
             # Perform clone with adaptive retry
             logger.debug(f"Starting clone execution for {project.name}")
             success = self._execute_adaptive_clone(project, target_path, result)
-            logger.debug(f"Clone execution completed for {project.name}, success: {success}")
+            logger.debug(
+                f"Clone execution completed for {project.name}, success: {success}"
+            )
 
             # Handle success/failure
             if success:
                 result.status = CloneStatus.SUCCESS
                 if ancestor_repo and allow_nested:
-                    logger.debug(f"📚 Nested clone succeeded: {project.name} (ancestor={ancestor_repo.name})")
+                    logger.debug(
+                        f"📚 Nested clone succeeded: {project.name} (ancestor={ancestor_repo.name})"
+                    )
             else:
                 result.status = CloneStatus.FAILED
                 if not result.error_message:
@@ -341,6 +399,7 @@ class CloneWorker:
         except Exception as e:
             result.status = CloneStatus.FAILED
             result.error_message = str(e)
+            # Log at error level for top-level clone failures
             logger.error(f"Failed to clone [project]{project.name}[/project]: {e}")
 
         finally:
@@ -375,7 +434,8 @@ class CloneWorker:
 
                 # Don't retry non-retryable errors
                 if not self._is_filesystem_error_retryable(error_msg):
-                    logger.debug(
+                    # Log at error level for final non-retryable failures
+                    logger.error(
                         f"Non-retryable error for {project.name}: {error_msg[:100]}..."
                     )
                     return False
@@ -384,13 +444,20 @@ class CloneWorker:
                 delay = self._calculate_adaptive_delay(attempt, error_msg)
 
                 if attempt < max_attempts:
+                    # Log at warning level for retryable failures (not final attempt)
                     logger.warning(
                         f"Retry clone {project.name} (attempt {attempt + 1}/{max_attempts}) after {delay:.2f}s: {error_msg[:100]}..."
                     )
                     time.sleep(delay)
+                else:
+                    # Final attempt failed - log at error level
+                    logger.error(
+                        f"Final retry failed for {project.name}: {error_msg[:100]}..."
+                    )
 
             except Exception as e:
                 result.error_message = str(e)
+                # Log at error level for unexpected errors during retry phase
                 logger.error(f"Unexpected error cloning {project.name}: {e}")
                 return False
 
@@ -579,7 +646,10 @@ class CloneWorker:
             pre_late_nested = result.nested_under
 
             # Late ancestor re-check: parent may have finished cloning after initial worker start
-            if getattr(self.config, "allow_nested_git", False) and result.nested_under is None:
+            if (
+                getattr(self.config, "allow_nested_git", False)
+                and result.nested_under is None
+            ):
                 self._late_nested_checks += 1
                 try:
                     # Re-run ancestor detection using the same logic as earlier
@@ -593,47 +663,75 @@ class CloneWorker:
                         except ValueError:
                             break
                         rel_str = rel.as_posix()
-                        if rel_str in (self._project_index or set()) and (current / ".git").is_dir():
+                        if (
+                            rel_str in (self._project_index or set())
+                            and (current / ".git").is_dir()
+                        ):
                             result.nested_under = rel_str
-                            logger.debug(f"Late ancestor detection: {project.name} nested under {rel_str}")
+                            logger.debug(
+                                f"Late ancestor detection: {project.name} nested under {rel_str}"
+                            )
                             # Apply nested protection if enabled and not already applied
                             if getattr(self.config, "nested_protection", False):
                                 try:
                                     exclude_file = current / ".git" / "info" / "exclude"
-                                    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+                                    exclude_file.parent.mkdir(
+                                        parents=True, exist_ok=True
+                                    )
                                     rel_child = target_path.relative_to(current)
                                     existing_lines: list[str] = []
                                     if exclude_file.exists():
-                                        existing_lines = exclude_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                                        existing_lines = exclude_file.read_text(
+                                            encoding="utf-8", errors="ignore"
+                                        ).splitlines()
                                     if str(rel_child) not in existing_lines:
-                                        with exclude_file.open("a", encoding="utf-8") as ef:
-                                            ef.write(f"\n# auto-added (late) to ignore nested repo\n{rel_child}\n")
-                                        logger.debug(f"🧬 Nested repo detected late: {project.name} (parent={result.nested_under})")
+                                        with exclude_file.open(
+                                            "a", encoding="utf-8"
+                                        ) as ef:
+                                            ef.write(
+                                                f"\n# auto-added (late) to ignore nested repo\n{rel_child}\n"
+                                            )
+                                        logger.debug(
+                                            f"🧬 Nested repo detected late: {project.name} (parent={result.nested_under})"
+                                        )
                                 except Exception as ne:
-                                    logger.debug(f"Late nested protection application failed for {project.name}: {ne}")
+                                    logger.debug(
+                                        f"Late nested protection application failed for {project.name}: {ne}"
+                                    )
                             break
                         if current == current.parent:
                             break
                         current = current.parent
                 except Exception as late_e:
-                    logger.debug(f"Late ancestor re-check failed for {project.name}: {late_e}")
-                if pre_late_nested is None and result.nested_under is None and project.name.count("/") > 0:
-                    logger.debug(f"No ancestor after late re-check: {project.name} (treat as top-level clone)")
+                    logger.debug(
+                        f"Late ancestor re-check failed for {project.name}: {late_e}"
+                    )
+                if (
+                    pre_late_nested is None
+                    and result.nested_under is None
+                    and project.name.count("/") > 0
+                ):
+                    logger.debug(
+                        f"No ancestor after late re-check: {project.name} (treat as top-level clone)"
+                    )
 
             # Execute git clone directly to target path - Git handles its own atomicity
             process_result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                encoding='utf-8',
-                errors='replace',
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.config.clone_timeout,
                 env=env,
                 cwd=self.config.path_prefix,
                 check=False,
             )
             # If SSH debug enabled and clone failed, log raw stderr/stdout (truncated) before analysis
-            if getattr(self.config, "ssh_debug", False) and process_result.returncode != 0:
+            if (
+                getattr(self.config, "ssh_debug", False)
+                and process_result.returncode != 0
+            ):
                 raw_stderr = (process_result.stderr or "").strip()
                 raw_stdout = (process_result.stdout or "").strip()
                 max_len = 1200
@@ -670,8 +768,13 @@ class CloneWorker:
 
                 # Determine if error is retryable
                 if self._is_retryable_clone_error(process_result):
+                    # Log at warning level for retryable errors (first phase)
+                    logger.warning(
+                        f"Retryable clone error for [project]{project.name}[/project]: {error_msg}"
+                    )
                     raise CloneError(error_msg)  # Will trigger retry
                 else:
+                    # Log at error level for non-retryable errors
                     logger.error(
                         f"Non-retryable clone error for [project]{project.name}[/project]: {error_msg}"
                     )
@@ -688,7 +791,9 @@ class CloneWorker:
         except Exception as e:
             error_msg = f"Unexpected clone error: {e}"
             result.error_message = error_msg
-            logger.error(f"Unexpected subprocess error for {project.name}: {e}")
+            # Log at warning level since this error will trigger retry logic
+            # Error level logging happens only after all retries are exhausted
+            logger.warning(f"Unexpected subprocess error for {project.name}: {e}")
             raise CloneError(error_msg)
 
     def _build_clone_command(self, project: Project, target_path: Path) -> list[str]:
@@ -780,8 +885,8 @@ class CloneWorker:
                     check=True,
                     capture_output=True,
                     text=True,
-                    encoding='utf-8',
-                    errors='replace',
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=10,
                     env=env,  # Use isolated environment
                 )
@@ -912,13 +1017,11 @@ class CloneWorker:
         # Common error patterns with enhanced debugging info
         if "Permission denied" in error_output:
             # Extract more context from SSH errors
-            ssh_user = getattr(self.config, 'ssh_user', 'git')
-            identity_file = getattr(self.config, 'ssh_identity_file', 'default')
+            ssh_user = getattr(self.config, "ssh_user", "git")
+            identity_file = getattr(self.config, "ssh_identity_file", "default")
             return f"Permission denied - SSH auth failed for {ssh_user}@{self.config.host}:{self.config.port} (key: {identity_file}) accessing {project_name}"
         elif "Host key verification failed" in error_output:
-            return (
-                f"Host key verification failed for {self.config.host} - run: ssh-keyscan -p {self.config.port} {self.config.host} >> ~/.ssh/known_hosts"
-            )
+            return f"Host key verification failed for {self.config.host} - run: ssh-keyscan -p {self.config.port} {self.config.host} >> ~/.ssh/known_hosts"
         elif "Connection refused" in error_output:
             return f"Connection refused - check if SSH service is running on {self.config.host}:{self.config.port}"
         elif "could not resolve hostname" in error_output.lower():

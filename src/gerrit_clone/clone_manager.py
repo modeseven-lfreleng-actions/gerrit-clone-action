@@ -12,10 +12,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
-from gerrit_clone.gerrit_api import fetch_gerrit_projects
-from gerrit_clone.logging import get_logger
+from gerrit_clone.logging import get_logger, suppress_console_logging
 from gerrit_clone.models import BatchResult, CloneResult, CloneStatus, Config, Project
 from gerrit_clone.progress import ProgressTracker, create_progress_tracker
+from gerrit_clone.unified_discovery import discover_projects
 from gerrit_clone.rich_status import (
     connecting_to_server,
     discovering_projects,
@@ -112,14 +112,20 @@ class CloneManager:
             sample_items = sorted(parent_children.items())[:5]
             logger.debug(f"Parent sample (up to 5): {sample_items}")
 
-        logger.debug(f"Starting bulk clone of {len(unique_projects)} projects (include filter applied)" if getattr(self.config, "include_projects", None) else f"Starting bulk clone of {len(unique_projects)} projects")
+        logger.debug(
+            f"Starting bulk clone of {len(unique_projects)} projects (include filter applied)"
+            if getattr(self.config, "include_projects", None)
+            else f"Starting bulk clone of {len(unique_projects)} projects"
+        )
 
         if self.progress_tracker:
             self.progress_tracker.start(unique_projects)
 
         try:
             # Sort projects by dependencies - this handles all parent/child relationships
-            dependency_ordered_projects = self._topological_sort_projects(unique_projects)
+            dependency_ordered_projects = self._topological_sort_projects(
+                unique_projects
+            )
 
             # Use dependency-aware processing to prevent conflicts
             return self._execute_dependency_aware_clone(dependency_ordered_projects)
@@ -150,7 +156,6 @@ class CloneManager:
 
         return unique_projects
 
-
     def _topological_sort_projects(self, projects: list[Project]) -> list[Project]:
         """Sort projects by dependencies using topological sort.
 
@@ -168,8 +173,8 @@ class CloneManager:
 
         # Build dependency graph
         dependencies: dict[str, str] = {}  # child -> parent (only immediate parent)
-        dependents: dict[str, set[str]] = {}    # parent -> set of children
-        in_degree: dict[str, int] = {}     # project -> number of dependencies
+        dependents: dict[str, set[str]] = {}  # parent -> set of children
+        in_degree: dict[str, int] = {}  # project -> number of dependencies
 
         # Initialize in_degree for all projects
         for name in project_names:
@@ -212,14 +217,18 @@ class CloneManager:
 
         # Verify all projects were processed
         if len(result) != len(projects):
-            remaining = [name for name in project_names if name not in {p.name for p in result}]
+            remaining = [
+                name for name in project_names if name not in {p.name for p in result}
+            ]
             logger.error(f"Topological sort failed - remaining projects: {remaining}")
             # Add remaining projects (shouldn't happen with valid hierarchies)
             for name in remaining:
                 result.append(project_map[name])
 
         dependency_count = sum(1 for p in result if "/" in p.name)
-        logger.debug(f"Dependency ordering complete: {len(result)} projects, {dependency_count} have dependencies")
+        logger.debug(
+            f"Dependency ordering complete: {len(result)} projects, {dependency_count} have dependencies"
+        )
 
         # Show sample of ordering for debugging
         if result:
@@ -228,7 +237,9 @@ class CloneManager:
 
         return result
 
-    def _create_dependency_batches(self, projects: list[Project]) -> list[list[Project]]:
+    def _create_dependency_batches(
+        self, projects: list[Project]
+    ) -> list[list[Project]]:
         """Create depth-based batches of projects for safe parallel cloning.
 
         Rationale:
@@ -261,16 +272,18 @@ class CloneManager:
             batches.append(group)
 
         # Log summary
-        logger.debug(f"Created {len(batches)} depth-based batches (min depth={min(depth_map.keys(), default=0)}, max depth={max(depth_map.keys(), default=0)})")
+        logger.debug(
+            f"Created {len(batches)} depth-based batches (min depth={min(depth_map.keys(), default=0)}, max depth={max(depth_map.keys(), default=0)})"
+        )
         for idx, batch in enumerate(batches[:5]):  # Show up to first 5 batches
             sample = [p.name for p in batch[:4]]
             if len(batch) > 4:
-                sample.append(f"... +{len(batch)-4} more")
-            logger.debug(f"Batch {idx+1} (depth={batch[0].name.count('/') if batch else 'n/a'}): {len(batch)} projects -> {sample}")
+                sample.append(f"... +{len(batch) - 4} more")
+            logger.debug(
+                f"Batch {idx + 1} (depth={batch[0].name.count('/') if batch else 'n/a'}): {len(batch)} projects -> {sample}"
+            )
 
         return batches
-
-
 
     def _get_disk_space_info(self) -> str:
         """Get disk space information for logging."""
@@ -309,7 +322,9 @@ class CloneManager:
         )
         return safe_count
 
-    def _execute_dependency_aware_clone(self, projects: list[Project]) -> list[CloneResult]:
+    def _execute_dependency_aware_clone(
+        self, projects: list[Project]
+    ) -> list[CloneResult]:
         """Execute clone operations with dependency-aware batching.
 
         This completely eliminates parent/child conflicts by processing
@@ -335,11 +350,13 @@ class CloneManager:
         for i, batch in enumerate(batches[:3]):  # Show first 3 batches
             sample_names = [p.name for p in batch[:5]]
             if len(batch) > 5:
-                sample_names.append(f"... +{len(batch)-5} more")
-            logger.debug(f"Batch {i+1} sample: {sample_names}")
+                sample_names.append(f"... +{len(batch) - 5} more")
+            logger.debug(f"Batch {i + 1} sample: {sample_names}")
 
         for batch_idx, batch in enumerate(batches):
-            logger.debug(f"🔄 Processing batch {batch_idx + 1}/{len(batches)} with {len(batch)} projects (sequential barrier before next batch)")
+            logger.debug(
+                f"🔄 Processing batch {batch_idx + 1}/{len(batches)} with {len(batch)} projects (sequential barrier before next batch)"
+            )
             # Mark parents in this batch (depth == 0 or any project with children)
             project_name_index: set[str] = getattr(self, "_project_name_index", set())
             batch_depth = batch[0].name.count("/") if batch else 0
@@ -348,15 +365,22 @@ class CloneManager:
                 prefix = pr.name + "/"
                 if any(cand.startswith(prefix) for cand in self._nested_candidates):
                     if pr.name in project_name_index:
-                        if pr.name not in self._nested_parent_usage and batch_depth == 0:
+                        if (
+                            pr.name not in self._nested_parent_usage
+                            and batch_depth == 0
+                        ):
                             # First time we see this parent (top-level batch)
-                            logger.debug(f"👪 Parent ready for nesting: {pr.name} (children pending)")
+                            logger.debug(
+                                f"👪 Parent ready for nesting: {pr.name} (children pending)"
+                            )
                         self._nested_parent_usage.add(pr.name)
 
             # Promote first few nested parents summary (only for top-level batch)
             if batch_depth == 0 and self._nested_parent_usage:
                 sample_parents = sorted(list(self._nested_parent_usage))[:5]
-                logger.debug(f"📂 Parent repositories prepared ({len(self._nested_parent_usage)}): {sample_parents}{' ...' if len(self._nested_parent_usage) > 5 else ''}")
+                logger.debug(
+                    f"📂 Parent repositories prepared ({len(self._nested_parent_usage)}): {sample_parents}{' ...' if len(self._nested_parent_usage) > 5 else ''}"
+                )
 
             # Execute this batch (parallel inside batch)
             batch_results = self._execute_bulk_clone(batch)
@@ -364,7 +388,9 @@ class CloneManager:
 
             # Wait for batch to finish fully (already implied by synchronous call)
             # Add explicit barrier logging for clarity
-            logger.debug(f"✅ Completed batch {batch_idx + 1}/{len(batches)} ({len(batch_results)} results)")
+            logger.debug(
+                f"✅ Completed batch {batch_idx + 1}/{len(batches)} ({len(batch_results)} results)"
+            )
             # Collect nested detections from results
             for r in batch_results:
                 if getattr(r, "nested_under", None):
@@ -375,8 +401,12 @@ class CloneManager:
                 failed_results = [r for r in batch_results if r.failed]
                 if failed_results:
                     failed_project = failed_results[0]
-                    logger.error(f"🛑 Stopping after batch {batch_idx + 1}: {failed_project.project.name} failed with: {failed_project.error_message}")
-                    logger.debug(f"📊 Processed {batch_idx + 1}/{len(batches)} batches before stopping")
+                    logger.error(
+                        f"🛑 Stopping after batch {batch_idx + 1}: {failed_project.project.name} failed with: {failed_project.error_message}"
+                    )
+                    logger.debug(
+                        f"📊 Processed {batch_idx + 1}/{len(batches)} batches before stopping"
+                    )
                     break
 
             # No artificial sleep; proceed immediately to next batch
@@ -396,7 +426,9 @@ class CloneManager:
                             f"(examples: {sample}{' ...' if detected > 5 else ''})"
                         )
                         # Undetected sample (potential missed nesting)
-                        undetected = sorted(list(self._nested_candidates - detected_set))
+                        undetected = sorted(
+                            list(self._nested_candidates - detected_set)
+                        )
                         if undetected:
                             undet_sample = undetected[:5]
                             logger.debug(
@@ -481,7 +513,9 @@ class CloneManager:
 
                         # Check for exit-on-error
                         if self.config.exit_on_error and result.failed:
-                            logger.error(f"🛑 Exiting on error: {project.name} failed with: {result.error_message}")
+                            logger.error(
+                                f"🛑 Exiting on error: {project.name} failed with: {result.error_message}"
+                            )
                             # Cancel remaining futures
                             for remaining_future in future_to_project:
                                 if not remaining_future.done():
@@ -491,14 +525,16 @@ class CloneManager:
                     except Exception as e:
                         logger.error(f"Unexpected error cloning {project.name}: {e}")
                         # Create failed result for exception
+                        now = datetime.now(UTC)
                         error_result = CloneResult(
                             project=project,
                             status=CloneStatus.FAILED,
                             path=self.config.path_prefix / project.name,
                             attempts=0,
                             error_message=str(e),
-                            started_at=datetime.now(UTC),
-                            completed_at=datetime.now(UTC),
+                            started_at=now,
+                            completed_at=now,
+                            first_started_at=now,
                         )
                         results.append(error_result)
 
@@ -507,7 +543,9 @@ class CloneManager:
 
                         # Check for exit-on-error on exceptions too
                         if self.config.exit_on_error:
-                            logger.error(f"🛑 Exiting on error: {project.name} failed with exception: {e}")
+                            logger.error(
+                                f"🛑 Exiting on error: {project.name} failed with exception: {e}"
+                            )
                             # Cancel remaining futures
                             for remaining_future in future_to_project:
                                 if not remaining_future.done():
@@ -527,14 +565,16 @@ class CloneManager:
                 # Create failed results for any incomplete projects
                 for future, project in future_to_project.items():
                     if not future.done():
+                        now = datetime.now(UTC)
                         error_result = CloneResult(
                             project=project,
                             status=CloneStatus.FAILED,
                             path=self.config.path_prefix / project.name,
                             attempts=0,
                             error_message=f"Operation timed out after {overall_timeout}s",
-                            started_at=datetime.now(UTC),
-                            completed_at=datetime.now(UTC),
+                            started_at=now,
+                            completed_at=now,
+                            first_started_at=now,
                         )
                         results.append(error_result)
 
@@ -557,12 +597,18 @@ class CloneManager:
         logger.debug(f"Starting clone task for project: {project.name}")
         logger.debug(f"Calling worker.clone_project for: {project.name}")
 
+        # Update status message to show current project being cloned
+        if self.progress_tracker:
+            self.progress_tracker.update_log_message(f"Cloning {project.name}...")
+
         # Create a new worker instance for this task (thread safety)
         # Pass project index to worker for accurate ancestor detection
         worker = CloneWorker(self.config, project_index=self._project_name_index)
         result = worker.clone_project(project)
 
-        logger.debug(f"Worker completed for {project.name} with status: {result.status}")
+        logger.debug(
+            f"Worker completed for {project.name} with status: {result.status}"
+        )
         return result
 
     def _log_project_result(self, result: CloneResult) -> None:
@@ -581,6 +627,7 @@ class CloneManager:
                 if result.error_message and len(result.error_message) > 100
                 else result.error_message
             )
+            # Log at error level to ensure failures are visible in summaries and external monitoring
             logger.error(
                 f"✗ Failed to clone {result.project.name} after {result.attempts} attempts: {error_summary}"
             )
@@ -610,7 +657,12 @@ def clone_repositories(config: Config) -> BatchResult:
             # Fetch projects from Gerrit
             logger.debug("Connecting to Gerrit server %s:%s", config.host, config.port)
             connecting_to_server(config.host, config.port)
-            projects, filter_stats = fetch_gerrit_projects(config)
+            projects, filter_stats = discover_projects(config)
+
+            # Display warnings if present
+            if "warnings" in filter_stats and filter_stats["warnings"]:
+                for warning in filter_stats["warnings"]:
+                    logger.warning(warning)
 
             if not projects:
                 logger.warning("No projects found to clone")
@@ -626,20 +678,101 @@ def clone_repositories(config: Config) -> BatchResult:
 
             # Log combined message about cloning
             if filter_stats["skipped"] > 0:
-                logger.debug("Cloning %d active projects with %d workers (skipping %d archived)",
-                            filter_stats['filtered'], config.effective_threads, filter_stats['skipped'])
-                starting_clone(filter_stats['filtered'], config.effective_threads, filter_stats['skipped'])
+                logger.debug(
+                    "Cloning %d active projects with %d workers (skipping %d archived)",
+                    filter_stats["filtered"],
+                    config.effective_threads,
+                    filter_stats["skipped"],
+                )
+                starting_clone(
+                    filter_stats["filtered"],
+                    config.effective_threads,
+                    filter_stats["skipped"],
+                )
             else:
-                logger.debug("Cloning %d projects with %d workers", filter_stats['filtered'], config.effective_threads)
-                starting_clone(filter_stats['filtered'], config.effective_threads)
+                logger.debug(
+                    "Cloning %d projects with %d workers",
+                    filter_stats["filtered"],
+                    config.effective_threads,
+                )
+                starting_clone(filter_stats["filtered"], config.effective_threads)
 
             # Create clone manager and execute
             manager = CloneManager(config, progress_tracker)
-            try:
-                results = manager.clone_projects(projects)
-            finally:
-                # Progress tracker cleanup handled by status manager context
-                pass
+
+            # Suppress console logging during clone to prevent interference with Rich Live display
+            # unless in verbose mode (users want to see all logs for debugging)
+            with suppress_console_logging(verbose=config.verbose):
+                try:
+                    results = manager.clone_projects(projects)
+                finally:
+                    # Progress tracker cleanup handled by status manager context
+                    pass
+
+            # Retry failed clones
+            failed_results = [r for r in results if r.failed]
+            if failed_results:
+                # Always use single thread for retry to avoid SSH agent contention
+                retry_threads = 1
+                logger.debug(
+                    f"Retrying {len(failed_results)} failed clone(s) with single thread to avoid SSH agent contention"
+                )
+                logger.debug(
+                    f"Retrying {len(failed_results)} failed clone(s) with single thread..."
+                )
+                retry_projects = [r.project for r in failed_results]
+
+                # Update the progress tracker for retry operations
+                if progress_tracker:
+                    progress_tracker.update_for_retry(retry_projects)
+                    progress_tracker.update_log_message(
+                        f"🔄 Retrying {len(failed_results)} failed clone(s)..."
+                    )
+
+                # Create a modified config with fewer threads using dataclass replace
+                from dataclasses import replace
+
+                retry_config = replace(config, threads=retry_threads)
+
+                # Reuse the existing manager and progress tracker for retries
+                manager.config = retry_config
+                retry_results = manager._execute_dependency_aware_clone(retry_projects)
+
+                # Update results - replace failed with retry results
+                failed_names = {r.project.name for r in failed_results}
+                final_results = [
+                    r for r in results if r.project.name not in failed_names
+                ] + retry_results
+
+                retry_succeeded = sum(1 for r in retry_results if r.success)
+                retry_still_failed = len(retry_results) - retry_succeeded
+
+                if retry_succeeded > 0:
+                    logger.debug(
+                        f"Retry successful: {retry_succeeded}/{len(failed_results)} "
+                        f"previously failed clone(s) now succeeded"
+                    )
+                    from rich.console import Console
+
+                    console = Console(stderr=True)
+                    if retry_still_failed == 0:
+                        console.print(
+                            f"[green]✓ {retry_succeeded} failed clone(s) succeeded on retry[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"[yellow]⚠ Retry results: {retry_succeeded} succeeded, {retry_still_failed} still failed[/yellow]"
+                        )
+                else:
+                    logger.warning(f"All {len(failed_results)} retry attempts failed")
+                    from rich.console import Console
+
+                    console = Console(stderr=True)
+                    console.print(
+                        f"[red]✗ All {len(failed_results)} retry attempts failed[/red]"
+                    )
+
+                results = final_results
 
             # Create batch result
             batch_result = BatchResult(
@@ -697,14 +830,25 @@ def _log_final_summary(batch_result: BatchResult, config: Config) -> None:
 
     if batch_result.failed_count == 0:
         # All successful
-        logger.debug("Clone completed successfully! %d repositories cloned in %s",
-                    batch_result.success_count, duration_str)
-        clone_completed(batch_result.success_count, batch_result.failed_count, duration_str)
+        logger.debug(
+            "Clone completed successfully! %d repositories cloned in %s",
+            batch_result.success_count,
+            duration_str,
+        )
+        clone_completed(
+            batch_result.success_count, batch_result.failed_count, duration_str
+        )
     else:
         # Some failures
-        logger.debug("Clone completed with errors: %d succeeded, %d failed in %s",
-                    batch_result.success_count, batch_result.failed_count, duration_str)
-        clone_completed(batch_result.success_count, batch_result.failed_count, duration_str)
+        logger.debug(
+            "Clone completed with errors: %d succeeded, %d failed in %s",
+            batch_result.success_count,
+            batch_result.failed_count,
+            duration_str,
+        )
+        clone_completed(
+            batch_result.success_count, batch_result.failed_count, duration_str
+        )
 
     # Show success rate with Rich status
     if batch_result.total_count > 0:
@@ -716,7 +860,7 @@ def _log_final_summary(batch_result: BatchResult, config: Config) -> None:
     if batch_result.failed_count > 0 and not config.quiet:
         failed_results = [r for r in batch_result.results if r.failed]
         logger.debug(
-            "Failed projects: %s", ', '.join([r.project.name for r in failed_results])
+            "Failed projects: %s", ", ".join([r.project.name for r in failed_results])
         )
 
         logger.debug("=== Clone Summary ===")
@@ -730,7 +874,9 @@ def _log_final_summary(batch_result: BatchResult, config: Config) -> None:
             logger.debug("Failed projects:")
             for result in failed_results:
                 logger.debug(
-                    "  - %s: %s", result.project.name, result.error_message or 'Unknown error'
+                    "  - %s: %s",
+                    result.project.name,
+                    result.error_message or "Unknown error",
                 )
 
         # Set appropriate exit code for CI/CD

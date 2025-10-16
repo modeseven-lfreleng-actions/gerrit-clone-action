@@ -38,27 +38,26 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Software Development :: Version Control :: Git",
     "Topic :: System :: Systems Administration",
     "Topic :: Utilities",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
-    "typer>=0.15.1,<0.16.0",
-    "rich>=13.9.4,<14.0.0",
+    "typer>=0.19.2,<0.20.0",
+    "rich>=14.2.0,<15.0.0",
     "httpx>=0.28.1,<0.29.0",
-    "pyyaml>=6.0.2,<7.0.0",
+    "pyyaml>=6.0.3,<7.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3.4,<9.0.0",
-    "pytest-cov>=6.0.0,<7.0.0",
-    "pytest-mock>=3.14.0,<4.0.0",
-    "pytest-asyncio>=0.25.0,<0.26.0",
-    "types-PyYAML>=6.0.12,<7.0.0",
+    "pytest>=8.4.2,<9.0.0",
+    "pytest-cov>=6.3.0,<7.0.0",
+    "pytest-mock>=3.15.1,<4.0.0",
+    "pytest-asyncio>=0.25.3,<0.26.0",
+    "types-PyYAML>=6.0.12.20250915,<7.0.0",
 ]
 
 [project.urls]
@@ -119,13 +118,13 @@ exclude = [
 # Development environment configuration
 [tool.hatch.envs.default]
 dependencies = [
-    "pytest>=8.3.4",
-    "pytest-cov>=6.0.0",
-    "pytest-mock>=3.14.0",
-    "pytest-asyncio>=0.25.0",
-    "types-PyYAML>=6.0.12",
-    "mypy>=1.17.1",
-    "ruff>=0.12.12",
+    "pytest>=8.4.2",
+    "pytest-cov>=6.3.0",
+    "pytest-mock>=3.15.1",
+    "pytest-asyncio>=0.25.3",
+    "types-PyYAML>=6.0.12.20250915",
+    "mypy>=1.18.2",
+    "ruff>=0.14.0",
     "pre-commit>=4.0.0",
 ]
 
@@ -248,7 +247,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=20",
+    "--cov-fail-under=35",
 ]
 testpaths = ["tests"]
 markers = [
@@ -331,11 +330,11 @@ reportUnsupportedDunderAll = "error"
 dev = [
     "hatch-vcs>=0.5.0",
     "hatchling>=1.27.0",
-    "mypy>=1.18.1",
+    "mypy>=1.18.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.25.3",
     "pytest-cov>=6.3.0",
     "pytest-httpx>=0.35.0",
-    "pytest-mock>=3.15.0",
+    "pytest-mock>=3.15.1",
     "types-pyyaml>=6.0.12.20250915",
 ]
