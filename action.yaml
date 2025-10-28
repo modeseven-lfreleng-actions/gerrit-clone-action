@@ -84,6 +84,10 @@ inputs:
     description: "Use HTTPS for cloning instead of SSH"
     required: false
     default: "false"
+  discovery-method:
+    description: "Discovery method: ssh (default), http (REST API), or both"
+    required: false
+    default: "ssh"
   keep-remote-protocol:
     description: "Preserve original protocol for remote (default: SSH)"
     required: false
@@ -352,6 +356,15 @@ runs:
           cmd="$cmd --https"
         else
           cmd="$cmd --ssh"
+        fi
+
+        # Add discovery method (auto-select http when using https if explicit)
+        if [ "${{ inputs.use-https }}" = "true" ] && \
+          [ "${{ inputs.discovery-method }}" = "ssh" ]; then
+          cmd="$cmd --discovery-method 'http'"
+        elif [ "${{ inputs.discovery-method }}" != "ssh" ]; then
+          # Use explicitly specified discovery method
+          cmd="$cmd --discovery-method '${{ inputs.discovery-method }}'"
         fi
 
         if [ "${{ inputs.keep-remote-protocol }}" = "true" ]; then
