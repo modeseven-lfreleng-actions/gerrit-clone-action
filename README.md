@@ -355,6 +355,12 @@ jobs:
           GIT_PASSWORD: ${{ secrets.GERRIT_TOKEN }}
 ```
 
+> **Note:** When using `use-https: true`, the action automatically sets
+> `discovery-method: http` to use the Gerrit REST API for project discovery.
+> This is necessary because SSH discovery (the default) requires SSH access on
+> port 29418, which is not available when using HTTPS. You can override this
+> behavior by explicitly setting the `discovery-method` input.
+
 ### Nested Repositories with Conflict Resolution
 
 ```yaml
