@@ -116,28 +116,50 @@ class UnifiedDiscovery:
 
         Returns:
             Tuple of (projects, stats)
+
+        Raises:
+            DiscoveryError: If SSH discovery fails
         """
         logger.debug("Discovering projects via SSH")
-        projects, stats = fetch_gerrit_projects_ssh(self.config)
+        try:
+            projects, stats = fetch_gerrit_projects_ssh(self.config)
 
-        stats["discovery_method"] = "ssh"  # type: ignore[assignment]
-        stats["warnings"] = []  # type: ignore[assignment]
+            stats["discovery_method"] = "ssh"  # type: ignore[assignment]
+            stats["warnings"] = []  # type: ignore[assignment]
 
-        return projects, stats
+            return projects, stats
+        except Exception as e:
+            logger.error(f"SSH discovery failed: {e}")
+            raise DiscoveryError(
+                message="SSH discovery failed",
+                details=str(e),
+                original_exception=e,
+            ) from e
 
     def _discover_http(self) -> tuple[list[Project], dict[str, Any]]:
         """Discover projects via HTTP only.
 
         Returns:
             Tuple of (projects, stats)
+
+        Raises:
+            DiscoveryError: If HTTP discovery fails
         """
         logger.debug("Discovering projects via HTTP")
-        projects, stats = fetch_gerrit_projects(self.config)
+        try:
+            projects, stats = fetch_gerrit_projects(self.config)
 
-        stats["discovery_method"] = "http"  # type: ignore[assignment]
-        stats["warnings"] = []  # type: ignore[assignment]
+            stats["discovery_method"] = "http"  # type: ignore[assignment]
+            stats["warnings"] = []  # type: ignore[assignment]
 
-        return projects, stats
+            return projects, stats
+        except Exception as e:
+            logger.error(f"HTTP discovery failed: {e}")
+            raise DiscoveryError(
+                message="HTTP discovery failed",
+                details=str(e),
+                original_exception=e,
+            ) from e
 
     def _discover_both(self) -> tuple[list[Project], dict[str, Any]]:
         """Discover projects via both methods and compare.
