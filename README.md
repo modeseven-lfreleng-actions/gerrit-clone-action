@@ -420,50 +420,50 @@ jobs:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `host` | Yes | | Gerrit server hostname |
-| `port` | No | `29418` | Gerrit SSH port |
-| `base-url` | No | | Base URL for Gerrit API (defaults to <https://HOST>) |
-| `ssh-user` | No | | SSH username for clone operations |
-| `ssh-private-key` | No | | SSH private key content for authentication |
-| `path-prefix` | No | `.` | Base directory for clone hierarchy |
-| `skip-archived` | No | `true` | Skip archived and inactive repositories |
-| `include-project` | No | | Restrict cloning to specific project(s) (comma-separated) |
-| `ssh-debug` | No | `false` | Enable verbose SSH (-vvv) for troubleshooting |
-| `allow-nested-git` | No | `true` | Allow nested git working trees |
-| `nested-protection` | No | `true` | Auto-add nested child repo paths to parent .git/info/exclude |
-| `move-conflicting` | No | `false` | Move conflicting files/directories in parent repos to [NAME].parent |
-| `exit-on-error` | No | `false` | Exit when first error occurs |
-| `threads` | No | auto | Number of concurrent clone threads |
-| `depth` | No | | Create shallow clone with given depth |
-| `branch` | No | | Clone specific branch instead of default |
-| `use-https` | No | `false` | Use HTTPS for cloning instead of SSH |
-| `keep-remote-protocol` | No | `false` | Keep original clone protocol for remote |
-| `strict-host` | No | `true` | SSH strict host key checking |
-| `clone-timeout` | No | `600` | Timeout per clone operation in seconds |
-| `retry-attempts` | No | `3` | Max retry attempts per repository |
-| `retry-base-delay` | No | `2.0` | Base delay for retry backoff in seconds |
-| `retry-factor` | No | `2.0` | Exponential backoff factor for retries |
-| `retry-max-delay` | No | `30.0` | Max retry delay in seconds |
-| `manifest-filename` | No | `clone-manifest.json` | Output manifest filename |
-| `config-file` | No | | Configuration file path (YAML or JSON) |
-| `verbose` | No | `false` | Enable verbose/debug output |
-| `quiet` | No | `false` | Suppress all output except errors |
-| `log-file` | No | | Custom log file path |
-| `disable-log-file` | No | `false` | Disable creation of log file |
-| `log-level` | No | `DEBUG` | File logging level |
+| Input                  | Required | Default               | Description                                                         |
+| ---------------------- | -------- | --------------------- | ------------------------------------------------------------------- |
+| `host`                 | Yes      |                       | Gerrit server hostname                                              |
+| `port`                 | No       | `29418`               | Gerrit SSH port                                                     |
+| `base-url`             | No       |                       | Base URL for Gerrit API (defaults to <https://HOST>)                |
+| `ssh-user`             | No       |                       | SSH username for clone operations                                   |
+| `ssh-private-key`      | No       |                       | SSH private key content for authentication                          |
+| `path-prefix`          | No       | `.`                   | Base directory for clone hierarchy                                  |
+| `skip-archived`        | No       | `true`                | Skip archived and inactive repositories                             |
+| `include-project`      | No       |                       | Restrict cloning to specific project(s) (comma-separated)           |
+| `ssh-debug`            | No       | `false`               | Enable verbose SSH (-vvv) for troubleshooting                       |
+| `allow-nested-git`     | No       | `true`                | Allow nested git working trees                                      |
+| `nested-protection`    | No       | `true`                | Auto-add nested child repo paths to parent .git/info/exclude        |
+| `move-conflicting`     | No       | `false`               | Move conflicting files/directories in parent repos to [NAME].parent |
+| `exit-on-error`        | No       | `false`               | Exit when first error occurs                                        |
+| `threads`              | No       | auto                  | Number of concurrent clone threads                                  |
+| `depth`                | No       |                       | Create shallow clone with given depth                               |
+| `branch`               | No       |                       | Clone specific branch instead of default                            |
+| `use-https`            | No       | `false`               | Use HTTPS for cloning instead of SSH                                |
+| `keep-remote-protocol` | No       | `false`               | Keep original clone protocol for remote                             |
+| `strict-host`          | No       | `true`                | SSH strict host key checking                                        |
+| `clone-timeout`        | No       | `600`                 | Timeout per clone operation in seconds                              |
+| `retry-attempts`       | No       | `3`                   | Max retry attempts per repository                                   |
+| `retry-base-delay`     | No       | `2.0`                 | Base delay for retry backoff in seconds                             |
+| `retry-factor`         | No       | `2.0`                 | Exponential backoff factor for retries                              |
+| `retry-max-delay`      | No       | `30.0`                | Max retry delay in seconds                                          |
+| `manifest-filename`    | No       | `clone-manifest.json` | Output manifest filename                                            |
+| `config-file`          | No       |                       | Configuration file path (YAML or JSON)                              |
+| `verbose`              | No       | `false`               | Enable verbose/debug output                                         |
+| `quiet`                | No       | `false`               | Suppress all output except errors                                   |
+| `log-file`             | No       |                       | Custom log file path                                                |
+| `disable-log-file`     | No       | `false`               | Disable creation of log file                                        |
+| `log-level`            | No       | `DEBUG`               | File logging level                                                  |
 
 <!-- markdownlint-enable MD013 -->
 
 ### Action Outputs
 
-| Output | Description |
-|--------|-------------|
+| Output          | Description                               |
+| --------------- | ----------------------------------------- |
 | `manifest-path` | Path to the generated clone manifest file |
-| `success-count` | Number of cloned repositories |
-| `failure-count` | Number of failed clone attempts |
-| `total-count` | Total number of repositories processed |
+| `success-count` | Number of cloned repositories             |
+| `failure-count` | Number of failed clone attempts           |
+| `total-count`   | Total number of repositories processed    |
 
 ## SSH Configuration
 
@@ -476,11 +476,11 @@ The following SSH authentication options are available across all interfaces:
 
 <!-- markdownlint-disable MD013 -->
 
-| Option | CLI | Environment | Action | Description |
-|--------|-----|-------------|--------|-------------|
-| SSH User | `-u` | `GERRIT_SSH_USER` | `ssh-user` | SSH username |
-| SSH Key | `-i` (file) | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Private key |
-| Host Check | `--strict-host` | `GERRIT_STRICT_HOST` | `strict-host` | Key check |
+| Option     | CLI             | Environment              | Action                      | Description  |
+| ---------- | --------------- | ------------------------ | --------------------------- | ------------ |
+| SSH User   | `-u`            | `GERRIT_SSH_USER`        | `ssh-user`                  | SSH username |
+| SSH Key    | `-i` (file)     | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Private key  |
+| Host Check | `--strict-host` | `GERRIT_STRICT_HOST`     | `strict-host`               | Key check    |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -667,19 +667,19 @@ it easier to handle errors in automation and CI/CD pipelines:
 
 <!-- markdownlint-disable MD013 -->
 
-| Exit Code | Description | Common Causes | Resolution |
-| --------- | ----------- | ------------- | ---------- |
-| **0** | Success | All repositories cloned | N/A |
-| **1** | General Error | Unexpected operational failure | Check logs |
-| **2** | Configuration Error | Invalid or missing settings | Verify inputs |
-| **3** | Discovery Error | Failed to discover projects | Check network and API |
-| **4** | Gerrit Connection Error | SSH auth or connection failed | Verify SSH keys |
-| **5** | Network Error | Network connectivity issues | Check connection |
-| **6** | Repository Error | Git operation failed | Verify permissions |
-| **7** | Clone Error | Clone operations failed | Check access |
-| **8** | Validation Error | Input validation failed | Check parameters |
-| **9** | Filesystem Error | Filesystem access issues | Check disk space |
-| **130** | Interrupted | Cancelled by user (Ctrl+C) | N/A |
+| Exit Code | Description             | Common Causes                  | Resolution            |
+| --------- | ----------------------- | ------------------------------ | --------------------- |
+| **0**     | Success                 | All repositories cloned        | N/A                   |
+| **1**     | General Error           | Unexpected operational failure | Check logs            |
+| **2**     | Configuration Error     | Invalid or missing settings    | Verify inputs         |
+| **3**     | Discovery Error         | Failed to discover projects    | Check network and API |
+| **4**     | Gerrit Connection Error | SSH auth or connection failed  | Verify SSH keys       |
+| **5**     | Network Error           | Network connectivity issues    | Check connection      |
+| **6**     | Repository Error        | Git operation failed           | Verify permissions    |
+| **7**     | Clone Error             | Clone operations failed        | Check access          |
+| **8**     | Validation Error        | Input validation failed        | Check parameters      |
+| **9**     | Filesystem Error        | Filesystem access issues       | Check disk space      |
+| **130**   | Interrupted             | Cancelled by user (Ctrl+C)     | N/A                   |
 
 <!-- markdownlint-enable MD013 -->
 
