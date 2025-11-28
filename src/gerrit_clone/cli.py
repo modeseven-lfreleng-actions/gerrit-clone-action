@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,13 +26,25 @@ from gerrit_clone.error_codes import (
     DiscoveryError,
 )
 from gerrit_clone.file_logging import init_logging, cli_args_to_dict
-from gerrit_clone.models import DiscoveryMethod
+from gerrit_clone.github_api import (
+    GitHubAPI,
+    GitHubAPIError,
+    GitHubAuthError,
+    get_default_org_or_user,
+)
+from gerrit_clone.mirror_manager import (
+    MirrorManager,
+    MirrorBatchResult,
+    filter_projects_by_hierarchy,
+)
+from gerrit_clone.models import DiscoveryMethod, RetryPolicy
 from gerrit_clone.rich_status import (
     create_status_manager,
     show_error_summary,
     show_final_results,
     handle_crash_display,
 )
+from gerrit_clone.unified_discovery import discover_projects
 
 
 def _is_github_actions_context() -> bool:
@@ -41,10 +55,30 @@ def _is_github_actions_context() -> bool:
     )
 
 
+def _format_version_string(command: str = "", styled: bool = True) -> str:
+    """Format version string with consistent styling.
+
+    Args:
+        command: Optional command name to include (e.g., "mirror")
+        styled: Whether to include Rich markup styling
+
+    Returns:
+        Formatted version string
+    """
+    if styled:
+        if command:
+            return f"🏷️  [bold]gerrit-clone {command}[/bold] version [cyan]{__version__}[/cyan]"
+        return f"🏷️  gerrit-clone version [cyan]{__version__}[/cyan]"
+    else:
+        if command:
+            return f"🏷️  gerrit-clone {command} version {__version__}"
+        return f"🏷️  gerrit-clone version {__version__}"
+
+
 # Show version information when --help is used
 if "--help" in sys.argv:
     try:
-        print(f"🏷️ gerrit-clone version {__version__}")
+        print(_format_version_string(styled=False))
     except Exception:
         print("⚠️ gerrit-clone version information not available")
 
@@ -53,7 +87,7 @@ def version_callback(value: bool) -> None:
     """Show version information."""
     if value:
         console = Console()
-        console.print(f"🏷️ gerrit-clone version [cyan]{__version__}[/cyan]")
+        console.print(_format_version_string())
         raise typer.Exit()
 
 
@@ -609,7 +643,7 @@ def clone(
 def _show_startup_banner(console: Console, config: Any) -> None:
     """Show startup banner with configuration summary."""
     # Show version first
-    console.print(f"🏷️ [bold]gerrit-clone[/bold] version [cyan]{__version__}[/cyan]")
+    console.print(_format_version_string())
     console.print()
 
     # Create summary text
@@ -656,6 +690,332 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     console.print(panel)
     console.print()
+
+
+@app.command(name="mirror")
+def mirror(
+    server: str = typer.Option(
+        ...,
+        "--server",
+        help="Gerrit server hostname",
+        envvar="GERRIT_HOST",
+    ),
+    org: str | None = typer.Option(
+        None,
+        "--org",
+        help=(
+            "Target GitHub organization for mirrored content "
+            "(if not specified, user's primary org/account will be used)"
+        ),
+        envvar="GITHUB_ORG",
+    ),
+    projects: str | None = typer.Option(
+        None,
+        "--projects",
+        help=(
+            "Filter operations to a subset of the Gerrit project "
+            "hierarchy (comma-separated, e.g., 'ccsdk, oom')"
+        ),
+        envvar="GERRIT_PROJECTS",
+    ),
+    path: Path = typer.Option(
+        Path("/tmp/gerrit-mirror"),
+        "--path",
+        help="Local filesystem folder/path for cloned Gerrit projects",
+        envvar="GERRIT_MIRROR_PATH",
+        file_okay=False,
+        resolve_path=True,
+    ),
+    recreate: bool = typer.Option(
+        False,
+        "--recreate",
+        help="Delete and recreate any pre-existing remote GitHub repositories",
+        envvar="GERRIT_MIRROR_RECREATE",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Overwrite local Git repositories at the target filesystem path",
+        envvar="GERRIT_MIRROR_OVERWRITE",
+    ),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        "-p",
+        help="Gerrit port (default: 29418 for SSH)",
+        envvar="GERRIT_PORT",
+        min=1,
+        max=65535,
+    ),
+    ssh_user: str | None = typer.Option(
+        None,
+        "--ssh-user",
+        "-u",
+        help="SSH username for Gerrit clone operations",
+        envvar="GERRIT_SSH_USER",
+    ),
+    ssh_identity_file: Path | None = typer.Option(
+        None,
+        "--ssh-private-key",
+        "-i",
+        help="SSH private key file for authentication",
+        envvar="GERRIT_SSH_PRIVATE_KEY",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    threads: int | None = typer.Option(
+        None,
+        "--threads",
+        "-t",
+        help="Number of concurrent operations (default: auto)",
+        envvar="GERRIT_THREADS",
+        min=1,
+    ),
+    github_token: str | None = typer.Option(
+        None,
+        "--github-token",
+        help=(
+            "GitHub personal access token "
+            "(default: GITHUB_TOKEN environment variable)"
+        ),
+        envvar="GITHUB_TOKEN",
+    ),
+    manifest_filename: str = typer.Option(
+        "mirror-manifest.json",
+        "--manifest-filename",
+        help="Output manifest filename",
+        envvar="GERRIT_MIRROR_MANIFEST",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose/debug output",
+        envvar="GERRIT_VERBOSE",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress all output except errors",
+        envvar="GERRIT_QUIET",
+    ),
+) -> None:
+    """Mirror repositories from a Gerrit server to GitHub.
+
+    This command discovers projects on a Gerrit server, clones them locally,
+    and mirrors them to GitHub repositories. Gerrit project hierarchies
+    (e.g., ccsdk/apps) are transformed to GitHub-compatible names
+    (e.g., ccsdk-apps).
+
+    Examples:
+
+        # Mirror all projects to a GitHub org
+        gerrit-clone mirror --server gerrit.onap.org --org myorg
+
+        # Mirror specific projects
+        gerrit-clone mirror --server gerrit.onap.org --org myorg \\
+          --projects "ccsdk, oom, cps"
+
+        # Recreate existing GitHub repos
+        gerrit-clone mirror --server gerrit.onap.org --org myorg \\
+          --recreate --overwrite
+    """
+    console = Console(stderr=True)
+
+    try:
+        # Validate mutually exclusive options
+        if verbose and quiet:
+            console.print(
+                "[red]Error:[/red] --verbose and --quiet cannot "
+                "be used together"
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
+        # Show startup banner
+        console.print(_format_version_string(command="mirror"))
+        console.print()
+
+        # Initialize GitHub API
+        if not quiet:
+            console.print("🔑 Authenticating with GitHub...")
+
+        try:
+            github_api = GitHubAPI(token=github_token)
+        except GitHubAuthError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
+        # Determine target org/user
+        if org is None:
+            if not quiet:
+                console.print(
+                    "ℹ️ No organization specified, "
+                    "using default from GitHub token..."
+                )
+            org, is_org = get_default_org_or_user(github_api)
+            if not quiet:
+                org_type = "organization" if is_org else "user account"
+                console.print(f"✓ Using {org_type}: [cyan]{org}[/cyan]")
+        else:
+            if not quiet:
+                console.print(
+                    f"✓ Using specified organization: [cyan]{org}[/cyan]"
+                )
+
+        # Parse project filters
+        project_filters: list[str] = []
+        if projects:
+            project_filters = [
+                p.strip() for p in projects.split(",") if p.strip()
+            ]
+            if not quiet:
+                console.print(
+                    f"📋 Project filters: "
+                    f"[cyan]{', '.join(project_filters)}[/cyan]"
+                )
+
+        # Build Gerrit configuration
+        from gerrit_clone.models import Config
+
+        config = Config(
+            host=server,
+            port=port or 29418,
+            ssh_user=ssh_user,
+            ssh_identity_file=ssh_identity_file,
+            path_prefix=path,
+            threads=threads,
+            skip_archived=True,
+            strict_host_checking=True,
+            use_https=False,
+            retry_policy=RetryPolicy(),
+        )
+
+        if not quiet:
+            console.print(
+                f"🌐 Connecting to Gerrit: [cyan]{server}[/cyan]"
+            )
+
+        # Discover projects
+        all_projects, discovery_stats = discover_projects(config)
+
+        if not all_projects:
+            console.print("[yellow]No projects found on Gerrit server[/yellow]")
+            raise typer.Exit(0)
+
+        # Filter projects by hierarchy if specified
+        if project_filters:
+            projects_to_mirror = filter_projects_by_hierarchy(
+                all_projects, project_filters
+            )
+        else:
+            projects_to_mirror = all_projects
+
+        if not projects_to_mirror:
+            console.print(
+                "[yellow]No projects matched the specified filters[/yellow]"
+            )
+            raise typer.Exit(0)
+
+        if not quiet:
+            console.print(
+                f"📦 Found [cyan]{len(projects_to_mirror)}[/cyan] "
+                f"projects to mirror"
+            )
+            console.print()
+
+        # Create mirror manager
+        mirror_manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org=org,
+            recreate=recreate,
+            overwrite=overwrite,
+        )
+
+        # Start mirroring
+        started_at = datetime.now(UTC)
+        if not quiet:
+            console.print("🚀 Starting mirror operation...")
+
+        results = mirror_manager.mirror_projects(projects_to_mirror)
+
+        completed_at = datetime.now(UTC)
+
+        # Create batch result
+        batch_result = MirrorBatchResult(
+            results=results,
+            started_at=started_at,
+            completed_at=completed_at,
+            github_org=org,
+            gerrit_host=server,
+        )
+
+        # Write manifest
+        manifest_path = path / manifest_filename
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(manifest_path, "w") as f:
+            json.dump(batch_result.to_dict(), f, indent=2)
+
+        if not quiet:
+            console.print()
+            console.print(
+                f"✓ Manifest written to: [cyan]{manifest_path}[/cyan]"
+            )
+
+        # Show summary
+        if not quiet:
+            console.print()
+            console.print("[bold]Mirror Summary[/bold]")
+            console.print(f"  Total: {batch_result.total_count}")
+            console.print(
+                f"  [green]Succeeded: {batch_result.success_count}[/green]"
+            )
+            console.print(
+                f"  [red]Failed: {batch_result.failed_count}[/red]"
+            )
+            console.print(
+                f"  [yellow]Skipped: {batch_result.skipped_count}[/yellow]"
+            )
+            console.print(
+                f"  Duration: {batch_result.duration_seconds:.1f}s"
+            )
+
+        # Close GitHub API client
+        github_api.close()
+
+        # Exit with appropriate code
+        if batch_result.failed_count > 0:
+            raise typer.Exit(ExitCode.CLONE_ERROR)
+        else:
+            raise typer.Exit(0)
+
+    except GitHubAPIError as e:
+        console.print(f"[red]GitHub API Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(ExitCode.GENERAL_ERROR)
+    except DiscoveryError as e:
+        console.print(f"[red]Discovery Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(ExitCode.DISCOVERY_ERROR)
+    except ConfigurationError as e:
+        console.print(f"[red]Configuration Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Mirror operation cancelled by user[/yellow]")
+        raise typer.Exit(ExitCode.INTERRUPT)
+    except Exception as e:
+        console.print(f"[red]Unexpected Error:[/red] {e}")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(ExitCode.GENERAL_ERROR)
 
 
 @app.command(name="config")
