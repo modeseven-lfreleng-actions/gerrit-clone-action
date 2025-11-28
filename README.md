@@ -19,6 +19,8 @@ reliability, speed, and CI/CD compatibility.
   pools (up to 32 workers)
 - **Hierarchy Preservation**: Maintains complete Gerrit project folder
   structure without flattening
+- **GitHub Mirroring**: Mirror Gerrit repositories to GitHub organizations
+  with automatic name transformation
 - **Robust Retry Logic**: Exponential backoff with jitter for transient
   network and server failures
 - **SSH Integration**: Full SSH agent, identity file, and config support
@@ -58,18 +60,26 @@ uv run gerrit-clone --host gerrit.example.org
 
 ## CLI Usage
 
-### Basic Examples
+### Commands
+
+The tool provides two main commands:
+
+- **`clone`**: Clone all repositories from a Gerrit server
+- **`mirror`**: Mirror repositories from a Gerrit server to GitHub
+- **`config`**: Show effective configuration from all sources
+
+### Clone Command Examples
 
 Clone all active repositories from a Gerrit server:
 
 ```bash
-gerrit-clone --host gerrit.example.org
+gerrit-clone clone --host gerrit.example.org
 ```
 
 Clone to a specific directory with custom thread count:
 
 ```bash
-gerrit-clone --host gerrit.example.org \
+gerrit-clone clone --host gerrit.example.org \
   --path-prefix ./repositories \
   --threads 8
 ```
@@ -77,7 +87,7 @@ gerrit-clone --host gerrit.example.org \
 Clone with shallow depth and specific branch:
 
 ```bash
-gerrit-clone --host gerrit.example.org \
+gerrit-clone clone --host gerrit.example.org \
   --depth 10 \
   --branch main \
   --threads 16
@@ -86,16 +96,113 @@ gerrit-clone --host gerrit.example.org \
 Include archived repositories and use custom SSH key:
 
 ```bash
-gerrit-clone --host gerrit.example.org \
+gerrit-clone clone --host gerrit.example.org \
   --include-archived \
   --ssh-user myuser \
   --ssh-private-key ~/.ssh/gerrit_rsa
 ```
 
-### Command-Line Options
+### Mirror Command Examples
+
+Mirror all repositories from Gerrit to a GitHub organization:
+
+```bash
+gerrit-clone mirror --server gerrit.onap.org --org modeseven-onap
+```
+
+Mirror specific projects with hierarchical filtering:
+
+```bash
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --path /tmp/modeseven-onap \
+  --projects "ccsdk, oom, cps"
+```
+
+Delete and recreate existing GitHub repositories and overwrite local clones:
+
+```bash
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --recreate \
+  --overwrite
+```
+
+**Note on Project Hierarchies**: When specifying projects like `ccsdk`, all
+sub-projects (e.g., `ccsdk/apps`, `ccsdk/features`) are automatically
+included. GitHub repository names replace slashes with hyphens:
+`ccsdk/features/test` becomes `ccsdk-features-test`.
+
+**GitHub Authentication**: Set the `GITHUB_TOKEN` environment variable with a
+personal access token that has the required permissions:
+
+```bash
+export GITHUB_TOKEN=github_pat_your_token_here
+gerrit-clone mirror --server gerrit.example.org --org your-org
+```
+
+**Token Requirements**:
+
+- **Classic Token**: Scopes: `repo`, `delete_repo`
+- **Fine-grained Token**: Permissions:
+  - Contents (Read and Write)
+  - Administration (Read and Write)
+  - Metadata (Read access, automatic)
+
+### Complete Mirror Example
+
+Here's a complete example showing the full workflow with expected output:
+
+```bash
+# Set GitHub token (get from https://github.com/settings/tokens)
+# Required scopes: repo, delete_repo
+export GITHUB_TOKEN="github_pat_XXXXXXXX"
+
+# Mirror specific projects with recreation
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --path /tmp/modeseven-onap \
+  --projects "ccsdk, oom, cps" \
+  --recreate \
+  --overwrite
+```
+
+**Expected Output**:
 
 ```text
-Usage: gerrit-clone [OPTIONS]
+🏷️  gerrit-clone mirror version 0.1.11
+
+🔑 Authenticating with GitHub...
+✓ Using specified organization: modeseven-onap
+📋 Project filters: ccsdk, oom, cps
+🌐 Connecting to Gerrit: gerrit.onap.org
+🔍 Discovering projects on gerrit.onap.org [SSH]
+✅ Found 393 projects to process
+📦 Found 19 projects to mirror
+
+🚀 Starting mirror operation...
+
+✓ Manifest written to: /tmp/modeseven-onap/mirror-manifest.json
+
+Mirror Summary
+  Total: 19
+  Succeeded: 19
+  Failed: 0
+  Skipped: 0
+  Duration: 231.9s
+```
+
+The `--recreate` flag deletes and recreates existing GitHub repositories for a
+clean mirror. Use `--overwrite` to also re-clone from Gerrit. See the manifest
+file for detailed per-repository results.
+
+### Clone Command Options
+
+```text
+Usage: gerrit-clone clone [OPTIONS]
 
 Options:
   -h, --host TEXT                 Gerrit server hostname [required]
@@ -137,7 +244,8 @@ Options:
                                   [default: 2.0]
   --retry-factor FLOAT            Exponential backoff factor [default: 2.0]
   --retry-max-delay FLOAT         Max retry delay in seconds [default: 30.0]
-  --manifest-filename TEXT        Output manifest filename [default: clone-manifest.json]
+  --manifest-filename TEXT        Output manifest filename
+                                  [default: clone-manifest.json]
   -c, --config-file PATH          Configuration file path (YAML or JSON)
   --cleanup / --no-cleanup        Remove cloned repositories (path-prefix) after
                                   run completes (success or failure)
@@ -148,6 +256,38 @@ Options:
   -v, --verbose                   Enable verbose/debug output
   -q, --quiet                     Suppress all output except errors
   --version                       Show version information
+  --help                          Show this message and exit
+```
+
+### Mirror Command Options
+
+```text
+Usage: gerrit-clone mirror [OPTIONS]
+
+Options:
+  --server TEXT                   Gerrit server hostname [required]
+  --org TEXT                      Target GitHub organization for mirrored
+                                  content (if not specified, defaults to
+                                  user's primary org/account)
+  --projects TEXT                 Filter operations to a subset of the Gerrit
+                                  project hierarchy (comma-separated, e.g.,
+                                  'ccsdk, oom')
+  --path PATH                     Local filesystem folder/path for cloned
+                                  Gerrit projects [default: /tmp/gerrit-mirror]
+  --recreate                      Delete and recreate any pre-existing remote
+                                  GitHub repositories
+  --overwrite                     Overwrite local Git repositories at the
+                                  target filesystem path
+  -p, --port INTEGER              Gerrit port [default: 29418 for SSH]
+  -u, --ssh-user TEXT             SSH username for Gerrit clone operations
+  -i, --ssh-private-key PATH      SSH private key file for authentication
+  -t, --threads INTEGER           Number of concurrent operations (default: auto)
+  --github-token TEXT             GitHub personal access token (default:
+                                  GITHUB_TOKEN environment variable)
+  --manifest-filename TEXT        Output manifest filename
+                                  [default: mirror-manifest.json]
+  -v, --verbose                   Enable verbose/debug output
+  -q, --quiet                     Suppress all output except errors
   --help                          Show this message and exit
 ```
 
@@ -208,6 +348,165 @@ Or JSON format `~/.config/gerrit-clone/config.json`:
 
 Configuration precedence: CLI arguments > Environment variables > Config file >
 Defaults
+
+## GitHub Mirroring
+
+The `mirror` command enables synchronizing Gerrit repositories to GitHub,
+transforming hierarchical project structures into GitHub-compatible
+repository names.
+
+### How It Works
+
+1. **Discovery**: Discovers projects from the specified Gerrit server
+2. **Filtering**: Optionally filters to specific project hierarchies
+3. **Name Transformation**: Converts Gerrit paths to GitHub names
+   (`ccsdk/features` → `ccsdk-features`)
+4. **Cloning**: Creates local mirror clones from Gerrit
+5. **GitHub Creation**: Creates repositories in the target GitHub organization
+6. **Pushing**: Pushes complete repository history to GitHub
+
+### Hierarchical Project Filtering
+
+When you specify a project name like `ccsdk`, the mirror command
+automatically includes all sub-projects in the hierarchy:
+
+- `ccsdk` (exact match)
+- `ccsdk/apps` (child)
+- `ccsdk/features` (child)
+- `ccsdk/features/test` (grandchild)
+
+This hierarchical filtering ensures the tool mirrors complete project
+families together.
+
+### Name Transformation
+
+GitHub does not support forward slashes in repository names, so the tool
+transforms Gerrit project paths:
+
+| Gerrit Project Name   | GitHub Repository Name |
+| --------------------- | ---------------------- |
+| `ccsdk`               | `ccsdk`                |
+| `ccsdk/apps`          | `ccsdk-apps`           |
+| `ccsdk/features`      | `ccsdk-features`       |
+| `ccsdk/features/test` | `ccsdk-features-test`  |
+
+### Authentication
+
+GitHub mirroring requires a personal access token with appropriate
+permissions:
+
+1. Create a token at <https://github.com/settings/tokens>
+2. Required permissions:
+
+   **For Classic Tokens**:
+   - `repo` (full control of private repositories)
+   - `delete_repo` (delete repositories) - **Required for `--recreate`**
+   - `admin:org` (for organization repos) - Optional but recommended
+
+   **For Fine-grained Tokens** (Recommended):
+   - Contents: **Read and Write**
+   - Administration: **Read and Write** - **Required for `--recreate`**
+   - Metadata: **Read access** (automatically included)
+
+3. Set the `GITHUB_TOKEN` environment variable:
+
+```bash
+export GITHUB_TOKEN=github_pat_your_token_here
+```
+
+### Mirror Behavior
+
+**Default Behavior** (without flags):
+
+- Skips GitHub repositories that already exist
+- Skips local repositories that already exist
+- Creates new GitHub repositories as needed
+- Clones from Gerrit if local path does not exist
+
+**With `--recreate` flag**:
+
+- Deletes and recreates existing GitHub repositories (fresh start)
+- Still skips local clones if they exist
+
+**With `--overwrite` flag**:
+
+- Removes and re-clones local repositories
+- Still skips existing GitHub repositories unless `--recreate` is also used
+
+**With both `--recreate` and `--overwrite`**:
+
+- Removes and re-clones all local repositories
+- Deletes and recreates all GitHub repositories (complete refresh)
+
+### Examples
+
+Basic mirror to an organization:
+
+```bash
+export GITHUB_TOKEN=ghp_your_token_here
+gerrit-clone mirror --server gerrit.onap.org --org modeseven-onap
+```
+
+Mirror specific projects with custom local path:
+
+```bash
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --path /tmp/modeseven-onap \
+  --projects "ccsdk, oom, cps"
+```
+
+Force-update all existing repositories:
+
+```bash
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --recreate \
+  --overwrite
+```
+
+Mirror using custom SSH settings:
+
+```bash
+gerrit-clone mirror \
+  --server gerrit.onap.org \
+  --org modeseven-onap \
+  --ssh-user myuser \
+  --ssh-private-key ~/.ssh/gerrit_key \
+  --threads 8
+```
+
+### Mirror Output Manifest
+
+The mirror command generates a JSON manifest file
+(`mirror-manifest.json` by default) with complete operation details:
+
+```json
+{
+  "version": "1.0",
+  "generated_at": "2025-01-15T10:30:00Z",
+  "github_org": "modeseven-onap",
+  "gerrit_host": "gerrit.onap.org",
+  "total": 150,
+  "succeeded": 148,
+  "failed": 0,
+  "skipped": 2,
+  "duration_s": 1234.5,
+  "results": [
+    {
+      "gerrit_project": "ccsdk/apps",
+      "github_name": "ccsdk-apps",
+      "github_url": "https://github.com/modeseven-onap/ccsdk-apps",
+      "status": "success",
+      "local_path": "/tmp/modeseven-onap/ccsdk/apps",
+      "duration_s": 12.3,
+      "attempts": 1
+    }
+  ]
+}
+```
 
 ## Nested Repository Support
 
