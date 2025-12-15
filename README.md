@@ -691,6 +691,8 @@ jobs:
 
 ### Nested Repositories with Conflict Resolution
 
+<!-- markdownlint-disable MD013 -->
+
 ```yaml
 name: Complete Repository Mining
 on: [workflow_dispatch]
@@ -723,6 +725,8 @@ jobs:
           # Count moved conflicts
           find complete-clone -name "*.parent" | wc -l | xargs echo "Conflicts resolved:"
 ```
+
+<!-- markdownlint-enable MD013 -->
 
 ### Configuration File Example
 
