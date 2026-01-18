@@ -62,11 +62,12 @@ uv run gerrit-clone --host gerrit.example.org
 
 ### Commands
 
-The tool provides four main commands:
+The tool provides five main commands:
 
 - **`clone`**: Clone all repositories from a Gerrit server
 - **`refresh`**: Refresh local content cloned from a Gerrit server
 - **`mirror`**: Mirror repositories from a Gerrit server to GitHub
+- **`reset`**: Remove all repositories from a GitHub organization
 - **`config`**: Show effective configuration from all sources
 
 ### Clone Command Examples
@@ -340,6 +341,104 @@ Mirror Summary
 The `--recreate` flag deletes and recreates existing GitHub repositories for a
 clean mirror. Use `--overwrite` to also re-clone from Gerrit. See the manifest
 file for detailed per-repository results.
+
+### Reset Command Examples
+
+Remove all repositories from a GitHub organization (with safety prompts):
+
+```bash
+# By default, excludes automation PRs from counts
+gerrit-clone reset --org my-test-org
+```
+
+Include automation PRs (dependabot, pre-commit.ci, etc.) in counts:
+
+```bash
+gerrit-clone reset --org my-test-org --include-automation-prs
+```
+
+Compare local Gerrit clone with remote GitHub before deletion:
+
+```bash
+gerrit-clone reset --org my-test-org \
+  --path /tmp/gerrit-mirror \
+  --compare
+```
+
+Delete immediately without confirmation (DANGEROUS!):
+
+```bash
+gerrit-clone reset --org my-test-org --no-confirm
+```
+
+**⚠️ WARNING: This operation is DESTRUCTIVE and IRREVERSIBLE!**
+
+The `reset` command will:
+
+1. List all repositories in the organization with PR/issue counts
+2. Optionally compare with local Gerrit clone (`--compare` flag)
+3. Prompt for unique confirmation hash (unless `--no-confirm`)
+4. Permanently delete all repositories
+
+**Safety Features:**
+
+- Displays comprehensive table with repo names, open PRs, and open issues
+- **Excludes automation PRs by default** (dependabot, pre-commit.ci,
+  renovate, github-actions, allcontributors)
+- Requires unique hash based on organization state (prevents accidental
+  deletion)
+- Optional local/remote synchronization comparison
+- Clear warnings about data loss
+
+**GitHub Token Requirements:**
+
+The `reset` command requires a **Classic Personal Access Token** with the
+following scopes:
+
+- `repo` (full control of private repositories)
+- `delete_repo` (delete repositories)
+- `read:org` (read organization data)
+
+**⚠️ Important:** Fine-grained tokens are generally NOT supported for the
+`reset` command because they may not provide the required repository
+permissions (including deletion) across targeted repositories and
+organizations. Use a classic Personal Access Token with the scopes below.
+
+To create a classic token:
+
+1. Go to <https://github.com/settings/tokens>
+2. Click "Generate new token" → "Generate new token (classic)"
+3. Select the required scopes: `repo`, `delete_repo`, `read:org`
+4. Set a token expiry date
+5. Copy the token and set it as an environment variable:
+
+```bash
+export GITHUB_TOKEN="ghp_your_classic_token_here"
+gerrit-clone reset --org my-test-org
+```
+
+### Reset Command Options
+
+**Required:**
+
+- `--org TEXT`: GitHub organization to reset (delete all repositories)
+
+**Optional:**
+
+- `--path DIRECTORY`: Local Gerrit clone folder hierarchy (default: current
+  directory)
+- `--compare`: Compare local Gerrit clone with remote GitHub repositories
+  before deletion
+- `--github-token TEXT`: GitHub personal access token (or use
+  `GITHUB_TOKEN` env var)
+- `--include-automation-prs`: Include automation PRs (dependabot,
+  pre-commit.ci, etc.) in PR counts (default: excluded)
+- `--no-confirm`: Skip confirmation prompt and delete immediately
+- `--verbose` / `-v`: Enable verbose output
+
+> **Note:** By default, the tool excludes automation PRs from tools like
+> dependabot, pre-commit.ci, renovate, github-actions, and allcontributors.
+> Use `--include-automation-prs` to include them.
 
 ### Clone Command Options
 

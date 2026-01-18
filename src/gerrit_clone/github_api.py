@@ -136,21 +136,8 @@ class GitHubAPI:
         try:
             response = self.client.request(method, url, **kwargs)
 
-            if response.status_code == 401:
-                raise GitHubAuthError(
-                    "Authentication failed. Check your GitHub token."
-                )
-            elif response.status_code == 404:
-                raise GitHubNotFoundError(f"Resource not found: {endpoint}")
-            elif response.status_code == 403:
-                if "rate limit" in response.text.lower():
-                    raise GitHubRateLimitError("GitHub API rate limit exceeded")
-                raise GitHubAPIError(f"Forbidden: {response.text}")
-            elif response.status_code >= 400:
-                raise GitHubAPIError(
-                    f"GitHub API error {response.status_code}: "
-                    f"{response.text}"
-                )
+            # Handle errors using shared method
+            self._handle_response_errors(response, endpoint)
 
             response.raise_for_status()
 
@@ -171,6 +158,147 @@ class GitHubAPI:
 
         except httpx.HTTPError as e:
             raise GitHubAPIError(f"HTTP error: {e}") from e
+
+    def _handle_response_errors(self, response: httpx.Response, endpoint: str) -> None:
+        """
+        Handle HTTP response errors and raise appropriate exceptions.
+
+        Uses GitHub's official rate limit headers for reliable detection:
+        - X-RateLimit-Remaining: Number of requests remaining
+        - Retry-After: Seconds to wait before retrying
+        Falls back to text matching only as a last resort.
+
+        Args:
+            response: HTTP response object
+            endpoint: API endpoint for error messages
+
+        Raises:
+            GitHubAuthError: For 401 authentication errors
+            GitHubNotFoundError: For 404 not found errors
+            GitHubRateLimitError: For 403 rate limit errors
+            GitHubAPIError: For other API errors
+        """
+        if response.status_code == 401:
+            raise GitHubAuthError(
+                "Authentication failed. Check your GitHub token."
+            )
+        elif response.status_code == 404:
+            raise GitHubNotFoundError(f"Resource not found: {endpoint}")
+        elif response.status_code == 403:
+            # Check for rate limiting using official GitHub headers
+            rate_limit_remaining = response.headers.get("X-RateLimit-Remaining")
+            retry_after = response.headers.get("Retry-After")
+
+            # Primary rate limit check: X-RateLimit-Remaining is "0"
+            if rate_limit_remaining == "0":
+                raise GitHubRateLimitError("GitHub API rate limit exceeded")
+
+            # Secondary rate limit check: Retry-After header present
+            if retry_after:
+                raise GitHubRateLimitError(
+                    f"GitHub API rate limit exceeded. Retry after {retry_after} seconds"
+                )
+
+            # Fallback: check response text (less reliable)
+            if "rate limit" in response.text.lower():
+                raise GitHubRateLimitError("GitHub API rate limit exceeded")
+
+            raise GitHubAPIError(f"Forbidden: {response.text}")
+        elif response.status_code >= 400:
+            raise GitHubAPIError(
+                f"GitHub API error {response.status_code}: {response.text}"
+            )
+
+    def _request_paginated(
+        self,
+        method: str,
+        endpoint: str,
+        per_page: int = 100,
+        max_pages: int | None = None,
+        **kwargs: Any,
+    ) -> list[Any]:
+        """
+        Make paginated API requests and return all results.
+
+        Handles GitHub's Link header pagination to fetch all pages of results.
+        Based on the pagination implementation from dependamerge.
+
+        Args:
+            method: HTTP method (usually GET)
+            endpoint: API endpoint (without base URL)
+            per_page: Number of items per page (max 100)
+            max_pages: Optional maximum number of pages to fetch
+            **kwargs: Additional arguments for httpx.request
+
+        Returns:
+            List of all items from all pages
+
+        Raises:
+            GitHubAPIError: For API errors
+        """
+        all_items: list[Any] = []
+        page = 1
+
+        while True:
+            # Add pagination params - create a copy to avoid mutating caller's dict
+            original_params = kwargs.get("params") or {}
+            params = dict(original_params)
+            params["per_page"] = per_page
+            params["page"] = page
+            kwargs["params"] = params
+
+            # Make request
+            url = f"{self.base_url}{endpoint}"
+            logger.debug(f"GitHub API {method} {url} (page {page})")
+
+            try:
+                response = self.client.request(method, url, **kwargs)
+
+                # Handle errors using shared method
+                self._handle_response_errors(response, endpoint)
+
+                response.raise_for_status()
+
+                # Parse JSON
+                try:
+                    data = response.json()
+                except ValueError as e:
+                    logger.warning(
+                        f"Failed to parse JSON response from {url}: {e}"
+                    )
+                    break
+
+                # If no data or not a list, we're done
+                if not data:
+                    break
+                if not isinstance(data, list):
+                    logger.warning(
+                        f"Expected list response from {url}, got {type(data)}"
+                    )
+                    break
+
+                # Add items to result
+                all_items.extend(data)
+
+                # Check if we've hit max_pages
+                if max_pages and page >= max_pages:
+                    logger.debug(f"Reached max_pages limit: {max_pages}")
+                    break
+
+                # Check Link header for next page
+                link_header = response.headers.get("Link", "")
+                if 'rel="next"' not in link_header:
+                    logger.debug(f"No more pages (total pages: {page})")
+                    break
+
+                page += 1
+
+            except httpx.HTTPError as e:
+                raise GitHubAPIError(f"HTTP error: {e}") from e
+
+        logger.debug(f"Fetched {len(all_items)} total items across {page} page(s)")
+        return all_items
+
 
     def get_authenticated_user(self) -> dict[str, Any]:
         """Get the authenticated user information.

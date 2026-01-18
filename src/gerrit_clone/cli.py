@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -38,6 +39,7 @@ from gerrit_clone.mirror_manager import (
     MirrorManager,
     filter_projects_by_hierarchy,
 )
+from gerrit_clone.reset_manager import ResetManager
 from gerrit_clone.models import DiscoveryMethod, RefreshBatchResult, RetryPolicy
 from gerrit_clone.rich_status import (
     handle_crash_display,
@@ -1378,6 +1380,162 @@ def mirror(
         console.print(f"[red]Unexpected Error:[/red] {e}")
         if verbose:
             console.print_exception()
+        raise typer.Exit(ExitCode.GENERAL_ERROR)
+
+
+@app.command()
+def reset(
+    org: str = typer.Option(
+        ...,
+        "--org",
+        help="GitHub organization to reset (delete all repositories)",
+        envvar="GITHUB_ORG",
+    ),
+    path: Path = typer.Option(
+        Path("."),
+        "--path",
+        help="Local Gerrit clone folder hierarchy (default: current directory)",
+        envvar="GERRIT_CLONE_PATH",
+        file_okay=False,
+        resolve_path=True,
+    ),
+    compare: bool = typer.Option(
+        False,
+        "--compare",
+        help="Compare local Gerrit clone with remote GitHub repositories before deletion",
+    ),
+    github_token: str | None = typer.Option(
+        None,
+        "--github-token",
+        help="GitHub personal access token (default: GITHUB_TOKEN environment variable)",
+        envvar="GITHUB_TOKEN",
+    ),
+    no_confirm: bool = typer.Option(
+        False,
+        "--no-confirm",
+        help="Skip confirmation prompt and delete immediately",
+    ),
+    include_automation_prs: bool = typer.Option(
+        False,
+        "--include-automation-prs",
+        help="Include automation PRs (dependabot, pre-commit.ci, etc.) in PR counts (default: exclude)",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose output",
+        envvar="GERRIT_VERBOSE",
+    ),
+) -> None:
+    """
+    Remove all repositories from a GitHub organization.
+
+    This command:
+
+    1. Lists all repositories in the organization with PR/issue counts
+       (by default, excludes automation PRs from dependabot, pre-commit.ci, etc.)
+
+    2. Optionally compares with local Gerrit clone (--compare flag)
+
+    3. Prompts for confirmation with unique hash (unless --no-confirm)
+
+    4. Deletes all repositories permanently
+
+    [red]WARNING: This operation is DESTRUCTIVE and IRREVERSIBLE![/red]
+
+    Examples:
+
+        # List repos and prompt for confirmation (excludes automation PRs)
+        gerrit-clone reset --org my-test-org
+
+        # Include automation PRs in counts
+        gerrit-clone reset --org my-test-org --include-automation-prs
+
+        # Compare with local clone before deletion
+        gerrit-clone reset --org my-test-org --path /tmp/gerrit-mirror --compare
+
+        # Delete immediately without prompt (DANGEROUS!)
+        gerrit-clone reset --org my-test-org --no-confirm
+    """
+    console = Console(stderr=True)
+
+    try:
+        # Validate GitHub token
+        if not github_token:
+            console.print(
+                "[red]❌ GitHub token required. "
+                "Set GITHUB_TOKEN environment variable or use --github-token[/red]"
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
+        # Show banner
+        console.print(_format_version_string(command="reset"))
+        console.print()
+
+        # Initialize reset manager
+        manager = ResetManager(
+            org=org,
+            github_token=github_token,
+            local_path=path,
+            console=console,
+            include_automation_prs=include_automation_prs,
+        )
+
+        # Check token permissions using the GitHub API
+        has_permissions = asyncio.run(manager.check_token_permissions())
+        if not has_permissions:
+            console.print(
+                "[red]❌ Insufficient permissions. "
+                "Ensure your GitHub token has 'delete_repo' scope.[/red]"
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
+        # Execute reset operation
+        result = asyncio.run(
+            manager.execute_reset(
+                compare=compare,
+                no_confirm=no_confirm,
+            )
+        )
+
+        # Display final summary
+        if result.deleted_repos > 0:
+            console.print(
+                f"\n🎉 Reset complete: {result.deleted_repos}/{result.total_repos} "
+                "repositories deleted"
+            )
+
+            if result.failed_deletions:
+                console.print(
+                    f"⚠️  {len(result.failed_deletions)} deletions failed"
+                )
+
+            if result.had_unsynchronized and compare:
+                console.print(
+                    f"⚠️  Note: {len(result.unsynchronized_repos)} repositories "
+                    "had local/remote differences"
+                )
+
+            raise typer.Exit(0)
+        else:
+            console.print("\n❌ No repositories were deleted")
+            raise typer.Exit(0)
+
+    except GitHubAuthError as e:
+        console.print(f"[red]❌ GitHub authentication error:[/red] {e}")
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+    except GitHubAPIError as e:
+        console.print(f"[red]❌ GitHub API error:[/red] {e}")
+        raise typer.Exit(ExitCode.GENERAL_ERROR)
+    except KeyboardInterrupt:
+        console.print("\n❌ Reset cancelled by user")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"\n[red]Error:[/red] {e}")
+        if verbose:
+            import traceback
+            console.print(traceback.format_exc())
         raise typer.Exit(ExitCode.GENERAL_ERROR)
 
 

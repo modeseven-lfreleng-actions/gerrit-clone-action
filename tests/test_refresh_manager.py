@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -18,63 +17,27 @@ from gerrit_clone.refresh_manager import RefreshManager, refresh_repositories
 
 @pytest.fixture
 def temp_git_repos(tmp_path):
-    """Create multiple temporary git repositories for testing."""
+    """Create multiple temporary git repositories for testing (mocked)."""
     repos = []
 
     for i in range(3):
         repo_path = tmp_path / f"repo-{i}"
         repo_path.mkdir()
 
-        # Initialize git repo
-        subprocess.run(
-            ["git", "init"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
+        # Create .git directory to make it look like a git repo
+        git_dir = repo_path / ".git"
+        git_dir.mkdir()
 
-        # Configure git
-        subprocess.run(
-            ["git", "config", "user.email", "test@example.com"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
+        # Create minimal .git structure
+        (git_dir / "config").write_text(
+            f'[remote "origin"]\n'
+            f"    url = ssh://gerrit.example.org:29418/repo-{i}\n"
+            f"    fetch = +refs/heads/*:refs/remotes/origin/*\n"
         )
-        subprocess.run(
-            ["git", "config", "user.name", "Test User"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
 
-        # Create initial commit
+        # Create a README to simulate repo content
         (repo_path / "README.md").write_text(f"# Repo {i}")
-        subprocess.run(
-            ["git", "add", "README.md"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"Initial commit repo {i}"],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
-
-        # Add a Gerrit-like remote
-        subprocess.run(
-            [
-                "git",
-                "remote",
-                "add",
-                "origin",
-                f"ssh://gerrit.example.org:29418/repo-{i}",
-            ],
-            cwd=repo_path,
-            capture_output=True,
-            check=True,
-        )
 
         repos.append(repo_path)
 
@@ -83,34 +46,30 @@ def temp_git_repos(tmp_path):
 
 @pytest.fixture
 def nested_git_repos(tmp_path):
-    """Create nested git repositories for testing discovery."""
+    """Create nested git repositories for testing discovery (mocked)."""
     base = tmp_path / "projects"
     base.mkdir()
 
     # Create top-level repos
     (base / "repo1").mkdir()
-    subprocess.run(["git", "init"], cwd=base / "repo1", capture_output=True, check=True)
+    (base / "repo1" / ".git").mkdir()
+    (base / "repo1" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     (base / "repo2").mkdir()
-    subprocess.run(["git", "init"], cwd=base / "repo2", capture_output=True, check=True)
+    (base / "repo2" / ".git").mkdir()
+    (base / "repo2" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     # Create nested structure
     (base / "category").mkdir()
     (base / "category" / "repo3").mkdir()
-    subprocess.run(
-        ["git", "init"],
-        cwd=base / "category" / "repo3",
-        capture_output=True,
-        check=True,
-    )
+    (base / "category" / "repo3" / ".git").mkdir()
+    (base / "category" / "repo3" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     (base / "category" / "subcategory").mkdir()
     (base / "category" / "subcategory" / "repo4").mkdir()
-    subprocess.run(
-        ["git", "init"],
-        cwd=base / "category" / "subcategory" / "repo4",
-        capture_output=True,
-        check=True,
+    (base / "category" / "subcategory" / "repo4" / ".git").mkdir()
+    (base / "category" / "subcategory" / "repo4" / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n"
     )
 
     return base
@@ -202,8 +161,22 @@ class TestRefreshManager:
         assert result.success_count == 0
         assert result.failed_count == 0
 
-    def test_refresh_repositories_dry_run(self, temp_git_repos, tmp_path):
+    @patch("gerrit_clone.refresh_worker.RefreshWorker.refresh_repository")
+    def test_refresh_repositories_dry_run(self, mock_refresh, temp_git_repos, tmp_path):
         """Test dry run mode."""
+
+        # Mock successful refresh for dry run
+        def mock_refresh_func(repo_path):
+            return RefreshResult(
+                path=repo_path,
+                project_name=repo_path.name,
+                status=RefreshStatus.UP_TO_DATE,
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+            )
+
+        mock_refresh.side_effect = mock_refresh_func
+
         manager = RefreshManager(dry_run=True, filter_gerrit_only=False)
 
         result = manager.refresh_repositories(tmp_path)
@@ -214,8 +187,24 @@ class TestRefreshManager:
         # In dry run, repos should show as success or have status info
         assert result.success_count >= 0
 
-    def test_refresh_repositories_with_specific_repos(self, temp_git_repos, tmp_path):
+    @patch("gerrit_clone.refresh_worker.RefreshWorker.refresh_repository")
+    def test_refresh_repositories_with_specific_repos(
+        self, mock_refresh, temp_git_repos, tmp_path
+    ):
         """Test refreshing specific repositories."""
+
+        # Mock successful refresh
+        def mock_refresh_func(repo_path):
+            return RefreshResult(
+                path=repo_path,
+                project_name=repo_path.name,
+                status=RefreshStatus.UP_TO_DATE,
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+            )
+
+        mock_refresh.side_effect = mock_refresh_func
+
         manager = RefreshManager(filter_gerrit_only=False, dry_run=True)
 
         # Refresh only first 2 repos

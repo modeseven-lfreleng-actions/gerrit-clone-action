@@ -25,8 +25,41 @@ def worker():
 
 
 @pytest.fixture
-def temp_git_repo(tmp_path):
+def ssh_config(tmp_path):
+    """Create a temporary SSH config that disables the SSH agent.
+
+    This configuration maintains SSH security features (host key verification)
+    while preventing SSH agent prompts during tests. No actual SSH connections
+    are made in these tests, so the empty known_hosts file is sufficient.
+    """
+    ssh_config_path = tmp_path / "ssh_config"
+    known_hosts_path = tmp_path / "known_hosts"
+
+    # Create empty known_hosts file (enables proper security)
+    known_hosts_path.touch()
+
+    ssh_config_content = f"""
+# Test SSH config - prevents SSH agent prompts while maintaining security
+Host *
+    IdentityAgent none
+    IdentitiesOnly yes
+    IdentityFile /dev/null
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile {known_hosts_path}
+    ConnectTimeout 1
+"""
+    ssh_config_path.write_text(ssh_config_content)
+    return ssh_config_path
+
+
+@pytest.fixture
+def temp_git_repo(tmp_path, ssh_config, monkeypatch):
     """Create a temporary git repository for testing."""
+    # Set GIT_SSH_COMMAND to use our custom SSH config that doesn't use the agent
+    git_ssh_command = f"ssh -F {ssh_config} -o IdentityAgent=none"
+    monkeypatch.setenv("GIT_SSH_COMMAND", git_ssh_command)
+
     repo_path = tmp_path / "test-repo"
     repo_path.mkdir()
 
@@ -47,6 +80,20 @@ def temp_git_repo(tmp_path):
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
+        cwd=repo_path,
+        capture_output=True,
+        check=True,
+    )
+    # Disable GPG signing to prevent SSH agent prompts for commits
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=repo_path,
+        capture_output=True,
+        check=True,
+    )
+    # Set SSH command to use our isolated config
+    subprocess.run(
+        ["git", "config", "core.sshCommand", git_ssh_command],
         cwd=repo_path,
         capture_output=True,
         check=True,
