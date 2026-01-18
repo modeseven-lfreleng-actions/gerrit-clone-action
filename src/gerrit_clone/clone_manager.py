@@ -9,9 +9,10 @@ import json
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from datetime import UTC, datetime
 
+from gerrit_clone.concurrent_utils import interruptible_executor
 from gerrit_clone.logging import get_logger, suppress_console_logging
 from gerrit_clone.models import BatchResult, CloneResult, CloneStatus, Config, Project
 from gerrit_clone.progress import ProgressTracker, create_progress_tracker
@@ -469,7 +470,7 @@ class CloneManager:
         logger.debug(f"Starting clone operations with {thread_count} threads")
         logger.debug(f"About to create ThreadPoolExecutor with {thread_count} workers")
 
-        with ThreadPoolExecutor(
+        with interruptible_executor(
             max_workers=thread_count, thread_name_prefix="clone"
         ) as executor:
             # Submit all clone tasks

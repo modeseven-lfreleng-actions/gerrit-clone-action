@@ -62,9 +62,10 @@ uv run gerrit-clone --host gerrit.example.org
 
 ### Commands
 
-The tool provides two main commands:
+The tool provides four main commands:
 
 - **`clone`**: Clone all repositories from a Gerrit server
+- **`refresh`**: Refresh local content cloned from a Gerrit server
 - **`mirror`**: Mirror repositories from a Gerrit server to GitHub
 - **`config`**: Show effective configuration from all sources
 
@@ -101,6 +102,128 @@ gerrit-clone clone --host gerrit.example.org \
   --ssh-user myuser \
   --ssh-private-key ~/.ssh/gerrit_rsa
 ```
+
+### Refresh Command Examples
+
+Refresh all repositories in the current directory:
+
+```bash
+gerrit-clone refresh
+```
+
+Refresh ONAP repositories in a specific directory:
+
+```bash
+gerrit-clone refresh --path /Users/mwatkins/Repositories/onap
+```
+
+Fetch only (don't merge changes):
+
+```bash
+gerrit-clone refresh --path ~/onap --fetch-only
+```
+
+Use 16 threads for faster refresh:
+
+```bash
+gerrit-clone refresh --path ~/onap --threads 16
+```
+
+Automatically stash uncommitted changes before refresh:
+
+```bash
+gerrit-clone refresh --path ~/onap --auto-stash
+```
+
+Use rebase strategy instead of merge:
+
+```bash
+gerrit-clone refresh --path ~/onap --strategy rebase
+```
+
+Dry run to see what changes would occur:
+
+```bash
+gerrit-clone refresh --path ~/onap --dry-run
+```
+
+Refresh all repositories (not just Gerrit):
+
+```bash
+gerrit-clone refresh --all-repos
+```
+
+### Complete Refresh Example
+
+Here's a complete example showing the refresh workflow:
+
+```bash
+# Refresh ONAP repositories with auto-stash and 16 threads
+gerrit-clone refresh \
+  --path /Users/mwatkins/Repositories/onap \
+  --threads 16 \
+  --auto-stash \
+  --strategy merge
+```
+
+**Expected Output**:
+
+```text
+🏷️  gerrit-clone refresh version X.Y.Z
+
+Refresh Configuration
+Base Path: /Users/mwatkins/Repositories/onap
+Threads: 16
+Mode: Pull (merge)
+Prune: True
+Timeout: 300s
+Skip Conflicts: True
+Auto Stash: True
+Filter: Gerrit only
+Dry Run: False
+Force: False
+Recursive: True
+
+🔍 Discovering Git repositories in /Users/mwatkins/Repositories/onap
+📂 Discovered 127 Git repositories
+🔄 Refreshing 127 repositories with 16 threads
+
+Refreshing repositories ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 127/127 • 0:02:15
+
+Refresh Summary
+────────────────────────────────────────────────────────────
+Total Repositories: 127
+Duration: 135.4s
+
+Results:
+  ✅ Successful: 115
+  ✓  Up-to-date: 98
+  🔄 Updated: 17
+  ❌ Failed: 2
+  ⊘  Skipped: 8
+  ⚠️  Conflicts: 2
+
+Repositories Updated: 17
+Total Files Changed: 156
+
+Issues:
+  ❌ ccsdk-apps-services: Network error during pull
+  ⚠️  ccsdk-features-sdnr: Merge conflicts detected
+
+📄 Manifest: /Users/mwatkins/Repositories/onap/refresh-manifest.json
+
+⚠️  2 repositories failed to refresh
+```
+
+**Key Features**:
+
+- **Parallel Updates**: Uses concurrent threads for fast updates
+- **Smart Detection**: Automatically detects Gerrit repositories by remote URL
+- **Safe Defaults**: Skips repositories with uncommitted changes by default
+- **Auto-Stash**: Optionally stash and restore uncommitted changes
+- **Flexible Strategies**: Support for merge (fast-forward) or rebase
+- **Detailed Reporting**: JSON manifest with complete results
+- **Dry Run**: Preview changes without applying them
 
 ### Mirror Command Examples
 
@@ -192,7 +315,7 @@ gerrit-clone mirror \
 **Expected Output**:
 
 ```text
-🏷️  gerrit-clone mirror version 0.1.11
+🏷️  gerrit-clone mirror version X.Y.Z
 
 🔑 Authenticating with GitHub...
 ✓ Using specified organization: modeseven-onap
