@@ -359,15 +359,19 @@ def setup_file_logging(
     return logger, file_logger.get_error_collector()
 
 
-def get_default_log_path(host: str | None = None) -> Path:
-    """Get default log file path in current working directory.
+def get_default_log_path(host: str | None = None, path_prefix: Path | None = None) -> Path:
+    """Get default log file path in path_prefix directory (or current working directory).
 
     Args:
         host: Gerrit server hostname to use in log filename
+        path_prefix: Base directory for log file (defaults to current working directory)
 
     Returns:
         Path to log file with dynamic name based on hostname
     """
+    # Determine base directory for log file
+    base_dir = path_prefix if path_prefix is not None else Path.cwd()
+
     if host and host.strip():
         # Sanitize hostname for filename
         # 1. Remove port number (everything after first colon)
@@ -380,9 +384,9 @@ def get_default_log_path(host: str | None = None) -> Path:
         clean_host = clean_host.strip()
 
         if clean_host:
-            return Path.cwd() / f"{clean_host}.log"
+            return base_dir / f"{clean_host}.log"
 
-    return Path.cwd() / "gerrit-clone.log"
+    return base_dir / "gerrit-clone.log"
 
 
 def init_logging(
@@ -395,6 +399,7 @@ def init_logging(
     verbose: bool = False,
     cli_args: Optional[Dict[str, Any]] = None,
     host: Optional[str] = None,
+    path_prefix: Optional[Path] = None,
 ) -> tuple[logging.Logger, ErrorCollector]:
     """Initialize both file and console logging in one place.
 
@@ -410,12 +415,13 @@ def init_logging(
         verbose: Enable verbose console output
         cli_args: CLI arguments to include in log header
         host: Gerrit server hostname for dynamic log file naming
+        path_prefix: Base directory for log file (defaults to current working directory)
 
     Returns:
         Tuple of (file_logger, error_collector)
     """
     # Set up file logging (unchanged behavior)
-    log_path = log_file or get_default_log_path(host)
+    log_path = log_file or get_default_log_path(host, path_prefix)
     file_logger, collector = setup_file_logging(
         log_file_path=log_path,
         enabled=not disable_file,

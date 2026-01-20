@@ -16,7 +16,8 @@ reliability, speed, and CI/CD compatibility.
 - **Bulk Repository Discovery**: Fetches all projects via Gerrit REST API with
   intelligent filtering
 - **Multi-threaded Cloning**: Concurrent operations with auto-scaling thread
-  pools (up to 32 workers)
+  pools (up to 32 workers for Gerrit, 64 for GitHub with 2x multiplier for
+  network-limited operations)
 - **Hierarchy Preservation**: Maintains complete Gerrit project folder
   structure without flattening
 - **GitHub Mirroring**: Mirror Gerrit repositories to GitHub organizations
@@ -471,6 +472,7 @@ Options:
                                   Move conflicting files/directories in parent
                                   repos to [NAME].parent to allow nested cloning
   -t, --threads INTEGER           Number of concurrent clone threads
+                                  (auto-detected: 2x multiplier for GitHub sources)
   -d, --depth INTEGER             Create shallow clone with given depth
   -b, --branch TEXT               Clone specific branch instead of default
   --https / --ssh                 Use HTTPS for cloning [default: ssh]

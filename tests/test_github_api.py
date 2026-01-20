@@ -1074,3 +1074,74 @@ class TestRequestPaginated:
         assert len(results) == 0
 
         api.close()
+
+
+def test_list_all_repos_no_default_branch() -> None:
+    """Test listing repos when a repository has no default branch configured."""
+    api = GitHubAPI(token="test-token")
+
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "data": {
+            "organization": {
+                "repositories": {
+                    "nodes": [
+                        {
+                            "name": "repo-with-branch",
+                            "nameWithOwner": "test-org/repo-with-branch",
+                            "url": "https://github.com/test-org/repo-with-branch",
+                            "sshUrl": "git@github.com:test-org/repo-with-branch.git",
+                            "isPrivate": False,
+                            "description": "Repo with default branch",
+                            "defaultBranchRef": {
+                                "name": "main",
+                                "target": {
+                                    "oid": "abc123def456",
+                                },
+                            },
+                        },
+                        {
+                            "name": "repo-no-branch",
+                            "nameWithOwner": "test-org/repo-no-branch",
+                            "url": "https://github.com/test-org/repo-no-branch",
+                            "sshUrl": "git@github.com:test-org/repo-no-branch.git",
+                            "isPrivate": False,
+                            "description": "Repo without default branch",
+                            "defaultBranchRef": None,  # No default branch
+                        },
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": False,
+                        "endCursor": None,
+                    },
+                },
+            },
+        },
+    }
+
+    with (
+        patch.object(api.client, "post", return_value=mock_response),
+        patch("gerrit_clone.github_api.logger") as mock_logger,
+    ):
+        result = api.list_all_repos_graphql("test-org")
+
+        # Should have both repos
+        assert len(result) == 2
+        assert "repo-with-branch" in result
+        assert "repo-no-branch" in result
+
+        # Repo with branch should have commit SHA
+        assert result["repo-with-branch"]["default_branch"] == "main"
+        assert result["repo-with-branch"]["latest_commit_sha"] == "abc123def456"
+
+        # Repo without branch should have None values
+        assert result["repo-no-branch"]["default_branch"] is None
+        assert result["repo-no-branch"]["latest_commit_sha"] is None
+
+        # Should have logged a warning for the repo without default branch
+        mock_logger.warning.assert_called_once()
+        warning_call = mock_logger.warning.call_args[0]
+        assert "repo-no-branch" in warning_call[1]
+        assert "no default branch configured" in warning_call[0]
+
+    api.close()

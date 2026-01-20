@@ -22,7 +22,6 @@ from gerrit_clone import __version__
 from gerrit_clone.clone_manager import clone_repositories
 from gerrit_clone.concurrent_utils import handle_sigint_gracefully
 from gerrit_clone.config import ConfigurationError, load_config
-from gerrit_clone.refresh_manager import refresh_repositories
 from gerrit_clone.error_codes import (
     DiscoveryError,
     ExitCode,
@@ -34,20 +33,21 @@ from gerrit_clone.github_api import (
     GitHubAuthError,
     get_default_org_or_user,
 )
+from gerrit_clone.logging import get_logger
 from gerrit_clone.mirror_manager import (
     MirrorBatchResult,
     MirrorManager,
     filter_projects_by_hierarchy,
 )
+from gerrit_clone.models import DiscoveryMethod, RefreshBatchResult, RetryPolicy, SourceType
+from gerrit_clone.refresh_manager import refresh_repositories
 from gerrit_clone.reset_manager import ResetManager
-from gerrit_clone.models import DiscoveryMethod, RefreshBatchResult, RetryPolicy
 from gerrit_clone.rich_status import (
     handle_crash_display,
     show_error_summary,
     show_final_results,
 )
 from gerrit_clone.unified_discovery import discover_projects
-from gerrit_clone.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -125,14 +125,41 @@ def clone(
         ...,
         "--host",
         "-h",
-        help="Gerrit server hostname",
+        help="Source hostname (Gerrit server or GitHub URL like github.com/ORG)",
         envvar="GERRIT_HOST",
+    ),
+    source_type: str | None = typer.Option(
+        None,
+        "--source-type",
+        help="Source type: gerrit or github (auto-detected from host if not specified)",
+        envvar="SOURCE_TYPE",
+    ),
+    github_token: str | None = typer.Option(
+        None,
+        "--github-token",
+        help="GitHub personal access token (or set GERRIT_CLONE_TOKEN/GITHUB_TOKEN env var)",
+        envvar="GERRIT_CLONE_TOKEN",
+    ),
+    github_org: str | None = typer.Option(
+        None,
+        "--github-org",
+        help="GitHub organization or user name (auto-detected from host if not specified)",
+        envvar="GITHUB_ORG",
+    ),
+    use_gh_cli: bool = typer.Option(
+        False,
+        "--use-gh-cli",
+        help="Use GitHub CLI (gh) for cloning instead of git (preserves upstream/origin)",
+        envvar="USE_GH_CLI",
     ),
     port: int | None = typer.Option(
         None,
         "--port",
         "-p",
-        help="Gerrit port (default: 29418 for SSH, 443 for HTTPS)",
+        help=(
+            "Gerrit SSH/HTTP port (default: 29418 for SSH, 443 for HTTPS). "
+            "Note: Only used for Gerrit sources; ignored for GitHub sources."
+        ),
         envvar="GERRIT_PORT",
         min=1,
         max=65535,
@@ -191,7 +218,7 @@ def clone(
     discovery_method: str = typer.Option(
         "ssh",
         "--discovery-method",
-        help="Method for discovering projects: ssh (default), http (REST API only), or both (union of both methods with SSH metadata preferred)",
+        help="Method for discovering projects: ssh (default for Gerrit), http (REST API), both (union of both), or github_api (for GitHub)",
         envvar="GERRIT_DISCOVERY_METHOD",
     ),
     allow_nested_git: bool = typer.Option(
@@ -326,6 +353,36 @@ def clone(
         help="Remove cloned repositories (path-prefix) after run completes (success or failure)",
         envvar="GERRIT_CLEANUP",
     ),
+    no_refresh: bool = typer.Option(
+        False,
+        "--no-refresh",
+        help="Skip refreshing existing repositories (default: auto-refresh existing repos)",
+        envvar="NO_REFRESH",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help=(
+            "Force refresh of all existing repositories. Automatically stashes any local "
+            "uncommitted changes (without prompting), attempts to fix detached HEAD states, "
+            "and then updates all repos. This can be disruptive to your working copies; "
+            "use with care and recover changes from `git stash` if needed."
+        ),
+        envvar="FORCE_REFRESH",
+    ),
+    fetch_only: bool = typer.Option(
+        False,
+        "--fetch-only",
+        help="Only fetch changes without merging (for existing repos)",
+        envvar="FETCH_ONLY",
+    ),
+    skip_conflicts: bool = typer.Option(
+        True,
+        "--skip-conflicts/--no-skip-conflicts",
+        help="Skip repositories with uncommitted changes during refresh",
+        envvar="SKIP_CONFLICTS",
+    ),
     exit_on_error: bool = typer.Option(
         False,
         "--exit-on-error",
@@ -355,25 +412,37 @@ def clone(
         envvar="GERRIT_LOG_LEVEL",
     ),
 ) -> None:
-    """Clone all repositories from a Gerrit server.
+    """Clone all repositories from a Gerrit server or GitHub organization.
 
-    This command discovers all projects on the specified Gerrit server and clones
-    them in parallel while preserving the project hierarchy. Repositories are
-    cloned over SSH and must be accessible with your configured SSH keys.
+    This command discovers all projects/repositories from the specified source and clones
+    them in parallel while preserving the project hierarchy. For Gerrit, repositories are
+    cloned over SSH by default. For GitHub, SSH is also default (HTTPS with --https).
+
+    By default, existing repositories are refreshed (git pull) instead of skipped.
+    Use --no-refresh to skip existing repositories without updating them.
 
     Examples:
 
-        # Clone all active repositories from gerrit.example.org
-        gerrit-clone --host gerrit.example.org
+        # Clone all active repositories from Gerrit server
+        gerrit-clone clone --host gerrit.example.org
+
+        # Clone all repositories from GitHub organization (auto-refresh existing)
+        gerrit-clone clone --host github.com/lfreleng-actions
+
+        # Clone without refreshing existing repos
+        gerrit-clone clone --host github.com/myorg --no-refresh
+
+        # Force refresh existing repos (stash local changes)
+        gerrit-clone clone --host github.com/myorg --force
+
+        # Clone GitHub org with gh CLI (preserves upstream/origin)
+        gerrit-clone clone --host github.com/myorg --use-gh-cli
 
         # Clone to specific directory with custom threads
-        gerrit-clone --host gerrit.example.org --path-prefix ./repos --threads 8
+        gerrit-clone clone --host gerrit.example.org --path-prefix ./repos --threads 8
 
         # Clone with shallow depth and specific branch
-        gerrit-clone --host gerrit.example.org --depth 10 --branch main
-
-        # Include archived repositories
-        gerrit-clone --host gerrit.example.org --include-archived
+        gerrit-clone clone --host gerrit.example.org --depth 10 --branch main
     """
     # Configure graceful interrupt handling for multi-threaded operations
     handle_sigint_gracefully()
@@ -387,6 +456,41 @@ def clone(
     log_file_path = None
 
     try:
+        # Auto-detect source type if not specified
+        from gerrit_clone.github_discovery import detect_github_source, parse_github_url
+
+        detected_source_type = SourceType.GERRIT
+        detected_github_org = github_org
+
+        if source_type:
+            # Use explicitly specified source type
+            try:
+                detected_source_type = SourceType(source_type.lower())
+            except ValueError:
+                console.print(
+                    f"[red]Error:[/red] Invalid source type '{source_type}'. Must be 'gerrit' or 'github'"
+                )
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+        elif detect_github_source(host):
+            # Auto-detect GitHub from host
+            detected_source_type = SourceType.GITHUB
+            # Extract org from URL if present
+            _, org = parse_github_url(host)
+            if org:
+                detected_github_org = org
+            console.print(
+                f"[cyan]ℹ[/cyan] Auto-detected GitHub source from host: {host}"
+            )
+
+        # Validate GitHub-specific requirements
+        if detected_source_type == SourceType.GITHUB:
+            if not detected_github_org:
+                console.print(
+                    "[red]Error:[/red] GitHub organization/user not specified. "
+                    "Use --github-org or include in --host (e.g., github.com/ORG)"
+                )
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
         # Validate mutually exclusive options
         if verbose and quiet:
             console.print(
@@ -397,6 +501,14 @@ def clone(
         # Prepare CLI arguments for logging
         cli_args = cli_args_to_dict(
             host=host,
+            source_type=detected_source_type.value,
+            github_token="<redacted>" if github_token else None,
+            github_org=detected_github_org,
+            use_gh_cli=use_gh_cli,
+            no_refresh=no_refresh,
+            force=force,
+            fetch_only=fetch_only,
+            skip_conflicts=skip_conflicts,
             port=port,
             base_url=base_url,
             ssh_user=ssh_user,
@@ -440,12 +552,13 @@ def clone(
             verbose=verbose,
             cli_args=cli_args,
             host=host,
+            path_prefix=Path(path_prefix) if path_prefix else None,
         )
 
         # Set log_file_path for error handling compatibility
         from gerrit_clone.file_logging import get_default_log_path
 
-        log_file_path = log_file if log_file else get_default_log_path(host)
+        log_file_path = log_file if log_file else get_default_log_path(host, Path(path_prefix) if path_prefix else None)
 
         # Log version to file in GitHub Actions environment (file only, no console)
         if _is_github_actions_context():
@@ -454,7 +567,7 @@ def clone(
             except Exception:
                 file_logger.warning("Version information not available")
 
-        # Parse discovery method
+        # Parse discovery method and adjust for source type
         try:
             discovery_method_enum = DiscoveryMethod(discovery_method.lower())
         except ValueError:
@@ -462,7 +575,7 @@ def clone(
             console.print(
                 Panel(
                     Text(
-                        f"Invalid discovery method '{discovery_method}'\nMust be one of: ssh, http, both",
+                        f"Invalid discovery method '{discovery_method}'\nMust be one of: ssh, http, both, github_api",
                         style="bold red",
                     ),
                     title="Configuration Error",
@@ -471,11 +584,20 @@ def clone(
             )
             raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
+        # Auto-adjust discovery method for GitHub
+        if detected_source_type == SourceType.GITHUB:
+            if discovery_method_enum not in [DiscoveryMethod.GITHUB_API, DiscoveryMethod.HTTP]:
+                discovery_method_enum = DiscoveryMethod.GITHUB_API
+                if not quiet:
+                    console.print(
+                        "[cyan]ℹ[/cyan] Using GitHub API discovery for GitHub source"
+                    )
+
         # Load and validate configuration
         try:
             config = load_config(
                 host=host,
-                port=port,
+                port=port,  # Leave as None for GitHub, will default to 29418 for Gerrit
                 base_url=base_url,
                 ssh_user=ssh_user,
                 ssh_identity_file=ssh_identity_file,
@@ -503,6 +625,14 @@ def clone(
                 ssh_debug=ssh_debug,
                 exit_on_error=exit_on_error,
                 discovery_method=discovery_method_enum,
+                source_type=detected_source_type,
+                github_token=github_token,
+                github_org=detected_github_org,
+                use_gh_cli=use_gh_cli,
+                auto_refresh=not no_refresh,
+                force_refresh=force,
+                fetch_only=fetch_only,
+                skip_conflicts=skip_conflicts,
             )
         except ConfigurationError as e:
             if file_logger:
@@ -659,8 +789,14 @@ def _show_startup_banner(console: Console, config: Any) -> None:
     console.print()
 
     # Create summary text
+    # Format host with port only if port is set (Gerrit) or omit for GitHub
+    if config.effective_port is not None:
+        host_display = f"{config.host}:{config.effective_port}"
+    else:
+        host_display = config.host
+
     lines = [
-        f"Host: [cyan]{config.host}:{config.effective_port} [{config.protocol}][/cyan]",
+        f"Host: [cyan]{host_display} [{config.protocol}][/cyan]",
         f"Output: [cyan]{config.path_prefix}[/cyan]",
         f"Threads: [cyan]{config.effective_threads}[/cyan]",
     ]
@@ -677,13 +813,27 @@ def _show_startup_banner(console: Console, config: Any) -> None:
     if config.branch:
         lines.append(f"Branch: [cyan]{config.branch}[/cyan]")
 
+    # Add common options
     lines.extend(
         [
             f"Discovery Method: [cyan]{str(getattr(config, 'discovery_method', DiscoveryMethod.SSH).value).upper()}[/cyan]",
             f"Skip Archived: [cyan]{config.skip_archived}[/cyan]",
-            f"Allow Nested Git: [cyan]{getattr(config, 'allow_nested_git', False)}[/cyan]",
-            f"Nested Protection: [cyan]{getattr(config, 'nested_protection', False)}[/cyan]",
-            f"Move Conflicting: [cyan]{getattr(config, 'move_conflicting', True)}[/cyan]",
+        ]
+    )
+
+    # Add Gerrit-specific options only for Gerrit sources
+    if config.source_type == SourceType.GERRIT:
+        lines.extend(
+            [
+                f"Allow Nested Git: [cyan]{getattr(config, 'allow_nested_git', False)}[/cyan]",
+                f"Nested Protection: [cyan]{getattr(config, 'nested_protection', False)}[/cyan]",
+                f"Move Conflicting: [cyan]{getattr(config, 'move_conflicting', True)}[/cyan]",
+            ]
+        )
+
+    # Add remaining common options
+    lines.extend(
+        [
             f"Strict Host Check: [cyan]{config.strict_host_checking}[/cyan]",
             f"Include Filter: [cyan]{', '.join(config.include_projects) if getattr(config, 'include_projects', []) else '—'}[/cyan]",
             f"SSH Debug: [cyan]{getattr(config, 'ssh_debug', False)}[/cyan]",
@@ -693,15 +843,20 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     summary_text = Text.from_markup("\n".join(lines))
 
+    # Set title based on source type
+    if config.source_type == SourceType.GITHUB:
+        title = "[bold]GitHub Clone Configuration[/bold]"
+    else:
+        title = "[bold]Gerrit Clone Configuration[/bold]"
+
     panel = Panel(
         summary_text,
-        title="[bold]Gerrit Clone Configuration[/bold]",
+        title=title,
         border_style="blue",
         padding=(1, 2),
     )
 
     console.print(panel)
-    console.print()
 
 
 @app.command()
@@ -772,7 +927,11 @@ def refresh(
         False,
         "--force",
         "-f",
-        help="Force refresh by fixing detached HEAD, upstream tracking, and auto-stashing changes",
+        help=(
+            "Force refresh by automatically stashing uncommitted changes (without prompting), "
+            "fixing detached HEAD states, and updating upstream tracking. This can be disruptive "
+            "to your working copies; use with care and recover changes from `git stash` if needed."
+        ),
     ),
     recursive: bool = typer.Option(
         True,
@@ -842,7 +1001,7 @@ def refresh(
 
     from gerrit_clone.file_logging import get_default_log_path
 
-    log_file_path = get_default_log_path("refresh")
+    log_file_path = get_default_log_path("refresh", path)
 
     file_logger, error_collector = init_logging(
         log_file=log_file_path,

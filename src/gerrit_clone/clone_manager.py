@@ -8,24 +8,33 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from concurrent.futures import as_completed
 from datetime import UTC, datetime
+from typing import Any
+
+from typing import cast
 
 from gerrit_clone.concurrent_utils import interruptible_executor
 from gerrit_clone.logging import get_logger, suppress_console_logging
-from gerrit_clone.models import BatchResult, CloneResult, CloneStatus, Config, Project
-from gerrit_clone.progress import ProgressTracker, create_progress_tracker
-from gerrit_clone.unified_discovery import discover_projects
-from gerrit_clone.rich_status import (
-    connecting_to_server,
-    discovering_projects,
-    projects_found,
-    starting_clone,
-    clone_completed,
-    success_rate as show_success_rate,
-    create_status_manager,
+from gerrit_clone.models import (
+    BatchResult,
+    CloneResult,
+    CloneStatus,
+    Config,
+    Project,
+    SourceType,
 )
+from gerrit_clone.progress import ProgressTracker, create_progress_tracker
+from gerrit_clone.rich_status import (
+    clone_completed,
+    connecting_to_server,
+    create_status_manager,
+    starting_clone,
+)
+from gerrit_clone.rich_status import (
+    success_rate as show_success_rate,
+)
+from gerrit_clone.unified_discovery import discover_projects
 from gerrit_clone.worker import CloneWorker
 
 logger = get_logger(__name__)
@@ -46,6 +55,10 @@ class CloneManager:
         self.config = config
         self.progress_tracker = progress_tracker
         self._shutdown_event = threading.Event()
+        # Initialize nested stats tracking
+        self._nested_candidates: set[str] = set()
+        self._nested_detected: set[str] = set()
+        self._nested_parent_usage: set[str] = set()
 
     def shutdown(self) -> None:
         """Signal shutdown to cancel ongoing operations."""
@@ -61,12 +74,11 @@ class CloneManager:
             List of clone results
         """
         if not projects:
-            logger.info("No projects to clone")
             return []
-        # Initialize nested stats tracking
-        self._nested_candidates: set[str] = set()
-        self._nested_detected: set[str] = set()
-        self._nested_parent_usage: set[str] = set()
+        # Reset nested stats tracking for this clone operation
+        self._nested_candidates.clear()
+        self._nested_detected.clear()
+        self._nested_parent_usage.clear()
 
         # Remove duplicates (fast operation)
         unique_projects = self._remove_duplicates(projects)
@@ -602,10 +614,15 @@ class CloneManager:
         if self.progress_tracker:
             self.progress_tracker.update_log_message(f"Cloning {project.name}...")
 
-        # Create a new worker instance for this task (thread safety)
-        # Pass project index to worker for accurate ancestor detection
-        worker = CloneWorker(self.config, project_index=self._project_name_index)
-        result = worker.clone_project(project)
+        # Use appropriate clone method based on source type
+        if self.config.source_type == SourceType.GITHUB:
+            from gerrit_clone.github_worker import clone_github_repository
+            result = clone_github_repository(project, self.config)
+        else:
+            # Create a new worker instance for this task (thread safety)
+            # Pass project index to worker for accurate ancestor detection
+            worker = CloneWorker(self.config, project_index=self._project_name_index)
+            result = worker.clone_project(project)
 
         logger.debug(
             f"Worker completed for {project.name} with status: {result.status}"
@@ -636,8 +653,82 @@ class CloneManager:
             logger.debug(f"↷ Skipped {result.project.name}")
 
 
+def _check_existing_manifest(config: Config, console: Any | None = None) -> dict[str, Any] | None:
+    """Check for existing manifest and warn about configuration changes.
+
+    Args:
+        config: Current configuration
+        console: Optional Rich console instance for display (created if None)
+
+    Returns:
+        Existing manifest data if found, None otherwise
+    """
+    manifest_path = config.path_prefix / config.manifest_filename
+
+    if not manifest_path.exists():
+        return None
+
+    try:
+        with open(manifest_path, "r") as f:
+            manifest: dict[str, Any] = json.load(f)
+
+        # Check for configuration mismatches
+        warnings = []
+
+        if "clone_config" in manifest:
+            old_config = manifest["clone_config"]
+
+            if old_config.get("use_gh_cli") != config.use_gh_cli:
+                warnings.append(
+                    f"Clone method changed: was {'gh CLI' if old_config.get('use_gh_cli') else 'git'}, "
+                    f"now {'gh CLI' if config.use_gh_cli else 'git'}"
+                )
+
+            if old_config.get("use_https") != config.use_https:
+                warnings.append(
+                    f"Protocol changed: was {'HTTPS' if old_config.get('use_https') else 'SSH'}, "
+                    f"now {'HTTPS' if config.use_https else 'SSH'}"
+                )
+
+            if old_config.get("depth") != config.depth:
+                warnings.append(
+                    f"Depth changed: was {old_config.get('depth') or 'full'}, "
+                    f"now {config.depth or 'full'}"
+                )
+
+        if warnings:
+            # Create console if not provided (ensures safe display timing)
+            if console is None:
+                from rich.console import Console
+                console = Console(stderr=True)
+            console.print("\n[yellow]⚠️  Configuration Changes Detected:[/yellow]")
+            for warning in warnings:
+                console.print(f"  • {warning}")
+            console.print(
+                "[yellow]Existing repositories will be skipped. "
+                "To re-clone with new settings, remove the existing directory first.[/yellow]\n"
+            )
+
+        # Show summary of existing clone
+        if manifest.get("already_exists", 0) > 0 or manifest.get("succeeded", 0) > 0:
+            # Create console if not provided (ensures safe display timing)
+            if console is None:
+                from rich.console import Console
+                console = Console(stderr=True)
+            total_existing = manifest.get("succeeded", 0) + manifest.get("already_exists", 0)
+            console.print(
+                f"[cyan]ℹ️  Found {total_existing} existing repositories from previous clone[/cyan]\n"
+            )
+
+        return manifest
+
+    except Exception as e:
+        logger.debug(f"Could not read existing manifest: {e}")
+        return None
+
+
 def clone_repositories(config: Config) -> BatchResult:
-    """Clone all repositories from Gerrit with hierarchical ordering.
+    """Clone all repositories from configured source (Gerrit or GitHub).
 
     Args:
         config: Configuration for clone operations
@@ -647,6 +738,10 @@ def clone_repositories(config: Config) -> BatchResult:
     """
     started_at = datetime.now(UTC)
 
+    # Check for existing clones and warn about config changes
+    # Pass None for console - will be created internally if needed before progress tracker
+    _check_existing_manifest(config, console=None)
+
     # Initialize progress tracker early for Rich status messages
     progress_tracker = create_progress_tracker(config)
 
@@ -655,13 +750,24 @@ def clone_repositories(config: Config) -> BatchResult:
 
     with create_status_manager(progress_tracker):
         try:
-            # Fetch projects from Gerrit
-            logger.debug("Connecting to Gerrit server %s:%s", config.host, config.port)
-            connecting_to_server(config.host, config.port)
+            # Fetch projects from configured source
+            if config.source_type == SourceType.GITHUB:
+                logger.debug("Connecting to GitHub: %s", config.host)
+                from gerrit_clone.rich_status import print_status_message
+                from rich.console import Console
+                console = Console(stderr=True)
+                print_status_message(f"🌐 Connecting to GitHub: {config.host}", console)
+            else:
+                # Port is guaranteed to be set for Gerrit sources (defaults to 29418)
+                # Validated in Config.__post_init__ - use cast for type narrowing
+                port = cast(int, config.port)
+                logger.debug("Connecting to Gerrit server %s:%s", config.host, port)
+                connecting_to_server(config.host, port)
+
             projects, filter_stats = discover_projects(config)
 
             # Display warnings if present
-            if "warnings" in filter_stats and filter_stats["warnings"]:
+            if filter_stats.get("warnings"):
                 for warning in filter_stats["warnings"]:
                     logger.warning(warning)
 
@@ -677,41 +783,303 @@ def clone_repositories(config: Config) -> BatchResult:
             # Ensure output directory exists before starting operations
             config.path_prefix.mkdir(parents=True, exist_ok=True)
 
-            # Log combined message about cloning
-            if filter_stats["skipped"] > 0:
-                logger.debug(
-                    "Cloning %d active projects with %d workers (skipping %d archived)",
-                    filter_stats["filtered"],
-                    config.effective_threads,
-                    filter_stats["skipped"],
-                )
-                starting_clone(
-                    filter_stats["filtered"],
-                    config.effective_threads,
-                    filter_stats["skipped"],
-                )
-            else:
-                logger.debug(
-                    "Cloning %d projects with %d workers",
-                    filter_stats["filtered"],
-                    config.effective_threads,
-                )
-                starting_clone(filter_stats["filtered"], config.effective_threads)
-
-            # Create clone manager and execute
+            # Create clone manager (needed for gap analysis)
             manager = CloneManager(config, progress_tracker)
 
+            # Perform gap analysis - check which repos actually need cloning vs refreshing
+            repos_needing_clone = []
+            repos_to_refresh = []
+
+            for project in projects:
+                target_path = config.path_prefix / project.filesystem_path
+                if target_path.exists() and (target_path / ".git").exists():
+                    repos_to_refresh.append(project)
+                else:
+                    repos_needing_clone.append(project)
+
+            # Only show clone messages and progress if there are repos to clone
+            if repos_needing_clone:
+                repos_to_clone = len(repos_needing_clone)
+                item_name = "repositories" if config.source_type == SourceType.GITHUB else "projects"
+
+                if filter_stats["skipped"] > 0:
+                    logger.debug(
+                        "Cloning %d active %s with %d workers (skipping %d archived)",
+                        repos_to_clone,
+                        item_name,
+                        config.effective_threads,
+                        filter_stats["skipped"],
+                    )
+                    starting_clone(
+                        repos_to_clone,
+                        config.effective_threads,
+                        filter_stats["skipped"],
+                        item_name=item_name,
+                    )
+                else:
+                    logger.debug(
+                        "Cloning %d %s with %d workers",
+                        repos_to_clone,
+                        item_name,
+                        config.effective_threads,
+                    )
+                    starting_clone(repos_to_clone, config.effective_threads, item_name=item_name)
+
+            # Clone only repos that don't already exist
             # Suppress console logging during clone to prevent interference with Rich Live display
             # unless in verbose mode (users want to see all logs for debugging)
-            with suppress_console_logging(verbose=config.verbose):
-                try:
-                    results = manager.clone_projects(projects)
-                finally:
-                    # Progress tracker cleanup handled by status manager context
-                    pass
+            results = []
 
-            # Retry failed clones
-            failed_results = [r for r in results if r.failed]
+            # Handle already-existing repos - refresh them unless --no-refresh
+            if repos_to_refresh:
+                if config.auto_refresh:
+                    # Smart refresh: check which repos actually need updating
+                    repos_needing_refresh = []
+                    repos_up_to_date = []
+
+                    # For GitHub, use SHA comparison to avoid unnecessary pulls
+                    # Determine which projects actually have metadata available
+                    projects_with_metadata = [
+                        project for project in repos_to_refresh
+                        if getattr(project, "metadata", None)
+                    ]
+                    projects_missing_metadata = [
+                        project for project in repos_to_refresh
+                        if not getattr(project, "metadata", None)
+                    ]
+                    if projects_missing_metadata:
+                        logger.debug(
+                            "Metadata not available for %d repositories; "
+                            "they will be refreshed without SHA comparison",
+                            len(projects_missing_metadata),
+                        )
+                    if (
+                        config.source_type == SourceType.GITHUB
+                        and repos_to_refresh
+                        and projects_with_metadata
+                    ):
+                        logger.debug("Checking which repositories need refresh using SHA comparison")
+
+                        for project in repos_to_refresh:
+                            target_path = config.path_prefix / project.filesystem_path
+
+                            # If no metadata is available for this project, refresh it by default
+                            if not getattr(project, "metadata", None):
+                                repos_needing_refresh.append(project)
+                                logger.debug(
+                                    "↻ %s: needs refresh (no metadata available for SHA comparison)",
+                                    project.name,
+                                )
+                                continue
+
+                            # Get local HEAD SHA
+                            try:
+                                from gerrit_clone.git_utils import get_current_commit_sha
+                                local_sha = get_current_commit_sha(target_path)
+                                # Metadata is guaranteed to exist by the check above (continue on line 873)
+                                metadata = getattr(project, "metadata", {}) or {}
+                                remote_sha = metadata.get('latest_commit_sha')
+
+                                # Handle different SHA comparison scenarios
+                                if not remote_sha and not local_sha:
+                                    # Both None: Empty repository with no commits
+                                    # No refresh needed since there's nothing to pull
+                                    repos_up_to_date.append(project)
+                                    logger.debug(f"✓ {project.name}: up-to-date (empty repository, no commits)")
+                                elif remote_sha and local_sha and local_sha == remote_sha:
+                                    # SHAs match: Repository is up to date
+                                    repos_up_to_date.append(project)
+                                    # Safe to slice here because we know local_sha is not None
+                                    logger.debug(f"✓ {project.name}: up-to-date ({local_sha[:8]})")
+                                else:
+                                    # SHAs differ or one is missing: Needs refresh
+                                    repos_needing_refresh.append(project)
+                                    if not remote_sha:
+                                        logger.debug(f"↻ {project.name}: needs refresh (no remote SHA available)")
+                                    elif not local_sha:
+                                        logger.debug(f"↻ {project.name}: needs refresh (no local SHA available)")
+                                    else:
+                                        logger.debug(
+                                            f"↻ {project.name}: needs refresh (local: {local_sha[:8]}, remote: {remote_sha[:8]})"
+                                        )
+                            except Exception as e:
+                                # If we can't determine, add to refresh list to be safe
+                                logger.debug(f"? {project.name}: couldn't check SHA ({e}), will refresh")
+                                repos_needing_refresh.append(project)
+                    else:
+                        # For non-GitHub or when metadata not available, refresh all
+                        repos_needing_refresh = repos_to_refresh
+
+                    logger.debug(
+                        f"Refresh analysis: {len(repos_needing_refresh)} need refresh, {len(repos_up_to_date)} up-to-date"
+                    )
+
+                    # Create results for up-to-date repos (verified but not refreshed)
+                    for project in repos_up_to_date:
+                        target_path = config.path_prefix / project.filesystem_path
+                        results.append(CloneResult(
+                            project=project,
+                            status=CloneStatus.VERIFIED,
+                            path=target_path,
+                            started_at=started_at,
+                            completed_at=datetime.now(UTC),
+                            duration_seconds=0.0,
+                            was_refreshed=False,
+                            refresh_had_updates=False,
+                            refresh_commits_pulled=0,
+                        ))
+
+                    # Only refresh repos that actually need it
+                    if repos_needing_refresh:
+                        logger.debug(
+                            f"Refreshing {len(repos_needing_refresh)} repositories (use --no-refresh to skip)"
+                        )
+
+                        # Show progress message
+                        if not config.quiet:
+                            from rich.console import Console
+                            console = Console(stderr=True)
+                            console.print(f"🔄 Refreshing {len(repos_needing_refresh)} repositories...")
+
+                        # Refresh existing repositories using RefreshWorker
+                        from gerrit_clone.refresh_worker import RefreshWorker
+                        from gerrit_clone.models import RefreshStatus, RetryPolicy
+
+                        # Create a RefreshWorker instance
+                        # RefreshWorker handles both Gerrit and GitHub repositories:
+                        # - Gerrit repos: Uses 'origin' remote (standard Gerrit convention)
+                        # - GitHub repos: Uses 'origin' remote (standard GitHub convention)
+                        # - Both: Supports SSH and HTTPS authentication methods
+                        # - GitHub: Token auth via HTTPS, SSH keys, or gh CLI
+                        # - Authentication is handled transparently via git config and environment
+                        #
+                        # Key parameters for cross-platform refresh:
+                        # - filter_gerrit_only=False: Process ALL repos (Gerrit + GitHub)
+                        # - prune=True: Remove stale remote-tracking branches
+                        # - auto_stash: Controlled by force_refresh flag
+                        # - strategy="merge": Safe default for both platforms
+                        refresh_worker = RefreshWorker(
+                            config=config,
+                            retry_policy=RetryPolicy(),
+                            timeout=config.clone_timeout,
+                            fetch_only=config.fetch_only,
+                            prune=True,
+                            skip_conflicts=config.skip_conflicts,
+                            auto_stash=config.force_refresh,
+                            strategy="merge",
+                            filter_gerrit_only=False,  # Refresh all repos including GitHub
+                            force=config.force_refresh,
+                        )
+
+                        # Refresh each repository with progress display
+                        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
+                        from rich.console import Console
+
+                        with Progress(
+                            SpinnerColumn(),
+                            TextColumn("[progress.description]{task.description}"),
+                            BarColumn(bar_width=40),
+                            MofNCompleteColumn(),
+                            TextColumn("•"),
+                            TimeElapsedColumn(),
+                            console=Console(stderr=True),
+                            transient=False,
+                        ) as progress:
+                            task = progress.add_task(
+                                f"Refreshing repositories...",
+                                total=len(repos_needing_refresh)
+                            )
+
+                            for project in repos_needing_refresh:
+                                target_path = config.path_prefix / project.filesystem_path
+                                refresh_start = datetime.now(UTC)
+
+                                # Update progress description
+                                progress.update(task, description=f"Refreshing {project.name}")
+
+                                try:
+                                    # Refresh single repository using the worker
+                                    refresh_result = refresh_worker.refresh_repository(target_path)
+
+                                    # Convert RefreshResult to CloneResult
+                                    # Check if refresh failed first
+                                    if refresh_result.status == RefreshStatus.FAILED:
+                                        clone_status = CloneStatus.FAILED
+                                        error_message = f"Refresh failed: {refresh_result.error_message}"
+                                    # Use VERIFIED if up-to-date, REFRESHED if changes were pulled
+                                    elif refresh_result.was_behind:
+                                        clone_status = CloneStatus.REFRESHED
+                                        error_message = None
+                                    else:
+                                        clone_status = CloneStatus.VERIFIED
+                                        error_message = None
+
+                                    clone_result = CloneResult(
+                                        project=project,
+                                        status=clone_status,
+                                        path=target_path,
+                                        started_at=refresh_start,
+                                        completed_at=datetime.now(UTC),
+                                        duration_seconds=refresh_result.duration_seconds,
+                                        was_refreshed=refresh_result.was_behind,
+                                        refresh_had_updates=refresh_result.was_behind,
+                                        refresh_commits_pulled=refresh_result.commits_pulled,
+                                        error_message=error_message,
+                                    )
+
+                                    results.append(clone_result)
+
+                                except Exception as e:
+                                    # If refresh fails, create a failed result with clear context
+                                    logger.warning(f"Failed to refresh {project.name}: {e}")
+                                    results.append(CloneResult(
+                                        project=project,
+                                        status=CloneStatus.FAILED,
+                                        path=target_path,
+                                        started_at=refresh_start,
+                                        completed_at=datetime.now(UTC),
+                                        duration_seconds=(datetime.now(UTC) - refresh_start).total_seconds(),
+                                        error_message=f"Refresh failed for {project.name}: {e}",
+                                    ))
+
+                                # Advance progress
+                                progress.update(task, advance=1)
+                else:
+                    # --no-refresh: Just mark as already exists
+                    logger.debug(
+                        "Skipping refresh for %d existing repositories (--no-refresh enabled)",
+                        len(repos_to_refresh)
+                    )
+                    for project in repos_to_refresh:
+                        target_path = config.path_prefix / project.filesystem_path
+                        results.append(CloneResult(
+                            project=project,
+                            status=CloneStatus.ALREADY_EXISTS,
+                            path=target_path,
+                            started_at=started_at,
+                            completed_at=datetime.now(UTC),
+                            duration_seconds=0.0,
+                        ))
+
+            # Only clone repos that need cloning
+            if repos_needing_clone:
+                with suppress_console_logging(verbose=config.verbose):
+                    try:
+                        clone_results = manager.clone_projects(repos_needing_clone)
+                        results.extend(clone_results)
+                    finally:
+                        # Progress tracker cleanup handled by status manager context
+                        pass
+            else:
+                logger.debug("All repositories already exist - nothing to clone")
+
+            # Retry failed clones (but not failed refreshes)
+            # Refresh failures should not be retried as clone operations
+            repos_that_were_refreshed = {p.name for p in repos_to_refresh}
+            failed_results = [
+                r for r in results
+                if r.failed and r.project.name not in repos_that_were_refreshed
+            ]
             if failed_results:
                 # Always use single thread for retry to avoid SSH agent contention
                 retry_threads = 1

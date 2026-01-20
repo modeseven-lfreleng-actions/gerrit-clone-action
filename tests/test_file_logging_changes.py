@@ -186,8 +186,8 @@ class TestDynamicLogFileNaming:
                         quiet=True,
                     )
 
-                    # Verify get_default_log_path was called with the host
-                    mock_get_log_path.assert_called_once_with(test_host)
+                    # Verify get_default_log_path was called with the host and path_prefix
+                    mock_get_log_path.assert_called_once_with(test_host, None)
 
             finally:
                 os.chdir(original_cwd)
