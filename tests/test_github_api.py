@@ -12,7 +12,10 @@ import pytest
 
 from gerrit_clone.github_api import (
     GitHubAPI,
+    GitHubAPIError,
     GitHubAuthError,
+    GitHubNotFoundError,
+    GitHubRateLimitError,
     GitHubRepo,
     get_default_org_or_user,
     sanitize_description,
@@ -214,6 +217,92 @@ class TestGitHubAPI:
         result = api.repo_exists("owner", "test-repo")
 
         assert result is False
+        api.close()
+
+
+class TestHandleResponseErrors:
+    """Test error handling with GitHub API responses."""
+
+    def test_rate_limit_detected_by_header(self) -> None:
+        """Test rate limit detection using X-RateLimit-Remaining header."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"X-RateLimit-Remaining": "0"}
+        mock_response.text = "Forbidden"
+
+        with pytest.raises(GitHubRateLimitError, match="rate limit exceeded"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
+        api.close()
+
+    def test_rate_limit_detected_by_retry_after_header(self) -> None:
+        """Test rate limit detection using Retry-After header."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"Retry-After": "60"}
+        mock_response.text = "Forbidden"
+
+        with pytest.raises(GitHubRateLimitError, match="Retry after 60 seconds"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
+        api.close()
+
+    def test_rate_limit_detected_by_text_fallback(self) -> None:
+        """Test rate limit detection falls back to text matching."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {}
+        mock_response.text = "API rate limit exceeded for user"
+
+        with pytest.raises(GitHubRateLimitError, match="rate limit exceeded"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
+        api.close()
+
+    def test_403_without_rate_limit_raises_generic_error(self) -> None:
+        """Test 403 without rate limit indicators raises generic APIError."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {}
+        mock_response.text = "Access denied for other reasons"
+
+        with pytest.raises(GitHubAPIError, match="Forbidden"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
+        api.close()
+
+    def test_401_raises_auth_error(self) -> None:
+        """Test 401 raises authentication error."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.text = "Bad credentials"
+
+        with pytest.raises(GitHubAuthError, match="Authentication failed"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
+        api.close()
+
+    def test_404_raises_not_found_error(self) -> None:
+        """Test 404 raises not found error."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.text = "Not found"
+
+        with pytest.raises(GitHubNotFoundError, match="Resource not found"):
+            api._handle_response_errors(mock_response, "/test/endpoint")
+
         api.close()
 
 
@@ -792,5 +881,196 @@ class TestListAllReposGraphQL:
             query = call_args[1]["json"]["query"]
             # The escaped version should be in the query
             assert 'test\\"org' in query
+
+        api.close()
+
+
+class TestRequestPaginated:
+    """Test _request_paginated method for handling GitHub API pagination."""
+
+    def test_single_page_response(self) -> None:
+        """Test pagination with single page of results."""
+        api = GitHubAPI(token="test-token")
+
+        # Mock response with no Link header (single page)
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": 1}, {"id": 2}, {"id": 3}]
+        mock_response.headers.get.return_value = ""  # No Link header
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(api.client, "request", return_value=mock_response):
+            results = api._request_paginated("GET", "/test/endpoint")
+
+        assert len(results) == 3
+        assert results[0]["id"] == 1
+        assert results[1]["id"] == 2
+        assert results[2]["id"] == 3
+
+        api.close()
+
+    def test_multiple_pages_response(self) -> None:
+        """Test pagination with multiple pages of results."""
+        api = GitHubAPI(token="test-token")
+
+        # Mock responses for 3 pages
+        page1_response = Mock()
+        page1_response.status_code = 200
+        page1_response.json.return_value = [{"id": 1}, {"id": 2}]
+        page1_response.headers.get.return_value = (
+            '<https://api.github.com/test?page=2>; rel="next"'
+        )
+        page1_response.raise_for_status = Mock()
+
+        page2_response = Mock()
+        page2_response.status_code = 200
+        page2_response.json.return_value = [{"id": 3}, {"id": 4}]
+        page2_response.headers.get.return_value = (
+            '<https://api.github.com/test?page=3>; rel="next"'
+        )
+        page2_response.raise_for_status = Mock()
+
+        page3_response = Mock()
+        page3_response.status_code = 200
+        page3_response.json.return_value = [{"id": 5}]
+        page3_response.headers.get.return_value = ""  # No next page
+        page3_response.raise_for_status = Mock()
+
+        with patch.object(
+            api.client,
+            "request",
+            side_effect=[page1_response, page2_response, page3_response],
+        ):
+            results = api._request_paginated("GET", "/test/endpoint")
+
+        assert len(results) == 5
+        assert results[0]["id"] == 1
+        assert results[4]["id"] == 5
+
+        api.close()
+
+    def test_empty_page_stops_pagination(self) -> None:
+        """Test that empty page stops pagination."""
+        api = GitHubAPI(token="test-token")
+
+        # Mock response with empty data
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = []
+        mock_response.headers.get.return_value = ""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(api.client, "request", return_value=mock_response):
+            results = api._request_paginated("GET", "/test/endpoint")
+
+        assert len(results) == 0
+
+        api.close()
+
+    def test_max_pages_limit(self) -> None:
+        """Test that max_pages parameter limits pagination."""
+        api = GitHubAPI(token="test-token")
+
+        # Mock responses for multiple pages
+        page_response = Mock()
+        page_response.status_code = 200
+        page_response.json.return_value = [{"id": 1}, {"id": 2}]
+        page_response.headers.get.return_value = (
+            '<https://api.github.com/test?page=2>; rel="next"'
+        )
+        page_response.raise_for_status = Mock()
+
+        with patch.object(api.client, "request", return_value=page_response):
+            results = api._request_paginated("GET", "/test/endpoint", max_pages=2)
+
+        # Should only fetch 2 pages (4 items)
+        assert len(results) == 4
+
+        api.close()
+
+    def test_custom_per_page(self) -> None:
+        """Test that per_page parameter is passed correctly."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": 1}]
+        mock_response.headers.get.return_value = ""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(
+            api.client, "request", return_value=mock_response
+        ) as mock_request:
+            api._request_paginated("GET", "/test/endpoint", per_page=50)
+
+        # Verify per_page parameter was passed
+        call_args = mock_request.call_args
+        assert call_args[1]["params"]["per_page"] == 50
+
+        api.close()
+
+    def test_additional_params_preserved(self) -> None:
+        """Test that additional parameters are preserved across pages."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": 1}]
+        mock_response.headers.get.return_value = ""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(
+            api.client, "request", return_value=mock_response
+        ) as mock_request:
+            api._request_paginated(
+                "GET", "/test/endpoint", params={"state": "open", "sort": "created"}
+            )
+
+        # Verify custom params are included
+        call_args = mock_request.call_args
+        assert call_args[1]["params"]["state"] == "open"
+        assert call_args[1]["params"]["sort"] == "created"
+
+        api.close()
+
+    def test_params_not_mutated(self) -> None:
+        """Test that original params dict is not mutated during pagination."""
+        api = GitHubAPI(token="test-token")
+
+        # Create params dict to pass to the method
+        original_params = {"state": "open", "sort": "created"}
+        params_copy = original_params.copy()
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": 1}]
+        mock_response.headers.get.return_value = ""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(api.client, "request", return_value=mock_response):
+            api._request_paginated("GET", "/test/endpoint", params=original_params)
+
+        # Verify original params dict was not mutated
+        assert original_params == params_copy
+        assert "per_page" not in original_params
+        assert "page" not in original_params
+
+        api.close()
+
+    def test_non_list_response_stops_pagination(self) -> None:
+        """Test that non-list response stops pagination."""
+        api = GitHubAPI(token="test-token")
+
+        # Mock response with dict instead of list
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"error": "test"}
+        mock_response.headers.get.return_value = ""
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(api.client, "request", return_value=mock_response):
+            results = api._request_paginated("GET", "/test/endpoint")
+
+        assert len(results) == 0
 
         api.close()
