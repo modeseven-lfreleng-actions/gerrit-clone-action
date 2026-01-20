@@ -19,7 +19,9 @@ from rich.text import Text
 
 from gerrit_clone import __version__
 from gerrit_clone.clone_manager import clone_repositories
+from gerrit_clone.concurrent_utils import handle_sigint_gracefully
 from gerrit_clone.config import ConfigurationError, load_config
+from gerrit_clone.refresh_manager import refresh_repositories
 from gerrit_clone.error_codes import (
     DiscoveryError,
     ExitCode,
@@ -36,13 +38,16 @@ from gerrit_clone.mirror_manager import (
     MirrorManager,
     filter_projects_by_hierarchy,
 )
-from gerrit_clone.models import DiscoveryMethod, RetryPolicy
+from gerrit_clone.models import DiscoveryMethod, RefreshBatchResult, RetryPolicy
 from gerrit_clone.rich_status import (
     handle_crash_display,
     show_error_summary,
     show_final_results,
 )
 from gerrit_clone.unified_discovery import discover_projects
+from gerrit_clone.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def _is_github_actions_context() -> bool:
@@ -249,9 +254,10 @@ def clone(
     clone_timeout: int = typer.Option(
         600,
         "--clone-timeout",
-        help="Timeout per clone operation in seconds",
+        help="Timeout per clone operation in seconds (min: 30, max: 1800)",
         envvar="GERRIT_CLONE_TIMEOUT",
         min=30,
+        max=1800,
     ),
     retry_attempts: int = typer.Option(
         3,
@@ -367,6 +373,9 @@ def clone(
         # Include archived repositories
         gerrit-clone --host gerrit.example.org --include-archived
     """
+    # Configure graceful interrupt handling for multi-threaded operations
+    handle_sigint_gracefully()
+
     # Set up console for error handling
     console = Console(stderr=True)
 
@@ -593,6 +602,9 @@ def clone(
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
+        # Flush console to ensure message is displayed before exit
+        if hasattr(console.file, "flush"):
+            console.file.flush()
         raise typer.Exit(int(ExitCode.INTERRUPT)) from None
     except typer.Exit:
         # Re-raise typer.Exit exceptions without catching them as generic exceptions
@@ -688,6 +700,299 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     console.print(panel)
     console.print()
+
+
+@app.command()
+def refresh(
+    path: Path = typer.Option(
+        Path.cwd(),
+        "--path",
+        help="Path to Gerrit clone directory to refresh (defaults to current directory)",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    threads: int | None = typer.Option(
+        None,
+        "--threads",
+        help="Number of concurrent refresh operations (default: auto-detect based on CPU cores)",
+        min=1,
+    ),
+    fetch_only: bool = typer.Option(
+        False,
+        "--fetch-only",
+        help="Only fetch changes without merging (safer, allows inspection before merge)",
+    ),
+    prune: bool = typer.Option(
+        True,
+        "--prune / --no-prune",
+        help="Prune deleted remote branches during fetch",
+    ),
+    timeout: int = typer.Option(
+        300,
+        "--timeout",
+        help="Timeout for each git operation in seconds (min: 10, max: 1800)",
+        min=10,
+        max=1800,
+    ),
+    skip_conflicts: bool = typer.Option(
+        True,
+        "--skip-conflicts / --no-skip-conflicts",
+        help="Skip repositories with uncommitted changes or conflicts",
+    ),
+    auto_stash: bool = typer.Option(
+        False,
+        "--auto-stash",
+        help="Automatically stash uncommitted changes before refresh and restore after",
+    ),
+    strategy: str = typer.Option(
+        "merge",
+        "--strategy",
+        help="Git pull strategy: 'merge' (fast-forward only) or 'rebase'",
+    ),
+    filter_gerrit_only: bool = typer.Option(
+        True,
+        "--gerrit-only / --all-repos",
+        help="Only refresh repositories with Gerrit remotes",
+    ),
+    exit_on_error: bool = typer.Option(
+        False,
+        "--exit-on-error",
+        help="Exit immediately when first error occurs (useful for debugging)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be refreshed without making any changes",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Force refresh by fixing detached HEAD, upstream tracking, and auto-stashing changes",
+    ),
+    recursive: bool = typer.Option(
+        True,
+        "--recursive / --no-recursive",
+        help="Recursively discover repositories in subdirectories (default: recursive)",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose output with detailed logging",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress non-essential output",
+    ),
+    manifest_filename: str | None = typer.Option(
+        None,
+        "--manifest-filename",
+        help="Output manifest filename (default: refresh-manifest-TIMESTAMP.json)",
+    ),
+) -> None:
+    """Refresh local content cloned from a Gerrit server.
+
+    Scans the specified directory for Git repositories and updates them by pulling
+    latest changes from their Gerrit remotes. Supports parallel updates, automatic
+    stash handling, and various safety features.
+
+    Examples:
+
+        # Refresh all repos in current directory
+        gerrit-clone refresh
+
+        # Refresh ONAP repositories
+        gerrit-clone refresh --path /Users/mwatkins/Repositories/onap
+
+        # Fetch only (don't merge)
+        gerrit-clone refresh --path ~/onap --fetch-only
+
+        # Use 16 threads for faster refresh
+        gerrit-clone refresh --path ~/onap --threads 16
+
+        # Auto-stash uncommitted changes
+        gerrit-clone refresh --path ~/onap --auto-stash
+
+        # Dry run (show what would be updated)
+        gerrit-clone refresh --path ~/onap --dry-run
+    """
+    # Configure graceful interrupt handling for multi-threaded operations
+    handle_sigint_gracefully()
+
+    console = Console()
+
+    # Validate strategy
+    if strategy not in ("merge", "rebase"):
+        console.print(f"[red]❌ Invalid pull strategy: {strategy}. Must be 'merge' or 'rebase'.[/red]")
+        raise typer.Exit(ExitCode.VALIDATION_ERROR.value)
+
+    # Display version
+    console.print(_format_version_string("refresh"))
+    console.print()
+
+    # Initialize logging
+    cli_args = cli_args_to_dict(**locals())
+
+    from gerrit_clone.file_logging import get_default_log_path
+
+    log_file_path = get_default_log_path("refresh")
+
+    file_logger, error_collector = init_logging(
+        log_file=log_file_path,
+        disable_file=False,
+        log_level="DEBUG",
+        console_level="DEBUG" if verbose else "INFO",
+        quiet=quiet,
+        verbose=verbose,
+        cli_args=cli_args,
+        host=None,
+    )
+
+    if log_file_path and verbose:
+        console.print(f"📝 Logging to: [cyan]{log_file_path}[/cyan]")
+        console.print()
+
+    # Display configuration summary
+    console.print("[bold blue]Refresh Configuration[/bold blue]")
+    console.print(f"Base Path: [cyan]{path}[/cyan]")
+    console.print(f"Threads: [cyan]{threads or 'auto-detect'}[/cyan]")
+    console.print(f"Mode: [cyan]{'Fetch Only' if fetch_only else f'Pull ({strategy})'}[/cyan]")
+    console.print(f"Prune: [cyan]{prune}[/cyan]")
+    console.print(f"Timeout: [cyan]{timeout}s[/cyan]")
+    console.print(f"Skip Conflicts: [cyan]{skip_conflicts}[/cyan]")
+    console.print(f"Auto Stash: [cyan]{auto_stash}[/cyan]")
+    console.print(f"Filter: [cyan]{'Gerrit only' if filter_gerrit_only else 'All repos'}[/cyan]")
+    console.print(f"Dry Run: [cyan]{dry_run}[/cyan]")
+    console.print(f"Force: [cyan]{force}[/cyan]")
+    console.print(f"Recursive: [cyan]{recursive}[/cyan]")
+    console.print()
+
+    try:
+        # Execute refresh
+        result = refresh_repositories(
+            base_path=path,
+            config=None,
+            timeout=timeout,
+            fetch_only=fetch_only,
+            prune=prune,
+            skip_conflicts=skip_conflicts,
+            auto_stash=auto_stash,
+            strategy=strategy,
+            filter_gerrit_only=filter_gerrit_only,
+            threads=threads,
+            exit_on_error=exit_on_error,
+            dry_run=dry_run,
+            force=force,
+            recursive=recursive,
+        )
+
+        # Display results
+        _show_refresh_results(console, result, dry_run)
+
+        # Write manifest with timestamp by default, or use specified filename
+        if manifest_filename:
+            manifest_file = path / manifest_filename
+        else:
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+            manifest_file = path / f"refresh-manifest-{timestamp}.json"
+        _write_refresh_manifest(manifest_file, result)
+        console.print(f"📄 Manifest: [cyan]{manifest_file}[/cyan]")
+        console.print()
+
+        # Determine exit code
+        if result.failed_count > 0:
+            console.print(f"[yellow]⚠️  {result.failed_count} repositories failed to refresh[/yellow]")
+            raise typer.Exit(ExitCode.GENERAL_ERROR.value)
+        elif result.conflicts_count > 0:
+            console.print(f"[yellow]⚠️  {result.conflicts_count} repositories have conflicts[/yellow]")
+            raise typer.Exit(ExitCode.GENERAL_ERROR.value)
+        else:
+            console.print("[green]✅ All repositories refreshed successfully![/green]")
+            raise typer.Exit(ExitCode.SUCCESS.value)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠️  Refresh cancelled by user[/yellow]")
+        # Flush console to ensure message is displayed before exit
+        if hasattr(console.file, "flush"):
+            console.file.flush()
+        raise typer.Exit(ExitCode.INTERRUPT.value)
+    except typer.Exit:
+        # Re-raise typer.Exit without catching it
+        raise
+    except Exception as e:
+        console.print(f"[red]❌ Refresh failed: {e}[/red]")
+        if verbose:
+            import traceback
+            console.print(traceback.format_exc())
+        raise typer.Exit(ExitCode.GENERAL_ERROR.value)
+
+
+def _show_refresh_results(console: Console, result: RefreshBatchResult, dry_run: bool) -> None:
+    """Display refresh results summary.
+
+    Args:
+        console: Rich console
+        result: Refresh batch result
+        dry_run: Whether this was a dry run
+    """
+    console.print()
+    console.print("[bold]Refresh Summary[/bold]")
+    console.print("─" * 60)
+
+    # Overall stats
+    console.print(f"Total Repositories: [cyan]{result.total_count}[/cyan]")
+    console.print(f"Duration: [cyan]{result.duration_seconds:.1f}s[/cyan]")
+    console.print()
+
+    # Status breakdown
+    if dry_run:
+        console.print("[bold]Dry Run Results:[/bold]")
+    else:
+        console.print("[bold]Results:[/bold]")
+
+    console.print(f"  ✅ Successful: [green]{result.success_count}[/green]")
+    console.print(f"  ✓  Up-to-date: [blue]{result.up_to_date_count}[/blue]")
+    console.print(f"  🔄 Updated: [cyan]{result.updated_count}[/cyan]")
+    console.print(f"  ❌ Failed: [red]{result.failed_count}[/red]")
+    console.print(f"  ⊘  Skipped: [yellow]{result.skipped_count}[/yellow]")
+    console.print(f"  ⚠️  Conflicts: [yellow]{result.conflicts_count}[/yellow]")
+    console.print()
+
+    if not dry_run and result.total_commits_pulled > 0:
+        console.print(f"Repositories Updated: [cyan]{result.total_commits_pulled}[/cyan]")
+        console.print(f"Total Files Changed: [cyan]{result.total_files_changed}[/cyan]")
+        console.print()
+
+    # Show failed/conflict details
+    failed_results = [r for r in result.results if r.failed or r.has_conflicts]
+    if failed_results:
+        console.print("[bold yellow]Issues:[/bold yellow]")
+        for r in failed_results[:10]:  # Show first 10
+            status_emoji = "❌" if r.failed else "⚠️"
+            console.print(f"  {status_emoji} {r.project_name}: {r.error_message or r.status.value}")
+
+        if len(failed_results) > 10:
+            console.print(f"  ... and {len(failed_results) - 10} more (see manifest for details)")
+        console.print()
+
+
+def _write_refresh_manifest(manifest_path: Path, result: RefreshBatchResult) -> None:
+    """Write refresh manifest to JSON file.
+
+    Args:
+        manifest_path: Path to write manifest
+        result: Refresh batch result
+    """
+    try:
+        with manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to write refresh manifest: {e}")
 
 
 @app.command(name="mirror")
@@ -854,6 +1159,9 @@ def mirror(
         gerrit-clone mirror --server gerrit.onap.org --org myorg \\
           --discovery-method http --https
     """
+    # Configure graceful interrupt handling for multi-threaded operations
+    handle_sigint_gracefully()
+
     console = Console(stderr=True)
 
     try:
@@ -1059,7 +1367,13 @@ def mirror(
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
     except KeyboardInterrupt:
         console.print("\n[yellow]Mirror operation cancelled by user[/yellow]")
+        # Flush console to ensure message is displayed before exit
+        if hasattr(console.file, "flush"):
+            console.file.flush()
         raise typer.Exit(ExitCode.INTERRUPT)
+    except typer.Exit:
+        # Re-raise typer.Exit without catching it
+        raise
     except Exception as e:
         console.print(f"[red]Unexpected Error:[/red] {e}")
         if verbose:
@@ -1151,6 +1465,9 @@ def show_config(
             )
         )
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+    except typer.Exit:
+        # Re-raise typer.Exit without catching it
+        raise
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(ExitCode.GENERAL_ERROR) from None
