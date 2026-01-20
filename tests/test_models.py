@@ -18,6 +18,7 @@ from gerrit_clone.models import (
     Project,
     ProjectState,
     RetryPolicy,
+    SourceType,
 )
 
 
@@ -120,7 +121,7 @@ class TestConfig:
         config = Config(host="gerrit.example.org")
 
         assert config.host == "gerrit.example.org"
-        assert config.port == 29418
+        assert config.port == 29418  # Defaults for Gerrit
         assert config.base_url == "https://gerrit.example.org"
         assert config.ssh_user is None
         assert config.path_prefix == Path().resolve()
@@ -177,11 +178,12 @@ class TestConfig:
         with pytest.raises(ValueError, match="host is required"):
             Config(host="")
 
+        # Port validation for Gerrit (default source type)
         with pytest.raises(ValueError, match="port must be between 1 and 65535"):
-            Config(host="test", port=0)
+            Config(host="test", source_type=SourceType.GERRIT, port=0)
 
         with pytest.raises(ValueError, match="port must be between 1 and 65535"):
-            Config(host="test", port=70000)
+            Config(host="test", source_type=SourceType.GERRIT, port=70000)
 
         with pytest.raises(ValueError, match="threads must be at least 1"):
             Config(host="test", threads=0)
@@ -191,6 +193,51 @@ class TestConfig:
 
         with pytest.raises(ValueError, match="clone_timeout must be positive"):
             Config(host="test", clone_timeout=-1)
+
+    def test_github_port_defaults_to_none(self):
+        """Test that port defaults to None for GitHub sources."""
+        config = Config(
+            host="github.com",
+            source_type=SourceType.GITHUB,
+        )
+        assert config.port is None
+
+    def test_gerrit_port_defaults_to_29418(self):
+        """Test that port defaults to 29418 for Gerrit sources."""
+        config = Config(
+            host="gerrit.example.org",
+            source_type=SourceType.GERRIT,
+        )
+        assert config.port == 29418
+
+    def test_github_port_can_be_explicitly_set_with_warning(self):
+        """Test that setting an explicit port for GitHub logs a warning."""
+        # Note: We can't easily test the warning without mocking the logger import
+        # Just verify the config is created and port is preserved
+        config = Config(
+            host="github.com",
+            source_type=SourceType.GITHUB,
+            port=8080,  # Explicit port (will be ignored but accepted)
+        )
+        assert config.port == 8080
+
+    def test_gerrit_requires_valid_port(self):
+        """Test that Gerrit sources require a valid port."""
+        # Port too low
+        with pytest.raises(ValueError, match="port must be between 1 and 65535"):
+            Config(
+                host="gerrit.example.org",
+                source_type=SourceType.GERRIT,
+                port=0,
+            )
+
+        # Port too high
+        with pytest.raises(ValueError, match="port must be between 1 and 65535"):
+            Config(
+                host="gerrit.example.org",
+                source_type=SourceType.GERRIT,
+                port=99999,
+            )
 
     def test_effective_threads(self):
         """Test effective_threads property."""
@@ -340,6 +387,7 @@ class TestBatchResult:
         project2 = Project("repo2", ProjectState.ACTIVE)
         project3 = Project("repo3", ProjectState.ACTIVE)
         project4 = Project("repo4", ProjectState.ACTIVE)
+        project5 = Project("repo5", ProjectState.ACTIVE)
         path = Path("/tmp")
 
         results = [
@@ -347,6 +395,7 @@ class TestBatchResult:
             CloneResult(project2, CloneStatus.FAILED, path),
             CloneResult(project3, CloneStatus.SKIPPED, path),
             CloneResult(project4, CloneStatus.ALREADY_EXISTS, path),
+            CloneResult(project5, CloneStatus.REFRESHED, path),
         ]
 
         batch_result = BatchResult(
@@ -355,10 +404,17 @@ class TestBatchResult:
             started_at=datetime.now(UTC),
         )
 
-        assert batch_result.total_count == 4
-        assert batch_result.success_count == 2  # SUCCESS + ALREADY_EXISTS
+        assert batch_result.total_count == 5
+        assert batch_result.success_count == 3  # SUCCESS + ALREADY_EXISTS + REFRESHED
+        assert (
+            batch_result.already_exists_count == 1
+        )  # ALREADY_EXISTS counted separately
+        assert batch_result.refreshed_count == 1  # REFRESHED counted separately
+        assert batch_result.verified_count == 0  # No VERIFIED in this test
         assert batch_result.failed_count == 1
         assert batch_result.skipped_count == 1
+        # Success rate should include SUCCESS, ALREADY_EXISTS, and REFRESHED
+        assert batch_result.success_rate == 60.0  # 3 / 5 * 100
 
     def test_batch_result_duration(self):
         """Test batch result duration calculation."""
@@ -387,7 +443,7 @@ class TestBatchResult:
         empty_result = BatchResult(config, [], datetime.now(UTC))
         assert empty_result.success_rate == 0.0
 
-        # Mixed results
+        # Mixed results including REFRESHED
         results = [
             CloneResult(project1, CloneStatus.SUCCESS, path),
             CloneResult(project2, CloneStatus.SUCCESS, path),
@@ -396,7 +452,25 @@ class TestBatchResult:
         ]
 
         batch_result = BatchResult(config, results, datetime.now(UTC))
+        assert batch_result.success_count == 3  # SUCCESS + SUCCESS + ALREADY_EXISTS
         assert batch_result.success_rate == 75.0  # 3 out of 4 successful
+
+        # Test with REFRESHED and VERIFIED statuses
+        results_with_refresh = [
+            CloneResult(project1, CloneStatus.SUCCESS, path),
+            CloneResult(project2, CloneStatus.REFRESHED, path),
+            CloneResult(project3, CloneStatus.VERIFIED, path),
+            CloneResult(project4, CloneStatus.FAILED, path),
+        ]
+
+        batch_result_refresh = BatchResult(
+            config, results_with_refresh, datetime.now(UTC)
+        )
+        # 3 out of 4 successful = 75.0% (SUCCESS + REFRESHED + VERIFIED)
+        assert batch_result_refresh.success_count == 3
+        assert batch_result_refresh.success_rate == 75.0
+        assert batch_result_refresh.refreshed_count == 1
+        assert batch_result_refresh.verified_count == 1
 
     def test_batch_result_to_dict(self):
         """Test batch result serialization."""

@@ -404,9 +404,7 @@ class GitHubAPI:
         else:
             endpoint = "/user/repos"
 
-        logger.info(
-            f"Creating GitHub repository: {org}/{name}" if org else name
-        )
+        logger.info(f"Creating GitHub repository: {org}/{name}" if org else name)
         data = self._request("POST", endpoint, json=payload)
         if not isinstance(data, dict):
             raise GitHubAPIError("Unexpected response type for repo creation")
@@ -561,7 +559,9 @@ class GitHubAPI:
                         logger.info(f"  Retrieved existing repo: {name}")
                         return GitHubRepo.from_api_response(data), None
                 except Exception as ex:
-                    logger.warning(f"Failed to retrieve existing repo details for {name}: {ex}")
+                    logger.warning(
+                        f"Failed to retrieve existing repo details for {name}: {ex}"
+                    )
                 return None, error
             else:
                 error = f"Status {response.status_code}: {response.text}"
@@ -572,9 +572,7 @@ class GitHubAPI:
             logger.error(f"✗ Failed to create {name}: {error}")
             return None, error
 
-    def list_all_repos_graphql(
-        self, org: str
-    ) -> dict[str, dict[str, Any]]:
+    def list_all_repos_graphql(self, org: str) -> dict[str, dict[str, Any]]:
         """List all repositories in an org using GraphQL (single query).
 
         This is much faster than paginating through REST API.
@@ -608,6 +606,11 @@ class GitHubAPI:
                     description
                     defaultBranchRef {{
                       name
+                      target {{
+                        ... on Commit {{
+                          oid
+                        }}
+                      }}
                     }}
                   }}
                   pageInfo {{
@@ -644,6 +647,23 @@ class GitHubAPI:
                 # Add repos to map
                 for node in nodes:
                     name = node["name"]
+                    # Extract commit SHA from defaultBranchRef
+                    default_branch_ref = node.get("defaultBranchRef")
+                    default_branch = None
+                    latest_commit_sha = None
+
+                    if default_branch_ref:
+                        default_branch = default_branch_ref.get("name")
+                        target = default_branch_ref.get("target")
+                        if target:
+                            latest_commit_sha = target.get("oid")
+                    else:
+                        logger.warning(
+                            "Repository %s has no default branch configured; "
+                            "latest_commit_sha will be unavailable",
+                            name,
+                        )
+
                     repos_map[name] = {
                         "name": name,
                         "full_name": node["nameWithOwner"],
@@ -652,11 +672,8 @@ class GitHubAPI:
                         "clone_url": node["url"],  # Use url for HTTPS clone
                         "private": node["isPrivate"],
                         "description": node.get("description"),
-                        "default_branch": (
-                            node.get("defaultBranchRef", {}).get("name")
-                            if node.get("defaultBranchRef")
-                            else None
-                        ),
+                        "default_branch": default_branch,
+                        "latest_commit_sha": latest_commit_sha,
                     }
 
                 has_next_page = page_info.get("hasNextPage", False)
@@ -672,9 +689,7 @@ class GitHubAPI:
                 logger.error(f"GraphQL query failed: {e}")
                 break
 
-        logger.info(
-            f"Fetched {len(repos_map)} repositories from {org} using GraphQL"
-        )
+        logger.debug(f"Fetched {len(repos_map)} repositories from {org} using GraphQL")
         return repos_map
 
     async def batch_delete_repos(
@@ -719,7 +734,9 @@ class GitHubAPI:
                     return repo_name, result
 
             tasks = [delete_with_semaphore(name) for name in repo_names]
-            results: list[tuple[str, tuple[bool, str | None]] | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
+            results: list[
+                tuple[str, tuple[bool, str | None]] | BaseException
+            ] = await asyncio.gather(*tasks, return_exceptions=True)
 
             results_map: dict[str, tuple[bool, str | None]] = {}
             for result in results:
@@ -733,7 +750,11 @@ class GitHubAPI:
             failed_count = len(repo_names) - success_count
 
             if failed_count > 0:
-                failed_repos = [name for name, (success, error) in results_map.items() if not success]
+                failed_repos = [
+                    name
+                    for name, (success, error) in results_map.items()
+                    if not success
+                ]
                 logger.error(
                     f"Batch delete: {success_count}/{len(repo_names)} successful, "
                     f"{failed_count} FAILED"
@@ -800,7 +821,9 @@ class GitHubAPI:
                     return name, result
 
             tasks = [create_with_semaphore(cfg) for cfg in repo_configs]
-            results: list[tuple[str, tuple[GitHubRepo | None, str | None]] | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
+            results: list[
+                tuple[str, tuple[GitHubRepo | None, str | None]] | BaseException
+            ] = await asyncio.gather(*tasks, return_exceptions=True)
 
             results_map: dict[str, tuple[GitHubRepo | None, str | None]] = {}
             for result in results:
@@ -816,7 +839,11 @@ class GitHubAPI:
             failed_count = len(repo_configs) - success_count
 
             if failed_count > 0:
-                failed_repos = [cfg["name"] for cfg in repo_configs if results_map.get(cfg["name"], (None, None))[0] is None]
+                failed_repos = [
+                    cfg["name"]
+                    for cfg in repo_configs
+                    if results_map.get(cfg["name"], (None, None))[0] is None
+                ]
                 logger.warning(
                     f"Batch create: {success_count}/{len(repo_configs)} successful, "
                     f"{failed_count} failed"

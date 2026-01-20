@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from gerrit_clone.models import Config, DiscoveryMethod, RetryPolicy
+from gerrit_clone.models import Config, DiscoveryMethod, RetryPolicy, SourceType
 
 
 class ConfigurationError(Exception):
@@ -61,6 +61,14 @@ class ConfigManager:
         exclude_projects: str | list[str] | None = None,
         ssh_debug: bool | None = None,
         exit_on_error: bool | None = None,
+        source_type: str | None = None,
+        github_token: str | None = None,
+        github_org: str | None = None,
+        use_gh_cli: bool | None = None,
+        auto_refresh: bool | None = None,
+        force_refresh: bool | None = None,
+        fetch_only: bool | None = None,
+        skip_conflicts: bool | None = None,
     ) -> Config:
         """Load configuration from all sources with precedence.
 
@@ -96,6 +104,14 @@ class ConfigManager:
             include_projects: Optional list of project names to clone (filters all projects)
             ssh_debug: Enable verbose SSH debugging (-vvv) for authentication issues
             exit_on_error: Exit immediately when the first clone error occurs
+            source_type: Source type (gerrit or github)
+            github_token: GitHub personal access token
+            github_org: GitHub organization or user name
+            use_gh_cli: Use GitHub CLI for cloning
+            auto_refresh: Auto-refresh existing repositories during clone (default: True)
+            force_refresh: Force refresh with stash and detached HEAD fixes
+            fetch_only: Only fetch changes without merging
+            skip_conflicts: Skip repositories with uncommitted changes
 
         Returns:
             Configured Config object
@@ -140,6 +156,14 @@ class ConfigManager:
             exclude_projects=exclude_projects,
             ssh_debug=ssh_debug,
             exit_on_error=exit_on_error,
+            source_type=source_type,
+            github_token=github_token,
+            github_org=github_org,
+            use_gh_cli=use_gh_cli,
+            auto_refresh=auto_refresh,
+            force_refresh=force_refresh,
+            fetch_only=fetch_only,
+            skip_conflicts=skip_conflicts,
         )
 
         # Merge configurations with precedence
@@ -353,14 +377,34 @@ class ConfigManager:
                         f"Invalid discovery_method '{dm}'. Must be one of: ssh, http, both"
                     )
 
-        # Smart port defaulting based on protocol
+        # Handle source_type conversion
+        if "source_type" in config_dict:
+            st = config_dict["source_type"]
+            if isinstance(st, str):
+                try:
+                    config_dict["source_type"] = SourceType(st.lower())
+                except ValueError:
+                    raise ConfigurationError(
+                        f"Invalid source_type '{st}'. Must be one of: gerrit, github"
+                    )
+
+        # Smart port defaulting based on protocol and source type
+        source_type = config_dict.get("source_type", SourceType.GERRIT)
         use_https = config_dict.get("use_https", False)
-        if "port" not in config_dict:
-            # No port specified, use protocol-appropriate default
-            config_dict["port"] = 443 if use_https else 29418
-        elif config_dict["port"] == 29418 and use_https:
-            # SSH port specified but using HTTPS, switch to HTTPS port
-            config_dict["port"] = 443
+
+        # For GitHub sources, port should always be None (not used)
+        if source_type == SourceType.GITHUB:
+            if "port" in config_dict:
+                # User explicitly set port for GitHub - remove it
+                config_dict.pop("port")
+        else:
+            # Gerrit sources need port configuration
+            if "port" not in config_dict:
+                # No port specified, use protocol-appropriate default
+                config_dict["port"] = 443 if use_https else 29418
+            elif config_dict["port"] == 29418 and use_https:
+                # SSH port specified but using HTTPS, switch to HTTPS port
+                config_dict["port"] = 443
 
         # Validate required fields
         if "host" not in config_dict:

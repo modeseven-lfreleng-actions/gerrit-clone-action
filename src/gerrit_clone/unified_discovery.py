@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 Matthew Watkins <mwatkins@linuxfoundation.org>
 
-"""Unified Gerrit project discovery coordinator.
+"""Unified project discovery coordinator.
 
-This module coordinates project discovery using HTTP, SSH, or both methods,
-and provides warnings when the methods return different results.
+This module coordinates project discovery for both Gerrit and GitHub sources,
+using HTTP, SSH, or both methods for Gerrit, and GitHub API for GitHub.
+Provides warnings when the methods return different results.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from gerrit_clone.error_codes import (
 )
 from gerrit_clone.gerrit_api import fetch_gerrit_projects
 from gerrit_clone.logging import get_logger
-from gerrit_clone.models import Config, DiscoveryMethod, Project
+from gerrit_clone.models import Config, DiscoveryMethod, Project, SourceType
 from gerrit_clone.ssh_discovery import fetch_gerrit_projects_ssh
 
 logger = get_logger(__name__)
@@ -100,16 +101,47 @@ class UnifiedDiscovery:
         Raises:
             Exception: If discovery fails
         """
+        # Handle GitHub discovery separately
+        if self.config.source_type == SourceType.GITHUB:
+            return self._discover_github()
+
+        # Gerrit discovery methods
         if self.config.discovery_method == DiscoveryMethod.SSH:
             return self._discover_ssh()
         elif self.config.discovery_method == DiscoveryMethod.HTTP:
             return self._discover_http()
         elif self.config.discovery_method == DiscoveryMethod.BOTH:
             return self._discover_both()
+        elif self.config.discovery_method == DiscoveryMethod.GITHUB_API:
+            return self._discover_github()
         else:
             raise ValueError(
                 f"Unknown discovery method: {self.config.discovery_method}"
             )
+
+    def _discover_github(self) -> tuple[list[Project], dict[str, Any]]:
+        """Discover GitHub repositories via API.
+
+        Returns:
+            Tuple of (projects, stats)
+
+        Raises:
+            DiscoveryError: If GitHub discovery fails
+        """
+        logger.debug("Discovering GitHub repositories via API")
+        try:
+            from gerrit_clone.github_discovery import discover_github_repositories
+
+            projects, stats = discover_github_repositories(self.config)
+            stats["warnings"] = []
+            return projects, stats
+        except Exception as e:
+            logger.error(f"GitHub discovery failed: {e}")
+            raise DiscoveryError(
+                message="GitHub API discovery failed",
+                details=str(e),
+                original_exception=e,
+            ) from e
 
     def _discover_ssh(self) -> tuple[list[Project], dict[str, Any]]:
         """Discover projects via SSH only.
@@ -285,7 +317,7 @@ class UnifiedDiscovery:
         merged_projects = self._create_project_union(http_projects, ssh_projects)
 
         # Create combined stats based on the merged result
-        stats = {
+        stats: dict[str, Any] = {
             "total": len(merged_projects),
             "filtered": max(ssh_stats["filtered"], http_stats["filtered"]),
             "skipped": max(ssh_stats["skipped"], http_stats["skipped"]),
@@ -358,6 +390,8 @@ class UnifiedDiscovery:
 
 def discover_projects(config: Config) -> tuple[list[Project], dict[str, Any]]:
     """Convenience function for unified project discovery.
+
+    Supports both Gerrit and GitHub sources.
 
     Args:
         config: Configuration with discovery settings

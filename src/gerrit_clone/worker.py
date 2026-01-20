@@ -239,7 +239,7 @@ class CloneWorker:
                 elif conflict == "incomplete_clone":
                     # Handle content conflict - could be incomplete clone or nested repo content from parent
                     if result.nested_under:
-                        logger.info(
+                        logger.debug(
                             f"🧹 Replacing parent repository content with nested repository for {project.name}"
                         )
                     else:

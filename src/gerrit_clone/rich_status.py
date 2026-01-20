@@ -127,12 +127,13 @@ def starting_clone(
     threads: int,
     skipped_count: int = 0,
     console: Optional[Console] = None,
+    item_name: str = "projects",
 ) -> None:
     """Show starting clone operation status."""
     if skipped_count > 0:
-        message = f"Cloning {filtered_count} active projects with {threads} workers (skipping {skipped_count} archived)"
+        message = f"Cloning {filtered_count} active {item_name} with {threads} workers (skipping {skipped_count} archived)"
     else:
-        message = f"Cloning {filtered_count} projects with {threads} workers"
+        message = f"Cloning {filtered_count} {item_name} with {threads} workers"
 
     # Try to send to progress tracker first
     status(message)
@@ -246,16 +247,17 @@ def show_final_results(
             f"[bold]Duration:[/bold] {duration_str}",
             f"[bold]Total Repositories:[/bold] {batch_result.total_count}",
             f"[green]Successfully Cloned:[/green] {batch_result.success_count}",
-            f"[blue]Already Existed:[/blue] {getattr(batch_result, 'already_exists_count', 0)}",
+            f"[cyan]Refreshed:[/cyan] {getattr(batch_result, 'refreshed_count', 0)}",
+            f"[blue]Verified:[/blue] {getattr(batch_result, 'verified_count', 0)}",
+            f"[dim]Already Existed:[/dim] {getattr(batch_result, 'already_exists_count', 0)}",
             f"[red]Failed:[/red] {batch_result.failed_count}",
             f"[dim]Skipped:[/dim] {getattr(batch_result, 'skipped_count', 0)}",
         ]
     )
 
-    # Success rate
+    # Success rate (includes both newly cloned and already existing as successful)
     if batch_result.total_count > 0:
-        success_rate = (batch_result.success_count / batch_result.total_count) * 100
-        content_lines.append(f"[bold]Success Rate:[/bold] {success_rate:.1f}%")
+        content_lines.append(f"[bold]Success Rate:[/bold] {batch_result.success_rate:.1f}%")
 
     # Log file reference
     if log_file_path:
@@ -263,21 +265,15 @@ def show_final_results(
 
     # Create panel
     title_color = "green" if batch_result.failed_count == 0 else "yellow"
-    title_text = (
-        "✅ Clone Completed Successfully"
-        if batch_result.failed_count == 0
-        else "⚠️ Clone Completed with Issues"
-    )
 
     summary_text = Text.from_markup("\n".join(content_lines))
     panel = Panel(
         summary_text,
-        title=f"[bold {title_color}]{title_text}[/bold {title_color}]",
+        title="[bold]✅ Command Summary[/bold]",
         border_style=title_color,
         padding=(1, 2),
     )
 
-    console.print("\n")
     console.print(panel)
 
 

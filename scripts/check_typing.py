@@ -8,19 +8,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 try:
     # Import our modules to verify typing
-    from gerrit_clone.models import Config, Project, ProjectState
-    from gerrit_clone.gerrit_api import GerritAPIClient
+    from gerrit_clone.logging import get_logger
+    from gerrit_clone.models import Config, Project, ProjectState, RetryPolicy
     from gerrit_clone.worker import CloneWorker
-    from gerrit_clone.logging import setup_logging, get_logger
-    from gerrit_clone.retry import execute_with_retry
-    from gerrit_clone.models import RetryPolicy
 
     print("✅ All imports successful")
 
@@ -35,7 +31,7 @@ try:
     result: str = test_typed_function("test", 42)
 
     # Test optional types
-    optional_value: Optional[str] = None
+    optional_value: str | None = None
     optional_value = "now has value"
 
     print("✅ Basic typing works correctly")
