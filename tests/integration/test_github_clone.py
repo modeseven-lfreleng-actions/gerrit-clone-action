@@ -89,7 +89,7 @@ class TestGitHubClone:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             include_projects=["gerrit-clone-action"],  # Known repo
             threads=1,
         )
@@ -127,7 +127,7 @@ class TestGitHubClone:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             include_projects=["gerrit-clone-action"],
             depth=1,
             threads=1,
@@ -152,7 +152,7 @@ class TestGitHubClone:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             threads=4,  # Use multiple threads
             skip_archived=True,
         )
@@ -182,7 +182,7 @@ class TestGitHubClone:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             include_projects=["gerrit-clone-action"],
             threads=1,
         )
@@ -221,7 +221,7 @@ class TestGitHubClone:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             include_projects=["gerrit-clone-action"],
             threads=1,
             auto_refresh=False,  # Disable auto-refresh
@@ -261,7 +261,7 @@ class TestGitHubCloneWithGhCli:
             github_org="lfreleng-actions",
             github_token=github_token,
             discovery_method=DiscoveryMethod.GITHUB_API,
-            path_prefix=tmp_clone_dir,
+            path=tmp_clone_dir,
             include_projects=["gerrit-clone-action"],
             use_gh_cli=True,
             threads=1,
