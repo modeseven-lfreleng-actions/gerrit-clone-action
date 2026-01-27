@@ -189,13 +189,13 @@ def clone(
         readable=True,
         resolve_path=True,
     ),
-    path_prefix: Path = typer.Option(
+    output_path: Path = typer.Option(
         Path(),
-        "--path-prefix",
-        help="Base directory for clone hierarchy",
-        envvar="GERRIT_PATH_PREFIX",
+        "--output-path",
+        help="Clone destination (default: ./{SERVER}/ or ./github.com/{ORG}/)",
+        envvar="OUTPUT_PATH",
         file_okay=False,
-        resolve_path=True,
+        resolve_path=False,
     ),
     skip_archived: bool = typer.Option(
         True,
@@ -261,6 +261,12 @@ def clone(
         "-b",
         help="Clone specific branch instead of default",
         envvar="GERRIT_BRANCH",
+    ),
+    mirror: bool | None = typer.Option(
+        None,
+        "--mirror/--no-mirror",
+        help="Use git clone --mirror for complete repository metadata (all refs, tags, branches). Creates bare repository. Incompatible with --depth and --branch.",
+        envvar="GERRIT_MIRROR",
     ),
     use_https: bool = typer.Option(
         False,
@@ -350,7 +356,7 @@ def clone(
     cleanup: bool = typer.Option(
         False,
         "--cleanup/--no-cleanup",
-        help="Remove cloned repositories (path-prefix) after run completes (success or failure)",
+        help="Remove cloned repositories (output-path) after run completes (success or failure)",
         envvar="GERRIT_CLEANUP",
     ),
     no_refresh: bool = typer.Option(
@@ -439,10 +445,10 @@ def clone(
         gerrit-clone clone --host github.com/myorg --use-gh-cli
 
         # Clone to specific directory with custom threads
-        gerrit-clone clone --host gerrit.example.org --path-prefix ./repos --threads 8
+        gerrit-clone clone --host gerrit.example.org --output-path ./repos --threads 8
 
         # Clone with shallow depth and specific branch
-        gerrit-clone clone --host gerrit.example.org --depth 10 --branch main
+        gerrit-clone clone --host gerrit.example.org --no-mirror --depth 10 --branch main
     """
     # Configure graceful interrupt handling for multi-threaded operations
     handle_sigint_gracefully()
@@ -513,7 +519,7 @@ def clone(
             base_url=base_url,
             ssh_user=ssh_user,
             ssh_identity_file=ssh_identity_file,
-            path_prefix=path_prefix,
+            path=output_path,
             skip_archived=skip_archived,
             include_project=include_project,
             ssh_debug=ssh_debug,
@@ -523,6 +529,7 @@ def clone(
             threads=threads,
             depth=depth,
             branch=branch,
+            mirror=mirror,
             use_https=use_https,
             keep_remote_protocol=keep_remote_protocol,
             strict_host_checking=strict_host_checking,
@@ -552,13 +559,13 @@ def clone(
             verbose=verbose,
             cli_args=cli_args,
             host=host,
-            path_prefix=Path(path_prefix) if path_prefix else None,
+            path=Path(output_path) if output_path else None,
         )
 
         # Set log_file_path for error handling compatibility
         from gerrit_clone.file_logging import get_default_log_path
 
-        log_file_path = log_file if log_file else get_default_log_path(host, Path(path_prefix) if path_prefix else None)
+        log_file_path = log_file if log_file else get_default_log_path(host, Path(output_path) if output_path else None)
 
         # Log version to file in GitHub Actions environment (file only, no console)
         if _is_github_actions_context():
@@ -601,7 +608,7 @@ def clone(
                 base_url=base_url,
                 ssh_user=ssh_user,
                 ssh_identity_file=ssh_identity_file,
-                path_prefix=path_prefix,
+                path=output_path,
                 skip_archived=skip_archived,
                 allow_nested_git=allow_nested_git,
                 nested_protection=nested_protection,
@@ -609,6 +616,7 @@ def clone(
                 threads=threads,
                 depth=depth,
                 branch=branch,
+                mirror=mirror,
                 use_https=use_https,
                 keep_remote_protocol=keep_remote_protocol,
                 strict_host_checking=strict_host_checking,
@@ -706,12 +714,12 @@ def clone(
                 if file_logger:
                     file_logger.debug(
                         "Cleanup enabled - removing cloned directory: %s",
-                        config.path_prefix,
+                        config.path,
                     )
                 console.print(
-                    f"[yellow]🧹 Cleanup enabled - removing cloned directory: {config.path_prefix}[/yellow]"
+                    f"[yellow]🧹 Cleanup enabled - removing cloned directory: {config.path}[/yellow]"
                 )
-                rmtree(config.path_prefix, ignore_errors=True)
+                rmtree(config.path, ignore_errors=True)
                 if file_logger:
                     file_logger.debug("Cleanup completed successfully")
                 console.print("[green]Cleanup complete.[/green]")
@@ -797,7 +805,7 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     lines = [
         f"Host: [cyan]{host_display} [{config.protocol}][/cyan]",
-        f"Output: [cyan]{config.path_prefix}[/cyan]",
+        f"Output: [cyan]{config.path}[/cyan]",
         f"Threads: [cyan]{config.effective_threads}[/cyan]",
     ]
 
@@ -812,6 +820,9 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
     if config.branch:
         lines.append(f"Branch: [cyan]{config.branch}[/cyan]")
+
+    # Add mirror status
+    lines.append(f"Git Mirror: [cyan]{config.mirror}[/cyan]")
 
     # Add common options
     lines.extend(
@@ -861,14 +872,15 @@ def _show_startup_banner(console: Console, config: Any) -> None:
 
 @app.command()
 def refresh(
-    path: Path = typer.Option(
-        Path.cwd(),
-        "--path",
-        help="Path to Gerrit clone directory to refresh (defaults to current directory)",
+    output_path: Path = typer.Option(
+        Path(),
+        "--output-path",
+        help="Path to clone directory to refresh (default: current directory)",
+        envvar="OUTPUT_PATH",
         exists=True,
         file_okay=False,
         dir_okay=True,
-        resolve_path=True,
+        resolve_path=False,
     ),
     threads: int | None = typer.Option(
         None,
@@ -968,19 +980,19 @@ def refresh(
         gerrit-clone refresh
 
         # Refresh ONAP repositories
-        gerrit-clone refresh --path /Users/mwatkins/Repositories/onap
+        gerrit-clone refresh --output-path ~/repos/onap
 
         # Fetch only (don't merge)
-        gerrit-clone refresh --path ~/onap --fetch-only
+        gerrit-clone refresh --output-path ~/repos --fetch-only
 
         # Use 16 threads for faster refresh
-        gerrit-clone refresh --path ~/onap --threads 16
+        gerrit-clone refresh --output-path ~/repos --threads 16
 
         # Auto-stash uncommitted changes
-        gerrit-clone refresh --path ~/onap --auto-stash
+        gerrit-clone refresh --output-path ~/repos --auto-stash
 
         # Dry run (show what would be updated)
-        gerrit-clone refresh --path ~/onap --dry-run
+        gerrit-clone refresh --output-path ~/repos --dry-run
     """
     # Configure graceful interrupt handling for multi-threaded operations
     handle_sigint_gracefully()
@@ -1001,7 +1013,7 @@ def refresh(
 
     from gerrit_clone.file_logging import get_default_log_path
 
-    log_file_path = get_default_log_path("refresh", path)
+    log_file_path = get_default_log_path("refresh", output_path)
 
     file_logger, error_collector = init_logging(
         log_file=log_file_path,
@@ -1020,7 +1032,7 @@ def refresh(
 
     # Display configuration summary
     console.print("[bold blue]Refresh Configuration[/bold blue]")
-    console.print(f"Base Path: [cyan]{path}[/cyan]")
+    console.print(f"Base Path: [cyan]{output_path}[/cyan]")
     console.print(f"Threads: [cyan]{threads or 'auto-detect'}[/cyan]")
     console.print(f"Mode: [cyan]{'Fetch Only' if fetch_only else f'Pull ({strategy})'}[/cyan]")
     console.print(f"Prune: [cyan]{prune}[/cyan]")
@@ -1036,7 +1048,7 @@ def refresh(
     try:
         # Execute refresh
         result = refresh_repositories(
-            base_path=path,
+            base_path=output_path,
             config=None,
             timeout=timeout,
             fetch_only=fetch_only,
@@ -1057,10 +1069,10 @@ def refresh(
 
         # Write manifest with timestamp by default, or use specified filename
         if manifest_filename:
-            manifest_file = path / manifest_filename
+            manifest_file = output_path / manifest_filename
         else:
             timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
-            manifest_file = path / f"refresh-manifest-{timestamp}.json"
+            manifest_file = output_path / f"refresh-manifest-{timestamp}.json"
         _write_refresh_manifest(manifest_file, result)
         console.print(f"📄 Manifest: [cyan]{manifest_file}[/cyan]")
         console.print()
@@ -1182,13 +1194,13 @@ def mirror(
         ),
         envvar="GERRIT_PROJECTS",
     ),
-    path: Path = typer.Option(
+    output_path: Path = typer.Option(
         Path("/tmp/gerrit-mirror"),
-        "--path",
-        help="Local filesystem folder/path for cloned Gerrit projects",
-        envvar="GERRIT_MIRROR_PATH",
+        "--output-path",
+        help="Local filesystem folder/path for cloned projects",
+        envvar="MIRROR_OUTPUT_PATH",
         file_okay=False,
-        resolve_path=True,
+        resolve_path=False,
     ),
     recreate: bool = typer.Option(
         False,
@@ -1264,6 +1276,12 @@ def mirror(
         "--https/--ssh",
         help="Use HTTPS for cloning instead of SSH",
         envvar="GERRIT_USE_HTTPS",
+    ),
+    mirror: bool = typer.Option(
+        True,
+        "--mirror/--no-mirror",
+        help="Use git clone --mirror for complete repository metadata (all refs, tags, branches). Creates bare repository.",
+        envvar="GERRIT_MIRROR",
     ),
     strict_host_checking: bool = typer.Option(
         True,
@@ -1400,12 +1418,13 @@ def mirror(
             port=port or 29418,
             ssh_user=ssh_user,
             ssh_identity_file=ssh_identity_file,
-            path_prefix=path,
+            path=output_path,
             threads=threads,
             skip_archived=skip_archived,
             discovery_method=discovery_enum,
             strict_host_checking=strict_host_checking,
             use_https=use_https,
+            mirror=mirror,
             retry_policy=RetryPolicy(),
         )
 
@@ -1470,7 +1489,7 @@ def mirror(
         )
 
         # Write manifest
-        manifest_path = path / manifest_filename
+        manifest_path = output_path / manifest_filename
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manifest_path, "w") as f:
             json.dump(batch_result.to_dict(), f, indent=2)
@@ -1737,8 +1756,9 @@ def show_config(
             f"Base URL: [cyan]{config.base_url}[/cyan]",
             f"SSH User: [cyan]{config.ssh_user or 'default'}[/cyan]",
             f"SSH Identity: [cyan]{config.ssh_identity_file or 'default'}[/cyan]",
-            f"Path Prefix: [cyan]{config.path_prefix}[/cyan]",
+            f"Path: [cyan]{config.path}[/cyan]",
             f"Protocol: [cyan]{config.protocol}[/cyan]",
+            f"Git Mirror: [cyan]{config.mirror}[/cyan]",
             f"Skip Archived: [cyan]{config.skip_archived}[/cyan]",
             f"Allow Nested Git: [cyan]{getattr(config, 'allow_nested_git', True)}[/cyan]",
             f"Nested Protection: [cyan]{getattr(config, 'nested_protection', True)}[/cyan]",
