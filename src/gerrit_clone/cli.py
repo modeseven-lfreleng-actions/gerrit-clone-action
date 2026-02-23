@@ -1876,7 +1876,12 @@ def reset(
 
             raise typer.Exit(0)
         else:
-            console.print("\n❌ No repositories were deleted")
+            if result.total_repos == 0:
+                console.print(
+                    "\n✅ Organization is already empty — no repositories to delete"
+                )
+            else:
+                console.print("\n❌ No repositories were deleted")
             raise typer.Exit(0)
 
     except GitHubAuthError as e:
@@ -1888,6 +1893,9 @@ def reset(
     except KeyboardInterrupt:
         console.print("\n❌ Reset cancelled by user")
         raise typer.Exit(1)
+    except typer.Exit:
+        # Re-raise typer.Exit exceptions without catching them as generic exceptions
+        raise
     except Exception as e:
         console.print(f"\n[red]Error:[/red] {e}")
         if verbose:

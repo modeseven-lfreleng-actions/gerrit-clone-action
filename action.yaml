@@ -66,12 +66,6 @@ inputs:
       Exit cloning immediately when the first error occurs (for debugging)
     required: false
     default: "false"
-  stop-on-first-error:
-    description: >-
-      Exit cloning immediately when the first error occurs (for debugging) -
-      DEPRECATED: use exit-on-error
-    required: false
-    default: "false"
 
   threads:
     description: "Number of concurrent clone threads"
@@ -94,7 +88,7 @@ inputs:
     required: false
     default: "false"
   discovery-method:
-    description: "Discovery method: ssh (default), http (REST API), or both"
+    description: "Discovery method: ssh, http, both, or github_api"
     required: false
     default: "ssh"
   keep-remote-protocol:
@@ -327,9 +321,12 @@ runs:
         cmd="gerrit-clone clone"
         cmd="$cmd --host '${{ inputs.host }}'"
 
-        # Only add SSH-specific parameters when not using HTTPS
+        # Port applies to both SSH and HTTPS
+        # (CLI auto-adjusts 29418→443 for HTTPS)
+        cmd="$cmd --port '${{ inputs.port }}'"
+
+        # SSH-specific parameters only when not using HTTPS
         if [ "${{ inputs.use-https }}" != "true" ]; then
-          cmd="$cmd --port '${{ inputs.port }}'"
           if [ -n "${{ inputs.ssh-user }}" ]; then
             cmd="$cmd --ssh-user '${{ inputs.ssh-user }}'"
           fi
@@ -433,10 +430,11 @@ runs:
 
         if [ "${{ inputs.move-conflicting }}" = "true" ]; then
           cmd="$cmd --move-conflicting"
+        else
+          cmd="$cmd --no-move-conflicting"
         fi
 
-        if [ "${{ inputs.exit-on-error }}" = "true" ] || \
-           [ "${{ inputs.stop-on-first-error }}" = "true" ]; then
+        if [ "${{ inputs.exit-on-error }}" = "true" ]; then
           cmd="$cmd --exit-on-error"
         fi
 
@@ -470,7 +468,18 @@ runs:
         exit_code=$?
 
         # Set outputs from manifest file
-        manifest_path="${{ inputs.output-path }}/clone-manifest.json"
+        # The CLI auto-adjusts the output path
+        # (e.g. "./" becomes "./{HOST}/"), so search
+        # for the manifest by name within the tree.
+        manifest_name="${{ inputs.manifest-filename }}"
+        manifest_path=$(find "${{ inputs.output-path }}" -maxdepth 2 \
+          -name "$manifest_name" -type f 2>/dev/null | head -1)
+
+        # Fallback: try the literal path in case find missed it
+        if [ -z "$manifest_path" ]; then
+          manifest_path="${{ inputs.output-path }}/$manifest_name"
+        fi
+
         if [ -f "$manifest_path" ]; then
           echo "manifest-path=$manifest_path" >> "$GITHUB_OUTPUT"
 

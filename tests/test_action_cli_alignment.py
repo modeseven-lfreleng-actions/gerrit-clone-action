@@ -187,9 +187,7 @@ class TestActionCLIFlagAlignment:
         # Known valid aliases that are part of boolean flag pairs
         # These should now be properly extracted by get_cli_option_names()
         # but we keep a small set for any edge cases
-        known_valid_aliases = {
-            "stop-on-first-error",  # Alias for --exit-on-error (backward compat)
-        }
+        known_valid_aliases: set[str] = set()
 
         invalid_flags = []
         for flag in cmd_building_flags:

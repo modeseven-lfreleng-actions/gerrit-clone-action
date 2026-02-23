@@ -108,7 +108,7 @@ def temp_git_repo(tmp_path, ssh_config, monkeypatch):
         check=True,
     )
     subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
+        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"],
         cwd=repo_path,
         capture_output=True,
         check=True,

@@ -98,7 +98,7 @@ def temp_github_repo(tmp_path: Path, github_project: Project) -> Path:
         check=True,
     )
     subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
+        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"],
         cwd=repo_path,
         capture_output=True,
         check=True,
@@ -460,7 +460,7 @@ class TestGitHubRefreshInCloneManager:
                 check=True,
             )
             subprocess.run(
-                ["git", "commit", "-m", "Initial commit"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "Initial commit"],
                 cwd=repo_path,
                 capture_output=True,
                 check=True,

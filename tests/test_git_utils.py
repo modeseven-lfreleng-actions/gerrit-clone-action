@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -103,6 +104,7 @@ class TestIsGitRepository:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",
@@ -176,6 +178,7 @@ class TestGetCurrentCommitSha:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",
@@ -207,6 +210,7 @@ class TestGetCurrentCommitSha:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",
@@ -285,6 +289,7 @@ class TestGetCurrentBranch:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",
@@ -307,17 +312,32 @@ class TestGetCurrentBranch:
 class TestIsRepoDirty:
     """Test is_repo_dirty function."""
 
-    def test_clean_repository(self) -> None:
+    def test_clean_repository(self, tmp_path: Path) -> None:
         """Test clean repository returns False."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            repo_path = Path(temp_dir) / "repo"
-            repo_path.mkdir()
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
 
-            subprocess.run(
-                ["git", "init"], cwd=repo_path, check=True, capture_output=True
-            )
+        subprocess.run(
+            ["git", "-c", "init.defaultBranch=main", "init"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+        )
+        # Set minimal local config to avoid global config side effects
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+        )
 
-            assert is_repo_dirty(repo_path) is False
+        assert is_repo_dirty(repo_path) is False
 
     def test_dirty_repository(self) -> None:
         """Test repository with uncommitted changes returns True."""
@@ -399,6 +419,7 @@ class TestGetRemoteUrl:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",
