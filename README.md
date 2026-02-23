@@ -112,7 +112,7 @@ Include archived repositories and use custom SSH key:
 gerrit-clone clone --host gerrit.example.org \
   --include-archived \
   --ssh-user myuser \
-  --ssh-private-key ~/.ssh/gerrit_rsa
+  --ssh-identity-file ~/.ssh/gerrit_rsa
 ```
 
 ### Understanding Path Behavior
@@ -526,7 +526,7 @@ Options:
   -p, --port INTEGER              Gerrit SSH port [default: 29418]
   --base-url TEXT                 Base URL for Gerrit API
   -u, --ssh-user TEXT             SSH username for clone operations
-  -i, --ssh-private-key PATH      SSH private key file for authentication
+  -i, --ssh-identity-file PATH    SSH identity (private key) file path
   --output-path PATH              Base directory for clone hierarchy [default: .]
   --skip-archived / --include-archived
                                   Skip archived and inactive repositories
@@ -584,7 +584,7 @@ Options:
 - `--server TEXT`: Gerrit server hostname (required)
 - `--port INTEGER`: Gerrit SSH port (default: 29418)
 - `--ssh-user TEXT` / `-u`: SSH username for Gerrit clone operations (env: `GERRIT_SSH_USER`)
-- `--ssh-private-key PATH` / `-i`: SSH private key file for authentication
+- `--ssh-identity-file PATH` / `-i`: SSH identity (private key) file path
   (env: `GERRIT_SSH_PRIVATE_KEY`)
 - `--discovery-method [ssh|http|both]`: Method for discovering projects
   - `ssh` (default): Use SSH to query projects (requires SSH access)
@@ -864,7 +864,7 @@ gerrit-clone mirror \
   --server gerrit.onap.org \
   --org modeseven-onap \
   --ssh-user myuser \
-  --ssh-private-key ~/.ssh/gerrit_key \
+  --ssh-identity-file ~/.ssh/gerrit_key \
   --threads 8
 ```
 
@@ -1010,8 +1010,12 @@ jobs:
       - name: Show results
         run: |
           echo "Total: ${{ steps.clone.outputs.total-count }}"
-          echo "Success: ${{ steps.clone.outputs.success-count }}"
+          echo "Succeeded: ${{ steps.clone.outputs.success-count }}"
           echo "Failed: ${{ steps.clone.outputs.failure-count }}"
+          echo "Skipped: ${{ steps.clone.outputs.skipped-count }}"
+          echo "Refreshed: ${{ steps.clone.outputs.refreshed-count }}"
+          echo "Duration: ${{ steps.clone.outputs.duration }}s"
+          echo "Success rate: ${{ steps.clone.outputs.success-rate }}%"
           echo "Manifest: ${{ steps.clone.outputs.manifest-path }}"
 
       - name: Upload manifest
@@ -1118,11 +1122,15 @@ jobs:
 
 | Input                  | Required | Default               | Description                                                                                          |
 | ---------------------- | -------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
-| `host`                 | Yes      |                       | Gerrit server hostname                                                                               |
+| `host`                 | Yes      |                       | Source hostname (Gerrit server or GitHub URL like `github.com/ORG`)                                  |
 | `port`                 | No       | `29418`               | Gerrit SSH port                                                                                      |
 | `base-url`             | No       |                       | Base URL for Gerrit API (defaults to <https://HOST>)                                                 |
 | `ssh-user`             | No       |                       | SSH username for clone operations                                                                    |
 | `ssh-private-key`      | No       |                       | SSH private key content for authentication                                                           |
+| `source-type`          | No       |                       | Source type: `gerrit` or `github` (auto-detected from host)                                          |
+| `github-token`         | No       |                       | GitHub personal access token for API access and private repos                                        |
+| `github-org`           | No       |                       | GitHub organization or user (auto-detected from host)                                                |
+| `use-gh-cli`           | No       | `false`               | Use GitHub CLI (`gh`) for cloning instead of git                                                     |
 | `output-path`          | No       | `.`                   | Clone destination (auto-creates `./{SERVER}/` or `./github.com/{ORG}/` structure when not specified) |
 | `skip-archived`        | No       | `true`                | Skip archived and inactive repositories                                                              |
 | `include-project`      | No       |                       | Restrict cloning to specific project(s) (comma-separated)                                            |
@@ -1131,10 +1139,19 @@ jobs:
 | `nested-protection`    | No       | `true`                | Auto-add nested child repo paths to parent .git/info/exclude                                         |
 | `move-conflicting`     | No       | `false`               | Move conflicting files/directories in parent repos to [NAME].parent                                  |
 | `exit-on-error`        | No       | `false`               | Exit when first error occurs                                                                         |
+| `no-refresh`           | No       | `false`               | Skip refreshing existing repositories                                                                |
+| `force-refresh`        | No       | `false`               | Force refresh all existing repos (auto-stash, fix detached HEAD)                                     |
+| `fetch-only`           | No       | `false`               | Only fetch changes without merging (existing repos)                                                  |
+| `skip-conflicts`       | No       | `true`                | Skip repos with uncommitted changes during refresh                                                   |
 | `threads`              | No       | auto                  | Number of concurrent clone threads                                                                   |
 | `depth`                | No       |                       | Create shallow clone with given depth                                                                |
 | `branch`               | No       |                       | Clone specific branch instead of default                                                             |
 | `use-https`            | No       | `false`               | Use HTTPS for cloning instead of SSH                                                                 |
+| `http-user`            | No       |                       | HTTP username for Gerrit HTTPS authentication                                                        |
+| `http-password`        | No       |                       | HTTP password for Gerrit HTTPS authentication                                                        |
+| `no-netrc`             | No       | `false`               | Disable .netrc credential lookup for HTTP auth                                                       |
+| `netrc-file`           | No       |                       | Explicit path to .netrc file for HTTP credentials                                                    |
+| `netrc-optional`       | No       | `true`                | Whether missing .netrc is acceptable (false = fail if not found)                                     |
 | `keep-remote-protocol` | No       | `false`               | Keep original clone protocol for remote                                                              |
 | `strict-host`          | No       | `true`                | SSH strict host key checking                                                                         |
 | `clone-timeout`        | No       | `600`                 | Timeout per clone operation in seconds                                                               |
@@ -1154,12 +1171,18 @@ jobs:
 
 ### Action Outputs
 
-| Output          | Description                               |
-| --------------- | ----------------------------------------- |
-| `manifest-path` | Path to the generated clone manifest file |
-| `success-count` | Number of cloned repositories             |
-| `failure-count` | Number of failed clone attempts           |
-| `total-count`   | Total number of repositories processed    |
+| Output                | Description                                    |
+| --------------------- | ---------------------------------------------- |
+| `manifest-path`       | Path to the generated clone manifest file      |
+| `total-count`         | Total number of repositories processed         |
+| `success-count`       | Number of successfully cloned repositories     |
+| `failure-count`       | Number of failed clone attempts                |
+| `skipped-count`       | Number of skipped repositories                 |
+| `already-exists-count`| Repos that already existed (not refreshed)     |
+| `refreshed-count`     | Existing repos that pulled new changes         |
+| `verified-count`      | Repos verified as up-to-date (no changes)      |
+| `duration`            | Total duration of the operation in seconds     |
+| `success-rate`        | Success rate as a percentage                   |
 
 ## SSH Configuration
 
@@ -1172,11 +1195,16 @@ The following SSH authentication options are available across all interfaces:
 
 <!-- markdownlint-disable MD013 -->
 
-| Option     | CLI             | Environment              | Action                      | Description  |
-| ---------- | --------------- | ------------------------ | --------------------------- | ------------ |
-| SSH User   | `-u`            | `GERRIT_SSH_USER`        | `ssh-user`                  | SSH username |
-| SSH Key    | `-i` (file)     | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Private key  |
-| Host Check | `--strict-host` | `GERRIT_STRICT_HOST`     | `strict-host`               | Key check    |
+| Option     | CLI                    | Environment              | Action                      | Description    |
+| ---------- | ---------------------- | ------------------------ | --------------------------- | -------------- |
+| SSH User   | `-u`                   | `GERRIT_SSH_USER`        | `ssh-user`                  | SSH username   |
+| SSH Key    | `-i` (file path)       | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Identity file  |
+| Host Check | `--strict-host`        | `GERRIT_STRICT_HOST`     | `strict-host`               | Key check      |
+
+> **Note:** The CLI flag `--ssh-identity-file` / `-i` expects a **file path**
+> to a private key on disk. The GitHub Action input `ssh-private-key` expects
+> the raw key **content** (loaded into an SSH agent). The legacy CLI alias
+> `--ssh-private-key` is still accepted for backward compatibility.
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1230,7 +1258,7 @@ Three authentication methods provide automatic fallback:
    ```bash
    gerrit-clone clone --host gerrit.example.org \
      --ssh-user myuser \
-     --ssh-private-key /path/to/private_key
+     --ssh-identity-file /path/to/private_key
    ```
 
 4. Or use environment variables:

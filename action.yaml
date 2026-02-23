@@ -10,7 +10,9 @@ author: "Matthew Watkins <mwatkins@linuxfoundation.org>"
 
 inputs:
   host:
-    description: "Gerrit server hostname"
+    description: >-
+      Source hostname (Gerrit server or GitHub host, e.g.
+      github.com or github.com/ORG)
     required: true
   port:
     description: "Gerrit SSH port"
@@ -22,6 +24,24 @@ inputs:
   ssh-private-key:
     description: "SSH private key content for authentication"
     required: false
+  source-type:
+    description: >-
+      Source type: gerrit or github (auto-detected from host)
+    required: false
+  github-token:
+    description: >-
+      GitHub personal access token for API access and private
+      repos
+    required: false
+  github-org:
+    description: >-
+      GitHub organization or user (auto-detected from host)
+    required: false
+  use-gh-cli:
+    description: >-
+      Use GitHub CLI (gh) for cloning instead of git
+    required: false
+    default: "false"
   base-url:
     description: "Base URL for Gerrit API (defaults to https://HOST)"
     required: false
@@ -66,6 +86,26 @@ inputs:
       Exit cloning immediately when the first error occurs (for debugging)
     required: false
     default: "false"
+  no-refresh:
+    description: >-
+      Skip refreshing existing repositories
+    required: false
+    default: "false"
+  force-refresh:
+    description: >-
+      Force refresh all existing repos (auto-stash, fix detached
+      HEAD)
+    required: false
+    default: "false"
+  fetch-only:
+    description: "Only fetch changes without merging (existing repos)"
+    required: false
+    default: "false"
+  skip-conflicts:
+    description: >-
+      Skip repos with uncommitted changes during refresh
+    required: false
+    default: "true"
 
   threads:
     description: "Number of concurrent clone threads"
@@ -87,6 +127,25 @@ inputs:
     description: "Use HTTPS for cloning instead of SSH"
     required: false
     default: "false"
+  http-user:
+    description: "HTTP username for Gerrit HTTPS authentication"
+    required: false
+  http-password:
+    description: "HTTP password for Gerrit HTTPS authentication"
+    required: false
+  no-netrc:
+    description: "Disable .netrc credential lookup for HTTP auth"
+    required: false
+    default: "false"
+  netrc-file:
+    description: "Explicit path to .netrc file for HTTP credentials"
+    required: false
+  netrc-optional:
+    description: >-
+      Whether missing .netrc is acceptable (false = fail if not
+      found)
+    required: false
+    default: "true"
   discovery-method:
     description: "Discovery method: ssh, http, both, or github_api"
     required: false
@@ -146,9 +205,15 @@ inputs:
     description: "File logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
     required: false
     default: "DEBUG"
+  build-from-source:
+    description: >-
+      Build CLI from the action's own source instead of
+      installing from PyPI (useful for testing unreleased code)
+    required: false
+    default: "false"
 
 outputs:
-  manifest-output-path:
+  manifest-path:
     description: "Path to the generated clone manifest file"
     value: ${{ steps.clone.outputs.manifest-path }}
   success-count:
@@ -160,6 +225,24 @@ outputs:
   total-count:
     description: "Total number of repositories processed"
     value: ${{ steps.clone.outputs.total-count }}
+  skipped-count:
+    description: "Number of skipped repositories"
+    value: ${{ steps.clone.outputs.skipped-count }}
+  already-exists-count:
+    description: "Number of repos that already existed (not refreshed)"
+    value: ${{ steps.clone.outputs.already-exists-count }}
+  refreshed-count:
+    description: "Number of existing repos that were refreshed"
+    value: ${{ steps.clone.outputs.refreshed-count }}
+  verified-count:
+    description: "Number of repos verified as up-to-date"
+    value: ${{ steps.clone.outputs.verified-count }}
+  duration:
+    description: "Total duration of the operation in seconds"
+    value: ${{ steps.clone.outputs.duration }}
+  success-rate:
+    description: "Success rate as a percentage"
+    value: ${{ steps.clone.outputs.success-rate }}
 
 runs:
   using: "composite"
@@ -186,6 +269,10 @@ runs:
       if: ${{ inputs.use-https != 'true' }}
       shell: bash
       run: |
+        # Extract bare hostname (strip path like /ORG from github.com/ORG)
+        SSH_HOST="${{ inputs.host }}"
+        SSH_HOST="${SSH_HOST%%/*}"
+
         if [ -n "${{ inputs.ssh-private-key }}" ]; then
           echo "Setting up SSH agent with private key"
 
@@ -213,7 +300,7 @@ runs:
           ssh-add -l
 
           # Setup known_hosts to avoid prompts
-          echo "Setting up known_hosts for ${{ inputs.host }}..."
+          echo "Setting up known_hosts for $SSH_HOST..."
           mkdir -p ~/.ssh
 
           # Try to scan SSH host keys with proper port and timeout
@@ -222,12 +309,12 @@ runs:
             PORT="29418"
           fi
 
-          echo "Scanning SSH keys for ${{ inputs.host }}:$PORT..."
+          echo "Scanning SSH keys for $SSH_HOST:$PORT..."
           if timeout 30 ssh-keyscan -H -p "$PORT" \
-            "${{ inputs.host }}" >> ~/.ssh/known_hosts 2>&1; then
-            echo "Successfully added ${{ inputs.host }} to known_hosts"
+            "$SSH_HOST" >> ~/.ssh/known_hosts 2>&1; then
+            echo "Successfully added $SSH_HOST to known_hosts"
           else
-            echo "Warning: Could not scan SSH keys for ${{ inputs.host }}:$PORT"
+            echo "Warning: Could not scan SSH keys for $SSH_HOST:$PORT"
             echo "Continuing with strict host checking disabled"
           fi
         else
@@ -244,7 +331,6 @@ runs:
           echo "gerrit-clone CLI is already available"
           gerrit-clone --version
         else
-          echo "Installing gerrit-clone CLI from PyPI using uvx..."
           # Install uv if not available
           if ! command -v uv &> /dev/null; then
             echo "Installing uv..."
@@ -252,20 +338,29 @@ runs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
 
-          # Install from PyPI using uvx (runs in isolated environment)
-          echo "Installing latest gerrit-clone from PyPI..."
-          uvx gerrit-clone --help > /dev/null || {
-            echo "Failed to install gerrit-clone via uvx"
-            exit 1
-          }
+          if [ "${{ inputs.build-from-source }}" = "true" ]; then
+            # Build and install from the action's own source tree
+            echo "Building gerrit-clone from source..."
+            echo "Source path: $GITHUB_ACTION_PATH"
+            uv tool install "$GITHUB_ACTION_PATH"
+          else
+            # Install from PyPI using uvx (isolated environment)
+            echo "Installing gerrit-clone from PyPI..."
+            uvx gerrit-clone --help > /dev/null || {
+              echo "Failed to install gerrit-clone via uvx"
+              exit 1
+            }
 
-          # Create a wrapper script so gerrit-clone is available in PATH
-          mkdir -p "$HOME/.local/bin"
-          echo '#!/bin/bash' > "$HOME/.local/bin/gerrit-clone"
-          echo 'exec uvx gerrit-clone "$@"' >> "$HOME/.local/bin/gerrit-clone"
-          chmod +x "$HOME/.local/bin/gerrit-clone"
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            # Create wrapper so gerrit-clone is available in PATH
+            mkdir -p "$HOME/.local/bin"
+            cat > "$HOME/.local/bin/gerrit-clone" <<'WRAPPER'
+        #!/bin/bash
+        exec uvx gerrit-clone "$@"
+        WRAPPER
+            chmod +x "$HOME/.local/bin/gerrit-clone"
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
 
           # Verify installation
           gerrit-clone --version
@@ -277,6 +372,17 @@ runs:
       env:
         SSH_AUTH_SOCK: /tmp/ssh_agent_${{ github.run_id }}.sock
       run: |
+        # Extract bare hostname (strip path like /ORG from github.com/ORG)
+        SSH_HOST="${{ inputs.host }}"
+        SSH_HOST="${SSH_HOST%%/*}"
+
+        # Export secrets as env vars (keeps them off the cmd line)
+        if [ -n "${{ inputs.github-token }}" ]; then
+          export GERRIT_CLONE_TOKEN="${{ inputs.github-token }}"
+        fi
+        if [ -n "${{ inputs.http-password }}" ]; then
+          export GERRIT_HTTP_PASSWORD="${{ inputs.http-password }}"
+        fi
 
         # Debug protocol selection
         echo "DEBUG: Protocol selection - use-https: '${{ inputs.use-https }}'"
@@ -301,14 +407,14 @@ runs:
           # Test SSH connection if using SSH authentication
           if [ -n "${{ inputs.ssh-user }}" ] && \
             [ -n "${{ inputs.ssh-private-key }}" ]; then
-            echo "Testing SSH connection to ${{ inputs.host }}..."
+            echo "Testing SSH connection to $SSH_HOST..."
             PORT="${{ inputs.port }}"
             if [ -z "$PORT" ]; then
               PORT="29418"
             fi
 
             if timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 \
-                -p "$PORT" "${{ inputs.ssh-user }}@${{ inputs.host }}" \
+                -p "$PORT" "${{ inputs.ssh-user }}@$SSH_HOST" \
                 gerrit version >/dev/null 2>&1; then
               echo "SSH connection test successful"
             else
@@ -317,154 +423,203 @@ runs:
           fi
         fi
 
-        # Build gerrit-clone command (use pre-installed CLI)
-        cmd="gerrit-clone clone"
-        cmd="$cmd --host '${{ inputs.host }}'"
+        # Build gerrit-clone command as a bash array
+        # (avoids eval and quoting/injection issues)
+        cmd=(gerrit-clone clone)
+        cmd+=(--host "${{ inputs.host }}")
+
+        # GitHub source options
+        if [ -n "${{ inputs.source-type }}" ]; then
+          cmd+=(--source-type "${{ inputs.source-type }}")
+        fi
+        if [ -n "${{ inputs.github-org }}" ]; then
+          cmd+=(--github-org "${{ inputs.github-org }}")
+        fi
+        # github-token passed via GERRIT_CLONE_TOKEN env var
+        if [ "${{ inputs.use-gh-cli }}" = "true" ]; then
+          cmd+=(--use-gh-cli)
+        fi
 
         # Port applies to both SSH and HTTPS
         # (CLI auto-adjusts 29418→443 for HTTPS)
-        cmd="$cmd --port '${{ inputs.port }}'"
+        cmd+=(--port "${{ inputs.port }}")
 
         # SSH-specific parameters only when not using HTTPS
         if [ "${{ inputs.use-https }}" != "true" ]; then
           if [ -n "${{ inputs.ssh-user }}" ]; then
-            cmd="$cmd --ssh-user '${{ inputs.ssh-user }}'"
+            cmd+=(--ssh-user "${{ inputs.ssh-user }}")
           fi
         fi
 
         if [ -n "${{ inputs.base-url }}" ]; then
-          cmd="$cmd --base-url '${{ inputs.base-url }}'"
+          cmd+=(--base-url "${{ inputs.base-url }}")
         fi
 
-        # SSH private key is handled by SSH agent setup step above
+        # SSH private key handled by SSH agent setup step
 
-        cmd="$cmd --output-path '${{ inputs.output-path }}'"
+        cmd+=(--output-path "${{ inputs.output-path }}")
 
         if [ "${{ inputs.skip-archived }}" = "true" ]; then
-          cmd="$cmd --skip-archived"
+          cmd+=(--skip-archived)
         else
-          cmd="$cmd --include-archived"
+          cmd+=(--include-archived)
         fi
 
         if [ -n "${{ inputs.threads }}" ]; then
-          cmd="$cmd --threads '${{ inputs.threads }}'"
+          cmd+=(--threads "${{ inputs.threads }}")
         fi
 
         if [ -n "${{ inputs.depth }}" ]; then
-          cmd="$cmd --depth '${{ inputs.depth }}'"
+          cmd+=(--depth "${{ inputs.depth }}")
         fi
 
         if [ -n "${{ inputs.branch }}" ]; then
-          cmd="$cmd --branch '${{ inputs.branch }}'"
+          cmd+=(--branch "${{ inputs.branch }}")
         fi
 
         if [ "${{ inputs.mirror }}" = "false" ]; then
-          cmd="$cmd --no-mirror"
+          cmd+=(--no-mirror)
         else
-          cmd="$cmd --mirror"
+          cmd+=(--mirror)
         fi
 
         if [ "${{ inputs.use-https }}" = "true" ]; then
-          cmd="$cmd --https"
+          cmd+=(--https)
         else
-          cmd="$cmd --ssh"
+          cmd+=(--ssh)
         fi
 
-        # Add discovery method (auto-select http when using https if explicit)
+        # HTTPS authentication options
+        if [ "${{ inputs.use-https }}" = "true" ]; then
+          if [ -n "${{ inputs.http-user }}" ]; then
+            cmd+=(--http-user "${{ inputs.http-user }}")
+          fi
+          # http-password passed via GERRIT_HTTP_PASSWORD env var
+          if [ "${{ inputs.no-netrc }}" = "true" ]; then
+            cmd+=(--no-netrc)
+          fi
+          if [ -n "${{ inputs.netrc-file }}" ]; then
+            cmd+=(--netrc-file "${{ inputs.netrc-file }}")
+          fi
+          if [ "${{ inputs.netrc-optional }}" = "false" ]; then
+            cmd+=(--netrc-required)
+          fi
+        fi
+
+        # Discovery method (auto-select http for HTTPS)
         if [ "${{ inputs.use-https }}" = "true" ] && \
           [ "${{ inputs.discovery-method }}" = "ssh" ]; then
-          cmd="$cmd --discovery-method 'http'"
+          cmd+=(--discovery-method http)
         elif [ "${{ inputs.discovery-method }}" != "ssh" ]; then
-          # Use explicitly specified discovery method
-          cmd="$cmd --discovery-method '${{ inputs.discovery-method }}'"
+          cmd+=(--discovery-method \
+            "${{ inputs.discovery-method }}")
         fi
 
         if [ "${{ inputs.keep-remote-protocol }}" = "true" ]; then
-          cmd="$cmd --keep-remote-protocol"
+          cmd+=(--keep-remote-protocol)
         fi
 
         # SSH host checking only applies when using SSH
         if [ "${{ inputs.use-https }}" != "true" ]; then
           if [ "${{ inputs.strict-host }}" = "true" ]; then
-            cmd="$cmd --strict-host"
+            cmd+=(--strict-host)
           else
-            cmd="$cmd --accept-unknown-host"
+            cmd+=(--accept-unknown-host)
           fi
         fi
 
-        cmd="$cmd --clone-timeout '${{ inputs.clone-timeout }}'"
-        cmd="$cmd --retry-attempts '${{ inputs.retry-attempts }}'"
-        cmd="$cmd --retry-base-delay '${{ inputs.retry-base-delay }}'"
+        cmd+=(--clone-timeout "${{ inputs.clone-timeout }}")
+        cmd+=(--retry-attempts "${{ inputs.retry-attempts }}")
+        cmd+=(--retry-base-delay \
+          "${{ inputs.retry-base-delay }}")
 
         if [ -n "${{ inputs.config-file }}" ]; then
-          cmd="$cmd --config-file '${{ inputs.config-file }}'"
+          cmd+=(--config-file "${{ inputs.config-file }}")
         fi
 
         # Add include-project options (supports multiple)
         if [ -n "${{ inputs.include-project }}" ]; then
-          # Split comma-separated list and add each project
-          IFS=',' read -ra PROJECTS <<< "${{ inputs.include-project }}"
+          IFS=',' read -ra PROJECTS \
+            <<< "${{ inputs.include-project }}"
           for project in "${PROJECTS[@]}"; do
-            project=$(echo "$project" | xargs)  # trim whitespace
+            project=$(echo "$project" | xargs)
             if [ -n "$project" ]; then
-              cmd="$cmd --include-project '$project'"
+              cmd+=(--include-project "$project")
             fi
           done
         fi
 
         if [ "${{ inputs.ssh-debug }}" = "true" ]; then
-          cmd="$cmd --ssh-debug"
+          cmd+=(--ssh-debug)
         fi
 
         if [ "${{ inputs.allow-nested-git }}" = "true" ]; then
-          cmd="$cmd --allow-nested-git"
+          cmd+=(--allow-nested-git)
         else
-          cmd="$cmd --no-allow-nested-git"
+          cmd+=(--no-allow-nested-git)
         fi
 
         if [ "${{ inputs.nested-protection }}" = "true" ]; then
-          cmd="$cmd --nested-protection"
+          cmd+=(--nested-protection)
         else
-          cmd="$cmd --no-nested-protection"
+          cmd+=(--no-nested-protection)
         fi
 
         if [ "${{ inputs.move-conflicting }}" = "true" ]; then
-          cmd="$cmd --move-conflicting"
+          cmd+=(--move-conflicting)
         else
-          cmd="$cmd --no-move-conflicting"
+          cmd+=(--no-move-conflicting)
         fi
 
         if [ "${{ inputs.exit-on-error }}" = "true" ]; then
-          cmd="$cmd --exit-on-error"
+          cmd+=(--exit-on-error)
         fi
 
-        cmd="$cmd --retry-factor '${{ inputs.retry-factor }}'"
-        cmd="$cmd --retry-max-delay '${{ inputs.retry-max-delay }}'"
-        cmd="$cmd --manifest-filename '${{ inputs.manifest-filename }}'"
+        # Refresh controls for existing repositories
+        if [ "${{ inputs.no-refresh }}" = "true" ]; then
+          cmd+=(--no-refresh)
+        fi
+        if [ "${{ inputs.force-refresh }}" = "true" ]; then
+          cmd+=(--force)
+        fi
+        if [ "${{ inputs.fetch-only }}" = "true" ]; then
+          cmd+=(--fetch-only)
+        fi
+        if [ "${{ inputs.skip-conflicts }}" = "true" ]; then
+          cmd+=(--skip-conflicts)
+        else
+          cmd+=(--no-skip-conflicts)
+        fi
+
+        cmd+=(--retry-factor "${{ inputs.retry-factor }}")
+        cmd+=(--retry-max-delay \
+          "${{ inputs.retry-max-delay }}")
+        cmd+=(--manifest-filename \
+          "${{ inputs.manifest-filename }}")
 
         if [ "${{ inputs.verbose }}" = "true" ]; then
-          cmd="$cmd --verbose"
+          cmd+=(--verbose)
         fi
 
         if [ "${{ inputs.quiet }}" = "true" ]; then
-          cmd="$cmd --quiet"
+          cmd+=(--quiet)
         fi
 
         # Log file options
         if [ -n "${{ inputs.log-file }}" ]; then
-          cmd="$cmd --log-file '${{ inputs.log-file }}'"
+          cmd+=(--log-file "${{ inputs.log-file }}")
         fi
 
         if [ "${{ inputs.disable-log-file }}" = "true" ]; then
-          cmd="$cmd --disable-log-file"
+          cmd+=(--disable-log-file)
         fi
 
-        cmd="$cmd --log-level '${{ inputs.log-level }}'"
+        cmd+=(--log-level "${{ inputs.log-level }}")
 
-        echo "Executing: $cmd"
+        echo "Executing: ${cmd[*]}"
 
-        # Execute the command
-        eval "$cmd"
+        # Execute directly (no eval needed)
+        "${cmd[@]}"
         exit_code=$?
 
         # Set outputs from manifest file
@@ -487,24 +642,52 @@ runs:
           success_count=$(jq -r '.succeeded // 0' "$manifest_path")
           failure_count=$(jq -r '.failed // 0' "$manifest_path")
           total_count=$(jq -r '.total // 0' "$manifest_path")
+          skipped=$(jq -r '.skipped // 0' "$manifest_path")
+          already=$(jq -r '.already_exists // 0' "$manifest_path")
+          refreshed=$(jq -r '.refreshed // 0' "$manifest_path")
+          verified=$(jq -r '.verified // 0' "$manifest_path")
+          duration=$(jq -r '.duration_s // 0' "$manifest_path")
+          rate=$(jq -r '.success_rate // 0' "$manifest_path")
 
           echo "success-count=$success_count" >> "$GITHUB_OUTPUT"
           echo "failure-count=$failure_count" >> "$GITHUB_OUTPUT"
           echo "total-count=$total_count" >> "$GITHUB_OUTPUT"
+          echo "skipped-count=$skipped" >> "$GITHUB_OUTPUT"
+          echo "already-exists-count=$already" >> "$GITHUB_OUTPUT"
+          echo "refreshed-count=$refreshed" >> "$GITHUB_OUTPUT"
+          echo "verified-count=$verified" >> "$GITHUB_OUTPUT"
+          echo "duration=$duration" >> "$GITHUB_OUTPUT"
+          echo "success-rate=$rate" >> "$GITHUB_OUTPUT"
 
           # Add to job summary
           echo "## Gerrit Clone Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Total repositories:** $total_count" >> \
+          echo "- **Total:** $total_count" >> \
             "$GITHUB_STEP_SUMMARY"
-          echo "- **Successfully cloned:** $success_count" >> \
+          echo "- **Succeeded:** $success_count" >> \
             "$GITHUB_STEP_SUMMARY"
-          echo "- **Failed:** $failure_count" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Manifest:** \`$manifest_path\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Failed:** $failure_count" >> \
+            "$GITHUB_STEP_SUMMARY"
+          echo "- **Skipped:** $skipped" >> \
+            "$GITHUB_STEP_SUMMARY"
+          echo "- **Refreshed:** $refreshed" >> \
+            "$GITHUB_STEP_SUMMARY"
+          echo "- **Duration:** ${duration}s" >> \
+            "$GITHUB_STEP_SUMMARY"
+          echo "- **Success rate:** ${rate}%" >> \
+            "$GITHUB_STEP_SUMMARY"
+          echo "- **Manifest:** \`$manifest_path\`" >> \
+            "$GITHUB_STEP_SUMMARY"
         else
           echo "manifest-path=" >> "$GITHUB_OUTPUT"
           echo "success-count=0" >> "$GITHUB_OUTPUT"
           echo "failure-count=0" >> "$GITHUB_OUTPUT"
           echo "total-count=0" >> "$GITHUB_OUTPUT"
+          echo "skipped-count=0" >> "$GITHUB_OUTPUT"
+          echo "already-exists-count=0" >> "$GITHUB_OUTPUT"
+          echo "refreshed-count=0" >> "$GITHUB_OUTPUT"
+          echo "verified-count=0" >> "$GITHUB_OUTPUT"
+          echo "duration=0" >> "$GITHUB_OUTPUT"
+          echo "success-rate=0" >> "$GITHUB_OUTPUT"
         fi
 
         exit $exit_code

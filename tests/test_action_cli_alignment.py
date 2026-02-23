@@ -283,7 +283,7 @@ class TestNoDeprecatedFlags:
 
     def test_no_standalone_path_flag(self, action_shell_script: str) -> None:
         """Verify --path is not used alone (should be --output-path)."""
-        # Pattern to find --path that is NOT part of --output-path or --ssh-private-key
+        # Pattern to find --path that is NOT part of --output-path or --ssh-identity-file
         # Look for: --path followed by space, quote, or end of line
         pattern = r"--path(?![a-z-])"
         matches = re.findall(pattern, action_shell_script)

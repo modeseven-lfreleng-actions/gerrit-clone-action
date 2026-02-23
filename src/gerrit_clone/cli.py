@@ -183,9 +183,10 @@ def clone(
     ),
     ssh_identity_file: Path | None = typer.Option(
         None,
-        "--ssh-private-key",
+        "--ssh-identity-file",
+        "--ssh-private-key",  # Backward-compatible alias (prefer --ssh-identity-file)
         "-i",
-        help="SSH private key file for authentication",
+        help="SSH identity (private key) file path for authentication",
         envvar="GERRIT_SSH_PRIVATE_KEY",
         exists=True,
         file_okay=True,
@@ -1326,9 +1327,10 @@ def mirror(
     ),
     ssh_identity_file: Path | None = typer.Option(
         None,
-        "--ssh-private-key",
+        "--ssh-identity-file",
+        "--ssh-private-key",  # Backward-compatible alias (prefer --ssh-identity-file)
         "-i",
-        help="SSH private key file for authentication",
+        help="SSH identity (private key) file path for authentication",
         envvar="GERRIT_SSH_PRIVATE_KEY",
         exists=True,
         file_okay=True,
