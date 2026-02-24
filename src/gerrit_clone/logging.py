@@ -88,12 +88,13 @@ def setup_logging(
 
     root.addHandler(handler)
 
-    # Suppress noisy third-party modules unless verbose
-    if not verbose:
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
-        logging.getLogger("requests").setLevel(logging.WARNING)
+    # Always suppress noisy third-party HTTP transport modules.
+    # Even in --verbose mode the user wants *application* debug output,
+    # not low-level TCP/TLS/HTTP frame noise from httpx/httpcore.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
 
     return logging.getLogger("gerrit_clone")
 

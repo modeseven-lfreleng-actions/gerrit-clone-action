@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -366,6 +367,214 @@ class TestMirrorManager:
         call_env = mock_run.call_args[1].get("env")
         assert call_env is not None
         assert "GIT_SSH_COMMAND" in call_env
+
+    def test_build_push_url_with_token_uses_https(self) -> None:
+        """Test that _build_push_url returns plain HTTPS URL when token is set."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            github_token="ghp_test_token_abc123",
+        )
+
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        push_url = manager._build_push_url(github_repo)
+
+        # Token must NOT be embedded in the URL (passed via env instead)
+        assert push_url == "https://github.com/test-org/test-repo.git"
+        assert "ghp_test_token_abc123" not in push_url
+        assert "git@github.com" not in push_url
+
+    def test_build_push_url_without_token_uses_ssh(self) -> None:
+        """Test that _build_push_url returns SSH URL when no token is set."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        push_url = manager._build_push_url(github_repo)
+
+        assert push_url == "git@github.com:test-org/test-repo.git"
+
+    @patch("gerrit_clone.mirror_manager.subprocess.run")
+    def test_push_to_github_with_token_uses_https_url(self, mock_run: Mock) -> None:
+        """Test that push uses plain HTTPS URL with auth via env vars."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            github_token="ghp_test_token_abc123",
+        )
+
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        success, error = manager._push_to_github(local_path, github_repo)
+
+        assert success is True
+        assert error is None
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        # The push URL must be the plain HTTPS URL (no token embedded)
+        expected_url = "https://github.com/test-org/test-repo.git"
+        assert call_args[0][0] == [
+            "git",
+            "-C",
+            str(local_path),
+            "push",
+            "--mirror",
+            expected_url,
+        ]
+        # Token must NOT appear anywhere in the command
+        cmd_str = " ".join(call_args[0][0])
+        assert "ghp_test_token_abc123" not in cmd_str
+        # Auth should be passed via GIT_CONFIG_* env vars
+        call_env = call_args[1].get("env")
+        assert call_env is not None
+        assert call_env.get("GIT_CONFIG_COUNT") == "1"
+        assert call_env.get("GIT_CONFIG_KEY_0") == "http.extraheader"
+        assert "AUTHORIZATION: basic " in call_env.get("GIT_CONFIG_VALUE_0", "")
+        # Verify our code did not explicitly inject GIT_SSH_COMMAND.
+        # The merged env inherits os.environ, so we check that any
+        # value present was NOT added by our code.
+        if "GIT_SSH_COMMAND" in call_env:
+            assert call_env["GIT_SSH_COMMAND"] == os.environ.get("GIT_SSH_COMMAND")
+
+    @patch("gerrit_clone.mirror_manager.subprocess.run")
+    def test_push_to_github_with_token_does_not_set_ssh_command(
+        self, mock_run: Mock
+    ) -> None:
+        """Test that SSH command is not set even with ssh_identity_file when token is present."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+            ssh_identity_file=Path("/path/to/key"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            github_token="ghp_test_token_abc123",
+        )
+
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        success, _error = manager._push_to_github(local_path, github_repo)
+
+        assert success is True
+        mock_run.assert_called_once()
+        # Even though ssh_identity_file is set, GIT_SSH_COMMAND should NOT
+        # be in env because github_token overrides to HTTPS push.
+        # The env should contain GIT_CONFIG_* for token auth instead.
+        call_env = mock_run.call_args[1].get("env")
+        assert call_env is not None
+        # Verify GIT_CONFIG env vars are present for token auth
+        assert call_env.get("GIT_CONFIG_COUNT") == "1"
+        assert call_env.get("GIT_CONFIG_KEY_0") == "http.extraheader"
+        # Verify our code did not explicitly set GIT_SSH_COMMAND.
+        # The merged env inherits os.environ, so we check that the
+        # value (if present) was NOT injected by our code — i.e. it
+        # equals whatever os.environ already had (or is absent from
+        # os.environ entirely).
+        if "GIT_SSH_COMMAND" in call_env:
+            assert call_env["GIT_SSH_COMMAND"] == os.environ.get("GIT_SSH_COMMAND")
+
+    @patch("gerrit_clone.mirror_manager.subprocess.run")
+    def test_push_to_github_with_token_sanitizes_error_output(
+        self, mock_run: Mock
+    ) -> None:
+        """Test that token is sanitized from error messages on push failure."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        token = "ghp_secret_token_value"
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            github_token=token,
+        )
+
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1,
+            "git",
+            stderr=f"fatal: unable to access 'https://x-access-token:{token}@github.com/test-org/test-repo.git/': The requested URL returned error: 403",
+        )
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        success, error = manager._push_to_github(local_path, github_repo)
+
+        assert success is False
+        assert error is not None
+        # The token must not appear in the error message
+        assert token not in error
+        assert "***" in error
 
     @patch("gerrit_clone.mirror_manager.shutil.rmtree")
     def test_cleanup_existing_repos_with_overwrite(self, mock_rmtree: Mock) -> None:

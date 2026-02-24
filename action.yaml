@@ -353,10 +353,8 @@ runs:
 
             # Create wrapper so gerrit-clone is available in PATH
             mkdir -p "$HOME/.local/bin"
-            cat > "$HOME/.local/bin/gerrit-clone" <<'WRAPPER'
-        #!/bin/bash
-        exec uvx gerrit-clone "$@"
-        WRAPPER
+            printf '#!/bin/bash\nexec uvx gerrit-clone "$@"\n' \
+              > "$HOME/.local/bin/gerrit-clone"
             chmod +x "$HOME/.local/bin/gerrit-clone"
             export PATH="$HOME/.local/bin:$PATH"
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -627,7 +625,9 @@ runs:
         # (e.g. "./" becomes "./{HOST}/"), so search
         # for the manifest by name within the tree.
         manifest_name="${{ inputs.manifest-filename }}"
-        manifest_path=$(find "${{ inputs.output-path }}" -maxdepth 2 \
+        # Use a slightly higher max depth to handle adjusted paths
+        # such as "./github.com/{ORG}/{manifest}".
+        manifest_path=$(find "${{ inputs.output-path }}" -maxdepth 4 \
           -name "$manifest_name" -type f 2>/dev/null | head -1)
 
         # Fallback: try the literal path in case find missed it

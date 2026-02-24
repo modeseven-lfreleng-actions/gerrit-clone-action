@@ -1092,7 +1092,15 @@ def refresh(
     # Configure graceful interrupt handling for multi-threaded operations
     handle_sigint_gracefully()
 
-    console = Console()
+    console = Console(stderr=True)
+
+    # Validate mutually exclusive options
+    if verbose and quiet:
+        console.print(
+            "[red]Error:[/red] --verbose and --quiet cannot "
+            "be used together"
+        )
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
     # Validate strategy
     if strategy not in ("merge", "rebase"):
@@ -1100,8 +1108,9 @@ def refresh(
         raise typer.Exit(ExitCode.VALIDATION_ERROR.value)
 
     # Display version
-    console.print(_format_version_string("refresh"))
-    console.print()
+    if not quiet:
+        console.print(_format_version_string("refresh"))
+        console.print()
 
     # Initialize logging
     cli_args = cli_args_to_dict(**locals())
@@ -1126,19 +1135,20 @@ def refresh(
         console.print()
 
     # Display configuration summary
-    console.print("[bold blue]Refresh Configuration[/bold blue]")
-    console.print(f"Base Path: [cyan]{output_path}[/cyan]")
-    console.print(f"Threads: [cyan]{threads or 'auto-detect'}[/cyan]")
-    console.print(f"Mode: [cyan]{'Fetch Only' if fetch_only else f'Pull ({strategy})'}[/cyan]")
-    console.print(f"Prune: [cyan]{prune}[/cyan]")
-    console.print(f"Timeout: [cyan]{timeout}s[/cyan]")
-    console.print(f"Skip Conflicts: [cyan]{skip_conflicts}[/cyan]")
-    console.print(f"Auto Stash: [cyan]{auto_stash}[/cyan]")
-    console.print(f"Filter: [cyan]{'Gerrit only' if filter_gerrit_only else 'All repos'}[/cyan]")
-    console.print(f"Dry Run: [cyan]{dry_run}[/cyan]")
-    console.print(f"Force: [cyan]{force}[/cyan]")
-    console.print(f"Recursive: [cyan]{recursive}[/cyan]")
-    console.print()
+    if not quiet:
+        console.print("[bold blue]Refresh Configuration[/bold blue]")
+        console.print(f"Base Path: [cyan]{output_path}[/cyan]")
+        console.print(f"Threads: [cyan]{threads or 'auto-detect'}[/cyan]")
+        console.print(f"Mode: [cyan]{'Fetch Only' if fetch_only else f'Pull ({strategy})'}[/cyan]")
+        console.print(f"Prune: [cyan]{prune}[/cyan]")
+        console.print(f"Timeout: [cyan]{timeout}s[/cyan]")
+        console.print(f"Skip Conflicts: [cyan]{skip_conflicts}[/cyan]")
+        console.print(f"Auto Stash: [cyan]{auto_stash}[/cyan]")
+        console.print(f"Filter: [cyan]{'Gerrit only' if filter_gerrit_only else 'All repos'}[/cyan]")
+        console.print(f"Dry Run: [cyan]{dry_run}[/cyan]")
+        console.print(f"Force: [cyan]{force}[/cyan]")
+        console.print(f"Recursive: [cyan]{recursive}[/cyan]")
+        console.print()
 
     try:
         # Execute refresh
@@ -1169,18 +1179,22 @@ def refresh(
             timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
             manifest_file = output_path / f"refresh-manifest-{timestamp}.json"
         _write_refresh_manifest(manifest_file, result)
-        console.print(f"📄 Manifest: [cyan]{manifest_file}[/cyan]")
-        console.print()
+        if not quiet:
+            console.print(f"📄 Manifest: [cyan]{manifest_file}[/cyan]")
+            console.print()
 
         # Determine exit code
         if result.failed_count > 0:
-            console.print(f"[yellow]⚠️  {result.failed_count} repositories failed to refresh[/yellow]")
+            if not quiet:
+                console.print(f"[yellow]⚠️  {result.failed_count} repositories failed to refresh[/yellow]")
             raise typer.Exit(ExitCode.GENERAL_ERROR.value)
         elif result.conflicts_count > 0:
-            console.print(f"[yellow]⚠️  {result.conflicts_count} repositories have conflicts[/yellow]")
+            if not quiet:
+                console.print(f"[yellow]⚠️  {result.conflicts_count} repositories have conflicts[/yellow]")
             raise typer.Exit(ExitCode.GENERAL_ERROR.value)
         else:
-            console.print("[green]✅ All repositories refreshed successfully![/green]")
+            if not quiet:
+                console.print("[green]✅ All repositories refreshed successfully![/green]")
             raise typer.Exit(ExitCode.SUCCESS.value)
 
     except KeyboardInterrupt:
@@ -1534,8 +1548,40 @@ def mirror(
                 raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Show startup banner
-        console.print(_format_version_string(command="mirror"))
-        console.print()
+        if not quiet:
+            console.print(_format_version_string(command="mirror"))
+            console.print()
+
+        # Initialize logging so that logger.info / logger.warning
+        # messages from downstream modules (github_api, mirror_manager)
+        # reach the console.  Without this, only WARNING+ would be
+        # visible via Python's lastResort handler.
+        from gerrit_clone.file_logging import get_default_log_path
+
+        log_file_path = get_default_log_path(server, output_path)
+        file_logger, error_collector = init_logging(
+            log_file=log_file_path,
+            disable_file=False,
+            log_level="DEBUG",
+            console_level="DEBUG" if verbose else "INFO",
+            quiet=quiet,
+            verbose=verbose,
+            cli_args=cli_args_to_dict(
+                server=server,
+                org=org,
+                projects=projects,
+                output_path=str(output_path),
+                recreate=recreate,
+                overwrite=overwrite,
+                verbose=verbose,
+                quiet=quiet,
+            ),
+            host=server,
+            path=output_path,
+        )
+
+        if verbose and log_file_path:
+            console.print(f"📝 Logging to: [cyan]{log_file_path}[/cyan]")
 
         # Initialize GitHub API
         if not quiet:
@@ -1649,6 +1695,7 @@ def mirror(
             github_org=org,
             recreate=recreate,
             overwrite=overwrite,
+            github_token=github_token,
         )
 
         # Start mirroring
@@ -1783,8 +1830,15 @@ def reset(
         False,
         "--verbose",
         "-v",
-        help="Enable verbose output",
+        help="Enable verbose/debug output",
         envvar="GERRIT_VERBOSE",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress all output except errors",
+        envvar="GERRIT_QUIET",
     ),
 ) -> None:
     """
@@ -1820,6 +1874,14 @@ def reset(
     console = Console(stderr=True)
 
     try:
+        # Validate mutually exclusive options
+        if verbose and quiet:
+            console.print(
+                "[red]Error:[/red] --verbose and --quiet cannot "
+                "be used together"
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+
         # Validate GitHub token
         if not github_token:
             console.print(
@@ -1829,8 +1891,35 @@ def reset(
             raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Show banner
-        console.print(_format_version_string(command="reset"))
-        console.print()
+        if not quiet:
+            console.print(_format_version_string(command="reset"))
+            console.print()
+
+        # Initialize unified logging (file + console), consistent with
+        # clone/refresh/mirror subcommands.
+        from gerrit_clone.file_logging import get_default_log_path
+
+        log_file_path = get_default_log_path(f"reset-{org}", path)
+        file_logger, error_collector = init_logging(
+            log_file=log_file_path,
+            disable_file=False,
+            log_level="DEBUG",
+            console_level="DEBUG" if verbose else "INFO",
+            quiet=quiet,
+            verbose=verbose,
+            cli_args=cli_args_to_dict(
+                org=org,
+                path=str(path),
+                compare=compare,
+                no_confirm=no_confirm,
+                include_automation_prs=include_automation_prs,
+                verbose=verbose,
+                quiet=quiet,
+            ),
+        )
+
+        if verbose and log_file_path:
+            console.print(f"📝 Logging to: [cyan]{log_file_path}[/cyan]")
 
         # Initialize reset manager
         manager = ResetManager(
@@ -1860,30 +1949,32 @@ def reset(
 
         # Display final summary
         if result.deleted_repos > 0:
-            console.print(
-                f"\n🎉 Reset complete: {result.deleted_repos}/{result.total_repos} "
-                "repositories deleted"
-            )
-
-            if result.failed_deletions:
+            if not quiet:
                 console.print(
-                    f"⚠️  {len(result.failed_deletions)} deletions failed"
+                    f"\n🎉 Reset complete: {result.deleted_repos}/{result.total_repos} "
+                    "repositories deleted"
                 )
 
-            if result.had_unsynchronized and compare:
-                console.print(
-                    f"⚠️  Note: {len(result.unsynchronized_repos)} repositories "
-                    "had local/remote differences"
-                )
+                if result.failed_deletions:
+                    console.print(
+                        f"⚠️  {len(result.failed_deletions)} deletions failed"
+                    )
+
+                if result.had_unsynchronized and compare:
+                    console.print(
+                        f"⚠️  Note: {len(result.unsynchronized_repos)} repositories "
+                        "had local/remote differences"
+                    )
 
             raise typer.Exit(0)
         else:
-            if result.total_repos == 0:
-                console.print(
-                    "\n✅ Organization is already empty — no repositories to delete"
-                )
-            else:
-                console.print("\n❌ No repositories were deleted")
+            if not quiet:
+                if result.total_repos == 0:
+                    console.print(
+                        "\n✅ Organization is already empty — no repositories to delete"
+                    )
+                else:
+                    console.print("\n❌ No repositories were deleted")
             raise typer.Exit(0)
 
     except GitHubAuthError as e:

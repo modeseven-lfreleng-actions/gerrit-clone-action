@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import shutil
 import subprocess
 import time
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -17,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from gerrit_clone.clone_manager import CloneManager
+from gerrit_clone.git_utils import get_current_branch
 from gerrit_clone.github_api import (
     GitHubAPI,
     GitHubRepo,
@@ -147,6 +150,7 @@ class MirrorManager:
         recreate: bool = False,
         overwrite: bool = False,
         progress_tracker: ProgressTracker | None = None,
+        github_token: str | None = None,
     ) -> None:
         """Initialize mirror manager.
 
@@ -157,6 +161,10 @@ class MirrorManager:
             recreate: Delete and recreate existing GitHub repositories
             overwrite: Overwrite local repositories
             progress_tracker: Optional progress tracker
+            github_token: GitHub token for HTTPS push authentication.
+                If provided, push operations will use HTTPS with token
+                auth instead of SSH. This avoids requiring SSH keys
+                for github.com in CI environments.
         """
         self.config = config
         self.github_api = github_api
@@ -164,12 +172,74 @@ class MirrorManager:
         self.recreate = recreate
         self.overwrite = overwrite
         self.progress_tracker = progress_tracker
+        self.github_token = github_token
         self.clone_manager = CloneManager(config, progress_tracker)
+
+    def _build_push_url(self, github_repo: GitHubRepo) -> str:
+        """Build the push URL for a GitHub repository.
+
+        When a github_token is available, returns the plain HTTPS clone
+        URL (no credentials embedded).  Authentication is handled
+        separately via environment variables in :meth:`_push_to_github`
+        so that secrets never appear on the command line or in process
+        listings.
+
+        Falls back to the SSH URL when no token is available.
+
+        Args:
+            github_repo: Target GitHub repository
+
+        Returns:
+            Push URL string (plain HTTPS or SSH)
+
+        Raises:
+            ValueError: If ``clone_url`` is not HTTPS when a token is set.
+        """
+        if self.github_token:
+            # Validate the clone URL scheme via urllib.parse
+            parsed = urlparse(github_repo.clone_url)
+            if parsed.scheme != "https":
+                raise ValueError(
+                    f"Expected HTTPS clone URL for token auth, "
+                    f"got scheme '{parsed.scheme}' in: "
+                    f"{github_repo.clone_url}"
+                )
+            # Return the plain HTTPS URL — credentials are passed via
+            # GIT_CONFIG_* environment variables in _push_to_github().
+            logger.debug(
+                f"Using HTTPS token auth for push to {github_repo.full_name}"
+            )
+            return github_repo.clone_url
+        else:
+            # Fall back to SSH URL
+            logger.debug(
+                f"Using SSH for push to {github_repo.full_name}"
+            )
+            return github_repo.ssh_url
+
+    def _sanitize_token(self, text: str) -> str:
+        """Remove the github_token from *text* if present.
+
+        This must be applied to **all** git output (stdout *and* stderr)
+        before logging or returning it, because git can include the
+        credentialed URL in either stream.
+        """
+        if self.github_token and self.github_token in text:
+            return text.replace(self.github_token, "***")
+        return text
 
     def _push_to_github(
         self, local_path: Path, github_repo: GitHubRepo
     ) -> tuple[bool, str | None]:
         """Push repository to GitHub.
+
+        Uses HTTPS with token authentication when a github_token is
+        available (preferred in CI), otherwise falls back to SSH.
+
+        Credentials are passed via ``GIT_CONFIG_COUNT`` /
+        ``GIT_CONFIG_KEY_*`` / ``GIT_CONFIG_VALUE_*`` environment
+        variables so the token never appears on the command line or
+        in ``/proc`` process listings.
 
         Args:
             local_path: Local repository path
@@ -178,17 +248,33 @@ class MirrorManager:
         Returns:
             Tuple of (success, error_message)
         """
-        # Use SSH URL for push
-        push_url = github_repo.ssh_url
+        push_url = self._build_push_url(github_repo)
 
-        logger.debug(f"Pushing to GitHub: {push_url}")
+        # Log the URL without exposing the token
+        if self.github_token:
+            logger.debug(f"Pushing to GitHub (HTTPS): {github_repo.clone_url}")
+        else:
+            logger.debug(f"Pushing to GitHub (SSH): {push_url}")
 
-        # Build git push command
+        # Build git push command — no secrets on the command line
         cmd = ["git", "-C", str(local_path), "push", "--mirror", push_url]
 
         try:
-            env = {}
-            if self.config.git_ssh_command:
+            env: dict[str, str] = {}
+            if self.github_token:
+                # Pass credentials via GIT_CONFIG_* env vars (Git 2.31+).
+                # This avoids embedding the token in the URL *and* keeps
+                # it off the command line / process listing.
+                credentials = base64.b64encode(
+                    f"x-access-token:{self.github_token}".encode()
+                ).decode()
+                env["GIT_CONFIG_COUNT"] = "1"
+                env["GIT_CONFIG_KEY_0"] = "http.extraheader"
+                env["GIT_CONFIG_VALUE_0"] = (
+                    f"AUTHORIZATION: basic {credentials}"
+                )
+            elif self.config.git_ssh_command:
+                # Only set GIT_SSH_COMMAND when using SSH push
                 env["GIT_SSH_COMMAND"] = self.config.git_ssh_command
 
             result = subprocess.run(
@@ -199,10 +285,37 @@ class MirrorManager:
                 env={**os.environ, **env} if env else None,
                 check=True,
             )
-            logger.debug(
-                f"Push successful to {github_repo.full_name}. "
-                f"stdout: {result.stdout}, stderr: {result.stderr}"
+
+            # Sanitize both stdout and stderr before any logging
+            stdout = self._sanitize_token(result.stdout or "")
+            stderr = self._sanitize_token(result.stderr or "")
+
+            # Summarise push output; stderr can list every ref pushed
+            # which is extremely verbose for repos with many branches.
+            stderr_lines = stderr.strip().splitlines()
+            ref_count = sum(
+                1 for line in stderr_lines
+                if line.strip().startswith("*") or "->" in line
             )
+            if ref_count:
+                logger.debug(
+                    "Push successful to %s (%d refs)",
+                    github_repo.full_name,
+                    ref_count,
+                )
+            else:
+                logger.debug(
+                    "Push successful to %s (up to date)",
+                    github_repo.full_name,
+                )
+
+            # After a successful mirror push, set the default branch on
+            # GitHub to match the source project's HEAD.  ``git push
+            # --mirror`` pushes refs/heads/* but GitHub sometimes picks an
+            # arbitrary branch as the default; explicitly setting it
+            # ensures the GitHub repo matches the Gerrit source.
+            self._set_default_branch_from_local(local_path, github_repo)
+
             return True, None
 
         except subprocess.TimeoutExpired:
@@ -210,13 +323,60 @@ class MirrorManager:
             logger.error(f"Push failed to {github_repo.full_name}: {error}")
             return False, error
         except subprocess.CalledProcessError as e:
-            error = f"Git push failed: {e.stderr}"
+            # Sanitize both stdout and stderr to avoid leaking tokens
+            stdout = self._sanitize_token(e.stdout or "")
+            stderr = self._sanitize_token(e.stderr or "")
+            error = f"Git push failed: {stderr}"
             logger.error(f"Push failed to {github_repo.full_name}: {error}")
             return False, error
         except Exception as e:
-            error = f"Unexpected error: {e}"
+            error = f"Unexpected error: {self._sanitize_token(str(e))}"
             logger.error(f"Push failed to {github_repo.full_name}: {error}")
             return False, error
+
+    def _set_default_branch_from_local(
+        self, local_path: Path, github_repo: GitHubRepo
+    ) -> None:
+        """Detect the local clone's HEAD branch and set it as GitHub default.
+
+        For bare clones (created by ``git clone --mirror``), this reads the
+        symbolic ref that HEAD points to — which mirrors the Gerrit
+        project's HEAD configuration.  The branch name is then set as
+        the default branch on the GitHub repository via the API.
+
+        This is a best-effort operation; failures are logged but do not
+        cause the mirror to be marked as failed.
+
+        Args:
+            local_path: Local (bare) clone path
+            github_repo: Target GitHub repository that was just pushed to
+        """
+        try:
+            branch = get_current_branch(local_path)
+        except (FileNotFoundError, ValueError):
+            branch = None
+
+        if not branch:
+            # Fall back to reading HEAD directly for bare repos where
+            # ``git symbolic-ref`` might fail in unusual layouts.
+            try:
+                head_file = local_path / "HEAD"
+                if head_file.exists():
+                    content = head_file.read_text().strip()
+                    if content.startswith("ref: refs/heads/"):
+                        branch = content[len("ref: refs/heads/"):]
+            except Exception:
+                pass
+
+        if branch:
+            owner = github_repo.full_name.split("/")[0]
+            self.github_api.set_default_branch(owner, github_repo.name, branch)
+        else:
+            logger.debug(
+                "Could not determine default branch for %s; "
+                "GitHub will use its own default",
+                github_repo.full_name,
+            )
 
     def mirror_projects(self, projects: list[Project]) -> list[MirrorResult]:
         """Mirror projects from Gerrit to GitHub.
@@ -338,10 +498,20 @@ class MirrorManager:
             else:
                 logger.info(f"✓ All {len(repos_to_delete)} repos deleted successfully")
 
-            # Wait a moment for GitHub to fully process deletes
-            if repos_to_delete:
-                logger.info("⏳ Waiting 2 seconds for deletes to complete...")
-                time.sleep(2)
+            # Cool down proportionally to the number of mutations just
+            # performed.  GitHub's secondary rate limit tracks content-
+            # mutation "points" over a rolling window; the more deletes
+            # we just did, the longer we need to wait before the create
+            # phase starts so that the budget has time to recover.
+            successful_deletes = len(repos_to_delete) - len(failed_deletes)
+            if successful_deletes > 0:
+                cooldown = max(5, successful_deletes * 0.5)
+                logger.info(
+                    f"⏳ Cooling down {cooldown:.0f}s after "
+                    f"{successful_deletes} deletes "
+                    "(secondary rate-limit recovery)..."
+                )
+                time.sleep(cooldown)
 
         if repos_to_create:
             logger.info(f"🏗️  Batch creating {len(repos_to_create)} repositories...")
@@ -360,6 +530,10 @@ class MirrorManager:
         # Step 5: Push to GitHub (can be parallelized further if needed)
         logger.info("📤 Pushing repositories to GitHub...")
         mirror_results: list[MirrorResult] = []
+        push_success = 0
+        push_failed = 0
+        push_skipped = 0
+        report_every = max(1, len(clone_results) // 10)
 
         for clone_result in clone_results:
             mirror_result = self._push_to_github_from_clone_result_optimized(
@@ -367,10 +541,55 @@ class MirrorManager:
             )
             mirror_results.append(mirror_result)
 
-            logger.info(
-                f"Completed {len(mirror_results)}/{len(projects)}: "
-                f"{mirror_result.project.name} -> {mirror_result.status}"
-            )
+            # Track and report per-item status with clear icons
+            idx = len(mirror_results)
+            if mirror_result.status == MirrorStatus.SUCCESS:
+                push_success += 1
+                logger.info(
+                    "✅ [%d/%d] Pushed %s -> %s (%.1fs)",
+                    idx,
+                    len(projects),
+                    mirror_result.project.name,
+                    mirror_result.github_name,
+                    mirror_result.duration_seconds,
+                )
+            elif mirror_result.status == MirrorStatus.SKIPPED:
+                push_skipped += 1
+                logger.info(
+                    "⏭️  [%d/%d] Skipped %s",
+                    idx,
+                    len(projects),
+                    mirror_result.project.name,
+                )
+            else:
+                push_failed += 1
+                logger.warning(
+                    "❌ [%d/%d] Failed %s: %s",
+                    idx,
+                    len(projects),
+                    mirror_result.project.name,
+                    mirror_result.error_message or "unknown error",
+                )
+
+            # Periodic summary so long-running batches show aggregate progress
+            if idx % report_every == 0 and idx < len(projects):
+                logger.info(
+                    "📊 Push progress: %d/%d completed "
+                    "(%d succeeded, %d failed, %d skipped)",
+                    idx,
+                    len(projects),
+                    push_success,
+                    push_failed,
+                    push_skipped,
+                )
+
+        logger.info(
+            "📊 Push complete: %d/%d succeeded, %d failed, %d skipped",
+            push_success,
+            len(projects),
+            push_failed,
+            push_skipped,
+        )
 
         return mirror_results
 

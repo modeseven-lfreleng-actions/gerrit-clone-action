@@ -355,6 +355,19 @@ class TestResetManager:
         assert reset_manager._validate_repo_name("repo.with.dots")[0]
         assert reset_manager._validate_repo_name("MixedCase123")[0]
 
+    def test_validate_repo_name_dot_prefixed(self, reset_manager):
+        """Test validation accepts dot-prefixed repository names like .github."""
+        # .github is a standard GitHub org-level config/profile repository
+        assert reset_manager._validate_repo_name(".github")[0]
+        # Other dot-prefixed names should also be valid
+        assert reset_manager._validate_repo_name(".config")[0]
+        assert reset_manager._validate_repo_name(".dotfile-repo")[0]
+
+        # But a bare dot or double-dot prefix is not valid
+        assert not reset_manager._validate_repo_name(".")[0]
+        assert not reset_manager._validate_repo_name("..")[0]
+        assert not reset_manager._validate_repo_name("..github")[0]
+
     def test_validate_repo_name_invalid_empty(self, reset_manager):
         """Test validation rejects empty repository names."""
         is_valid, error = reset_manager._validate_repo_name("")
@@ -374,10 +387,9 @@ class TestResetManager:
 
     def test_validate_repo_name_invalid_special_chars(self, reset_manager):
         """Test validation rejects invalid special characters."""
-        # Names starting with special chars
+        # Names starting with hyphen or underscore
         assert not reset_manager._validate_repo_name("-starts-with-dash")[0]
         assert not reset_manager._validate_repo_name("_starts-with-underscore")[0]
-        assert not reset_manager._validate_repo_name(".starts-with-dot")[0]
 
         # Names ending with special chars
         assert not reset_manager._validate_repo_name("ends-with-dash-")[0]

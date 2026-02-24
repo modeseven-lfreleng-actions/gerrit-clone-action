@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -356,11 +355,20 @@ class TestBatchDeleteRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repo_names = ["repo1", "repo2", "repo3"]
-            results = await api.batch_delete_repos("test-org", repo_names)
+            results = await api.batch_delete_repos(
+                "test-org", repo_names, rate_limit_interval=0.0
+            )
 
             assert len(results) == 3
             assert all(success for success, _ in results.values())
@@ -373,7 +381,8 @@ class TestBatchDeleteRepos:
         """Test batch deletion with some failures."""
         api = GitHubAPI(token="test-token")
 
-        # Mock delete to fail for repo2 with 403 (not 404, since 404 is treated as success)
+        # Mock delete to fail for repo2 with a non-rate-limit 403
+        # (plain "Permission denied" without "rate limit" in the text)
         call_count = [0]
 
         async def mock_delete_side_effect(*args, **kwargs):
@@ -382,6 +391,7 @@ class TestBatchDeleteRepos:
             if "repo2" in args[0]:
                 response.status_code = 403
                 response.text = "Permission denied"
+                response.headers = {}
             else:
                 response.status_code = 204
             return response
@@ -391,11 +401,20 @@ class TestBatchDeleteRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repo_names = ["repo1", "repo2", "repo3"]
-            results = await api.batch_delete_repos("test-org", repo_names)
+            results = await api.batch_delete_repos(
+                "test-org", repo_names, rate_limit_interval=0.0
+            )
 
             assert len(results) == 3
             assert results["repo1"][0] is True
@@ -410,7 +429,6 @@ class TestBatchDeleteRepos:
         api = GitHubAPI(token="test-token")
 
         async def mock_delete_with_delay(*args, **kwargs):
-            await asyncio.sleep(0.01)
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 204
             return response
@@ -420,12 +438,22 @@ class TestBatchDeleteRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repo_names = [f"repo{i}" for i in range(10)]
             results = await api.batch_delete_repos(
-                "test-org", repo_names, max_concurrent=3
+                "test-org",
+                repo_names,
+                max_concurrent=3,
+                rate_limit_interval=0.0,
             )
 
             assert len(results) == 10
@@ -435,7 +463,12 @@ class TestBatchDeleteRepos:
 
     @pytest.mark.asyncio
     async def test_batch_delete_handles_exceptions(self) -> None:
-        """Test that exceptions are handled gracefully."""
+        """Test that exceptions during deletion are handled.
+
+        With retry logic, repo2 will be retried up to max_retries times
+        before finally failing.  We pass rate_limit_interval=0.0 and
+        patch asyncio.sleep so retries are instantaneous in tests.
+        """
         api = GitHubAPI(token="test-token")
 
         async def mock_delete_with_exception(*args, **kwargs):
@@ -450,15 +483,27 @@ class TestBatchDeleteRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repo_names = ["repo1", "repo2", "repo3"]
-            results = await api.batch_delete_repos("test-org", repo_names)
+            results = await api.batch_delete_repos(
+                "test-org", repo_names, rate_limit_interval=0.0
+            )
 
-            # Should handle exception - result for repo2 may not be in results
-            assert len(results) >= 2
+            # repo2 retries then fails; repo1 and repo3 succeed
+            assert len(results) == 3
             assert results["repo1"][0] is True
+            assert results["repo2"][0] is False
+            assert results["repo2"][1] is not None
+            assert "Network error" in results["repo2"][1]
             assert results["repo3"][0] is True
 
         api.close()
@@ -499,14 +544,25 @@ class TestBatchCreateRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repos_to_create = [
                 {"name": "repo1", "description": "Test 1"},
                 {"name": "repo2", "description": "Test 2"},
             ]
-            results = await api.batch_create_repos("test-org", repos_to_create)
+            results = await api.batch_create_repos(
+                "test-org",
+                repos_to_create,
+                rate_limit_interval=0.0,
+            )
 
             assert len(results) == 2
             assert results["repo1"][0] is not None
@@ -549,15 +605,26 @@ class TestBatchCreateRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repos_to_create = [
                 {"name": "repo1"},
                 {"name": "repo2"},
                 {"name": "repo3"},
             ]
-            results = await api.batch_create_repos("test-org", repos_to_create)
+            results = await api.batch_create_repos(
+                "test-org",
+                repos_to_create,
+                rate_limit_interval=0.0,
+            )
 
             assert len(results) == 3
             assert results["repo1"][0] is not None
@@ -576,7 +643,6 @@ class TestBatchCreateRepos:
         call_count = [0]
 
         async def mock_post_with_delay(*args, **kwargs):
-            await asyncio.sleep(0.01)
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
@@ -600,12 +666,22 @@ class TestBatchCreateRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repos_to_create = [{"name": f"repo{i}"} for i in range(10)]
             results = await api.batch_create_repos(
-                "test-org", repos_to_create, max_concurrent=3
+                "test-org",
+                repos_to_create,
+                max_concurrent=3,
+                rate_limit_interval=0.0,
             )
 
             assert len(results) == 10
@@ -615,13 +691,15 @@ class TestBatchCreateRepos:
 
     @pytest.mark.asyncio
     async def test_batch_create_handles_exceptions(self) -> None:
-        """Test that exceptions during creation are handled."""
+        """Test that exceptions during creation are handled.
+
+        With retry logic, repo2 will be retried up to max_retries times
+        before finally failing.  We pass rate_limit_interval=0.0 and
+        patch asyncio.sleep so retries are instantaneous in tests.
+        """
         api = GitHubAPI(token="test-token")
 
-        call_count = [0]
-
         async def mock_post_with_exception(*args, **kwargs):
-            call_count[0] += 1
             json_data = kwargs.get("json", {})
             name = json_data.get("name", "")
 
@@ -648,19 +726,33 @@ class TestBatchCreateRepos:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        with patch(
-            "gerrit_clone.github_api.httpx.AsyncClient", return_value=mock_client
+        with (
+            patch(
+                "gerrit_clone.github_api.httpx.AsyncClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "gerrit_clone.github_api.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             repos_to_create = [
                 {"name": "repo1"},
                 {"name": "repo2"},
                 {"name": "repo3"},
             ]
-            results = await api.batch_create_repos("test-org", repos_to_create)
+            results = await api.batch_create_repos(
+                "test-org",
+                repos_to_create,
+                rate_limit_interval=0.0,
+            )
 
-            # Should handle exception - repo2 may not be in results or have error
-            assert len(results) >= 2
+            # repo2 retries then fails; repo1 and repo3 succeed
+            assert len(results) == 3
             assert results["repo1"][0] is not None
+            assert results["repo2"][0] is None
+            assert results["repo2"][1] is not None
+            assert "Network timeout" in results["repo2"][1]
             assert results["repo3"][0] is not None
 
         api.close()
@@ -1077,7 +1169,12 @@ class TestRequestPaginated:
 
 
 def test_list_all_repos_no_default_branch() -> None:
-    """Test listing repos when a repository has no default branch configured."""
+    """Test listing repos when a repository has no default branch configured.
+
+    Repos without a default branch should still appear in results (with
+    ``None`` values) and a single summary warning should be emitted
+    instead of one warning per repo.
+    """
     api = GitHubAPI(token="test-token")
 
     mock_response = Mock()
@@ -1138,10 +1235,29 @@ def test_list_all_repos_no_default_branch() -> None:
         assert result["repo-no-branch"]["default_branch"] is None
         assert result["repo-no-branch"]["latest_commit_sha"] is None
 
-        # Should have logged a warning for the repo without default branch
-        mock_logger.warning.assert_called_once()
-        warning_call = mock_logger.warning.call_args[0]
-        assert "repo-no-branch" in warning_call[1]
-        assert "no default branch configured" in warning_call[0]
+        # Individual repos should only produce DEBUG-level messages now
+        debug_calls = [
+            call
+            for call in mock_logger.debug.call_args_list
+            if len(call[0]) >= 1 and "no default branch configured" in str(call[0][0])
+        ]
+        assert len(debug_calls) == 1  # one debug entry for repo-no-branch
+
+        # A single summary WARNING should be emitted (not per-repo)
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if len(call[0]) >= 1 and "no default branch configured" in str(call[0][0])
+        ]
+        assert len(warning_calls) == 1
+        # Logger receives (format_string, arg1, arg2, ...) — check the
+        # positional args that will be interpolated via %-formatting.
+        summary_fmt = warning_calls[0][0][0]
+        summary_positional = warning_calls[0][0][1:]
+        # First two positional args are the counts: (1, 2)
+        assert summary_positional[0] == 1  # 1 repo without default branch
+        assert summary_positional[1] == 2  # 2 total repos
+        # Message should mention the condition but not list individual repos
+        assert "no default branch configured" in summary_fmt
 
     api.close()
