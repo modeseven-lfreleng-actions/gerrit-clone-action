@@ -76,15 +76,39 @@ def pytest_configure(config: pytest.Config) -> None:
         "GIT_COMMITTER_NAME",
         "GIT_COMMITTER_EMAIL",
         "GIT_SSH_COMMAND",
+        # Git hook environment variables (set by git when running hooks,
+        # e.g. pre-commit). These MUST be unset or they cause test git
+        # operations to target the real repository instead of temp repos.
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
         "SSH_AUTH_SOCK",
         "SSH_AGENT_PID",
         "GPG_AGENT_INFO",
         "GNUPGHOME",
     ]
 
+    # Variables that MUST be removed from the environment entirely.
+    # When running under a git hook (e.g. pre-commit), git sets GIT_DIR,
+    # GIT_INDEX_FILE, etc. pointing to the real repository. If these leak
+    # into test subprocess calls, git commands in temp repos silently
+    # operate against the real repo — causing commits to fail (pre-commit
+    # hook fires in temp dir with no config) and git status to report the
+    # real repo's state instead of the test repo's.
+    git_hook_vars = [
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+    ]
+
     # Store original environment for potential restoration
     for var in git_env_vars:
         _GitIsolationState.original_git_env[var] = os.environ.get(var)
+
+    # Remove git hook variables BEFORE any git operations occur.
+    # This is critical when pytest is invoked via a pre-commit hook.
+    for var in git_hook_vars:
+        os.environ.pop(var, None)
 
     # Create a temporary directory for isolated git config
     # This will persist for the entire pytest session
@@ -260,6 +284,14 @@ def ensure_git_isolation(
         monkeypatch.delenv("GPG_AGENT_INFO", raising=False)
         monkeypatch.setenv("GNUPGHOME", str(test_home / ".gnupg"))
 
+        # Remove git hook variables that leak from pre-commit into tests.
+        # When pytest runs via a pre-commit hook, git sets GIT_DIR etc.
+        # pointing to the real repo. This causes test git operations in
+        # temp directories to silently target the real repo instead.
+        monkeypatch.delenv("GIT_DIR", raising=False)
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+
         # XDG directories for complete isolation
         xdg_config = test_home / ".config"
         xdg_config.mkdir()
@@ -304,6 +336,12 @@ def get_isolated_git_env() -> dict[str, str]:
     # Remove problematic variables
     env.pop("SSH_AGENT_PID", None)
     env.pop("GPG_AGENT_INFO", None)
+    # Remove git hook variables that leak from pre-commit into tests.
+    # When pytest runs via a pre-commit hook, git sets these pointing to
+    # the real repo, causing test git operations to silently target it.
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_INDEX_FILE", None)
+    env.pop("GIT_WORK_TREE", None)
     return env
 
 

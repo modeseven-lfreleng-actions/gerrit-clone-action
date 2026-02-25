@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import re
+import time as time_mod
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,6 +68,114 @@ class GitHubRateLimitError(GitHubAPIError):
     """GitHub API rate limit exceeded."""
 
     pass
+
+
+class _AsyncProgressCounter:
+    """Thread-safe counter for tracking batch operation progress.
+
+    Emits a log message every *report_every* completions so the
+    operator can see that work is proceeding.
+    """
+
+    def __init__(self, total: int, label: str, report_every: int = 10) -> None:
+        self._total = total
+        self._label = label
+        self._report_every = report_every
+        self._count = 0
+        self._success = 0
+        self._failed = 0
+        self._lock = asyncio.Lock()
+
+    async def record(self, *, success: bool, name: str) -> None:
+        """Record one completed operation and log progress periodically.
+
+        Args:
+            success: Whether the operation succeeded.
+            name: Repository name (included in debug-level log).
+        """
+        async with self._lock:
+            self._count += 1
+            if success:
+                self._success += 1
+            else:
+                self._failed += 1
+            # Capture a consistent snapshot of all counters while
+            # still holding the lock, so logged values are coherent.
+            count = self._count
+            success_count = self._success
+            failed_count = self._failed
+
+        logger.debug(
+            "%s [%d/%d] %s: %s",
+            self._label,
+            count,
+            self._total,
+            "ok" if success else "FAILED",
+            name,
+        )
+
+        # Log on every Nth completion, and always on the last one
+        if count % self._report_every == 0 or count == self._total:
+            logger.info(
+                "📊 %s progress: %d/%d completed (%d succeeded, %d failed)",
+                self._label,
+                count,
+                self._total,
+                success_count,
+                failed_count,
+            )
+
+
+class _AsyncRateLimiter:
+    """Shared async rate limiter that serialises API calls.
+
+    Every caller must ``await acquire()`` before making a request.
+    The lock inside ``acquire`` guarantees that no two requests are
+    sent closer together than *min_interval* seconds, regardless of
+    how many concurrent tasks exist.
+
+    When a secondary rate-limit response (HTTP 403) is observed,
+    call :meth:`increase_interval` to widen the gap for **all**
+    tasks — this is the adaptive back-off that prevents the
+    thundering-herd retry pattern.
+    """
+
+    def __init__(self, min_interval: float = 1.0) -> None:
+        self._min_interval = min_interval
+        self._lock = asyncio.Lock()
+        self._last_time: float = 0.0
+
+    @property
+    def interval(self) -> float:
+        """Current minimum interval between requests."""
+        return self._min_interval
+
+    async def acquire(self) -> None:
+        """Wait until at least *min_interval* has elapsed since the last call."""
+        async with self._lock:
+            now = time_mod.monotonic()
+            wait = self._min_interval - (now - self._last_time)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_time = time_mod.monotonic()
+
+    async def increase_interval(
+        self, factor: float = 2.0, max_interval: float = 30.0
+    ) -> None:
+        """Widen the minimum interval (called when any task is rate-limited).
+
+        The modification is protected by the same lock used in
+        :meth:`acquire` so that no task can read a stale interval
+        while another task is updating it.
+        """
+        async with self._lock:
+            old = self._min_interval
+            self._min_interval = min(self._min_interval * factor, max_interval)
+            if self._min_interval != old:
+                logger.info(
+                    f"⚙️  Rate limiter: interval {old:.1f}s → "
+                    f"{self._min_interval:.1f}s"
+                )
 
 
 class GitHubAPI:
@@ -454,6 +564,52 @@ class GitHubAPI:
 
         return repos
 
+    def set_default_branch(
+        self, owner: str, repo_name: str, branch: str
+    ) -> bool:
+        """Set the default branch for a repository.
+
+        This should be called after pushing content to ensure the
+        GitHub repository's default branch matches the source
+        project's HEAD (e.g. from Gerrit).
+
+        Args:
+            owner: Repository owner (user or org)
+            repo_name: Repository name
+            branch: Branch name to set as default (e.g. ``master``, ``main``)
+
+        Returns:
+            True if the default branch was set successfully, False otherwise
+        """
+        logger.debug(
+            "Setting default branch for %s/%s to '%s'",
+            owner,
+            repo_name,
+            branch,
+        )
+        try:
+            self._request(
+                "PATCH",
+                f"/repos/{owner}/{repo_name}",
+                json={"default_branch": branch},
+            )
+            logger.info(
+                "Set default branch for %s/%s to '%s'",
+                owner,
+                repo_name,
+                branch,
+            )
+            return True
+        except GitHubAPIError as exc:
+            logger.warning(
+                "Failed to set default branch for %s/%s to '%s': %s",
+                owner,
+                repo_name,
+                branch,
+                exc,
+            )
+            return False
+
     def delete_repo(self, owner: str, repo_name: str) -> None:
         """Delete a repository.
 
@@ -468,14 +624,26 @@ class GitHubAPI:
         self._request("DELETE", f"/repos/{owner}/{repo_name}")
 
     async def _delete_repo_async_with_client(
-        self, client: httpx.AsyncClient, owner: str, repo_name: str
+        self,
+        client: httpx.AsyncClient,
+        owner: str,
+        repo_name: str,
+        max_retries: int = 5,
+        rate_limiter: _AsyncRateLimiter | None = None,
+        progress: _AsyncProgressCounter | None = None,
     ) -> tuple[bool, str | None]:
         """Delete a repository asynchronously with provided client.
+
+        Uses a shared rate limiter (when provided) to serialise API
+        calls, preventing GitHub secondary-rate-limit 403 responses.
 
         Args:
             client: Async HTTP client to use
             owner: Repository owner (user or org)
             repo_name: Repository name
+            max_retries: Maximum retry attempts on rate-limit responses
+            rate_limiter: Shared rate limiter (controls inter-request spacing)
+            progress: Optional shared progress counter
 
         Returns:
             Tuple of (success, error_message)
@@ -483,24 +651,117 @@ class GitHubAPI:
         url = f"{self.base_url}/repos/{owner}/{repo_name}"
         logger.debug(f"Async DELETE {url}")
 
-        try:
-            response = await client.delete(url)
-            if response.status_code in (204, 404):
-                # 204 = deleted, 404 = already gone
-                logger.info(f"✓ Deleted {owner}/{repo_name}")
-                return True, None
-            elif response.status_code == 403:
-                error = f"Permission denied: {response.text}"
-                logger.error(f"✗ Failed to delete {owner}/{repo_name}: {error}")
+        # Initialise with a meaningful default so the "exhausted retries"
+        # message is never None (last_error is always re-set before each
+        # `continue`, but this guards against unexpected control-flow).
+        last_error: str = "unknown error"
+
+        for attempt in range(max_retries + 1):
+            if rate_limiter:
+                await rate_limiter.acquire()
+
+            if attempt > 0:
+                jitter = random.uniform(0.1, 0.5)
+                await asyncio.sleep(jitter)
+
+            try:
+                response = await client.delete(url)
+                if response.status_code in (204, 404):
+                    # 204 = deleted, 404 = already gone
+                    if attempt > 0:
+                        logger.info(
+                            f"✓ Deleted {owner}/{repo_name} "
+                            f"(after {attempt} "
+                            f"{'retry' if attempt == 1 else 'retries'})"
+                        )
+                    else:
+                        logger.info(f"✓ Deleted {owner}/{repo_name}")
+                    if progress:
+                        await progress.record(success=True, name=repo_name)
+                    return True, None
+                elif response.status_code == 403:
+                    # Check for rate limiting
+                    is_rate_limit = (
+                        response.headers.get("Retry-After") is not None
+                        or response.headers.get("X-RateLimit-Remaining") == "0"
+                        or "rate limit" in response.text.lower()
+                    )
+
+                    if is_rate_limit and attempt < max_retries:
+                        if rate_limiter:
+                            await rate_limiter.increase_interval()
+
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                extra_wait = float(retry_after)
+                                logger.warning(
+                                    f"⏳ Rate limited deleting "
+                                    f"{owner}/{repo_name}, "
+                                    f"server asked to wait {extra_wait:.0f}s "
+                                    f"(attempt {attempt + 1}/{max_retries + 1})"
+                                )
+                                await asyncio.sleep(extra_wait)
+                            except ValueError:
+                                pass
+                        else:
+                            # Exponential back-off when no Retry-After
+                            backoff = min(60, 5 * (2 ** attempt))
+                            logger.warning(
+                                f"⏳ Rate limited deleting "
+                                f"{owner}/{repo_name}, backing off "
+                                f"{backoff}s "
+                                f"(attempt {attempt + 1}/{max_retries + 1})"
+                            )
+                            await asyncio.sleep(backoff)
+                        last_error = f"Rate limited: {response.text}"
+                        continue
+
+                    if is_rate_limit:
+                        # Retry budget exhausted on a rate-limit 403
+                        error = (
+                            f"Rate limited after "
+                            f"{max_retries + 1} attempts: "
+                            f"{response.text}"
+                        )
+                    else:
+                        error = f"Permission denied: {response.text}"
+                    logger.error(
+                        f"✗ Failed to delete {owner}/{repo_name}: {error}"
+                    )
+                    if progress:
+                        await progress.record(success=False, name=repo_name)
+                    return False, error
+                else:
+                    error = f"Status {response.status_code}: {response.text}"
+                    logger.error(
+                        f"✗ Failed to delete {owner}/{repo_name}: {error}"
+                    )
+                    if progress:
+                        await progress.record(success=False, name=repo_name)
+                    return False, error
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"⏳ Error deleting {owner}/{repo_name}: {e} "
+                        f"(attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                    last_error = f"Delete failed: {e}"
+                    continue
+                error = f"Delete failed: {e}"
+                logger.error(
+                    f"✗ Failed to delete {owner}/{repo_name}: {error}"
+                )
+                if progress:
+                    await progress.record(success=False, name=repo_name)
                 return False, error
-            else:
-                error = f"Status {response.status_code}: {response.text}"
-                logger.error(f"✗ Failed to delete {owner}/{repo_name}: {error}")
-                return False, error
-        except Exception as e:
-            error = f"Delete failed: {e}"
-            logger.error(f"✗ Failed to delete {owner}/{repo_name}: {error}")
-            return False, error
+
+        # Exhausted all retries
+        error = f"Failed after {max_retries + 1} attempts: {last_error}"
+        logger.error(f"✗ Failed to delete {owner}/{repo_name}: {error}")
+        if progress:
+            await progress.record(success=False, name=repo_name)
+        return False, error
 
     async def _create_repo_async_with_client(
         self,
@@ -509,8 +770,16 @@ class GitHubAPI:
         org: str | None = None,
         description: str | None = None,
         private: bool = False,
+        max_retries: int = 5,
+        rate_limiter: _AsyncRateLimiter | None = None,
+        progress: _AsyncProgressCounter | None = None,
     ) -> tuple[GitHubRepo | None, str | None]:
         """Create a repository asynchronously with provided client.
+
+        Uses a shared rate limiter to serialise API calls and avoid
+        triggering GitHub's secondary rate limits.  When a 403 *is*
+        returned the limiter's interval is widened so that every
+        subsequent request (from any task) automatically slows down.
 
         Args:
             client: Async HTTP client to use
@@ -518,6 +787,9 @@ class GitHubAPI:
             org: Organization name (if None, creates in user account)
             description: Repository description
             private: Whether repository should be private
+            max_retries: Maximum number of retry attempts for rate limits
+            rate_limiter: Shared rate limiter (controls inter-request spacing)
+            progress: Optional shared progress counter
 
         Returns:
             Tuple of (GitHubRepo or None, error_message or None)
@@ -540,39 +812,155 @@ class GitHubAPI:
 
         logger.debug(f"Async POST {url}")
 
-        try:
-            response = await client.post(url, json=payload)
-            if response.status_code in (200, 201):
-                data = response.json()
-                logger.info(f"✓ Created {name}")
-                return GitHubRepo.from_api_response(data), None
-            elif response.status_code == 422:
-                # Repository already exists - this shouldn't happen if delete worked
-                error = "Repository already exists"
-                logger.warning(f"⚠ {name} already exists (delete may have failed)")
-                # Try to get the existing repo details
-                try:
-                    get_url = f"{self.base_url}/repos/{org if org else 'user'}/{name}"
-                    get_response = await client.get(get_url)
-                    if get_response.status_code == 200:
-                        data = get_response.json()
-                        logger.info(f"  Retrieved existing repo: {name}")
-                        return GitHubRepo.from_api_response(data), None
-                except Exception as ex:
-                    logger.warning(
-                        f"Failed to retrieve existing repo details for {name}: {ex}"
-                    )
-                return None, error
-            else:
-                error = f"Status {response.status_code}: {response.text}"
-                logger.error(f"✗ Failed to create {name}: {error}")
-                return None, error
-        except Exception as e:
-            error = f"Create failed: {e}"
-            logger.error(f"✗ Failed to create {name}: {error}")
-            return None, error
+        # Initialise with a meaningful default so the "exhausted retries"
+        # message is never None (last_error is always re-set before each
+        # `continue`, but this guards against unexpected control-flow).
+        last_error: str = "unknown error"
 
-    def list_all_repos_graphql(self, org: str) -> dict[str, dict[str, Any]]:
+        for attempt in range(max_retries + 1):
+            # Gate every attempt through the shared rate limiter so that
+            # concurrent tasks never burst requests into GitHub.
+            if rate_limiter:
+                await rate_limiter.acquire()
+
+            # Small random jitter on retries to de-synchronise tasks that
+            # were rate-limited on the same cycle.
+            if attempt > 0:
+                jitter = random.uniform(0.1, 0.5)
+                await asyncio.sleep(jitter)
+
+            try:
+                response = await client.post(url, json=payload)
+                if response.status_code in (200, 201):
+                    data = response.json()
+                    if attempt > 0:
+                        logger.info(
+                            f"✓ Created {name} (after {attempt} "
+                            f"{'retry' if attempt == 1 else 'retries'})"
+                        )
+                    else:
+                        logger.info(f"✓ Created {name}")
+                    if progress:
+                        await progress.record(success=True, name=name)
+                    return GitHubRepo.from_api_response(data), None
+                elif response.status_code == 422:
+                    # Repository already exists - not retriable
+                    error = "Repository already exists"
+                    logger.warning(
+                        f"⚠ {name} already exists (delete may have failed)"
+                    )
+                    # Try to get the existing repo details when an org is given.
+                    # The `/repos/user/{name}` path is not valid on the
+                    # GitHub API, so we only attempt this when org is set.
+                    if org:
+                        try:
+                            get_url = (
+                                f"{self.base_url}/repos/{org}/{name}"
+                            )
+                            get_response = await client.get(get_url)
+                            if get_response.status_code == 200:
+                                data = get_response.json()
+                                logger.info(
+                                    f"  Retrieved existing repo: {name}"
+                                )
+                                return GitHubRepo.from_api_response(data), None
+                        except Exception as ex:
+                            logger.warning(
+                                f"Failed to retrieve existing repo details "
+                                f"for {name}: {ex}"
+                            )
+                    if progress:
+                        await progress.record(success=False, name=name)
+                    return None, error
+                elif response.status_code == 403:
+                    # Check for rate limiting - this is retriable
+                    retry_after = response.headers.get("Retry-After")
+                    is_rate_limit = (
+                        retry_after is not None
+                        or response.headers.get("X-RateLimit-Remaining") == "0"
+                        or "rate limit" in response.text.lower()
+                        or "secondary rate limit" in response.text.lower()
+                    )
+
+                    if is_rate_limit and attempt < max_retries:
+                        # Widen the shared rate limiter so ALL tasks
+                        # slow down — this is the key to avoiding the
+                        # thundering-herd retry storm.
+                        if rate_limiter:
+                            await rate_limiter.increase_interval()
+
+                        # If the server sent Retry-After, honour it as
+                        # an additional pause for THIS task.
+                        if retry_after:
+                            try:
+                                extra_wait = float(retry_after)
+                                logger.warning(
+                                    f"⏳ Rate limited creating {name}, "
+                                    f"server asked to wait {extra_wait:.0f}s "
+                                    f"(attempt {attempt + 1}/{max_retries + 1})"
+                                )
+                                await asyncio.sleep(extra_wait)
+                            except ValueError:
+                                pass
+                        else:
+                            # Exponential back-off when GitHub doesn't
+                            # tell us how long to wait.  This gives the
+                            # secondary-rate-limit rolling window time
+                            # to recover.
+                            backoff = min(60, 5 * (2 ** attempt))
+                            logger.warning(
+                                f"⏳ Rate limited creating {name}, "
+                                f"backing off {backoff}s "
+                                f"(attempt {attempt + 1}/{max_retries + 1})"
+                            )
+                            await asyncio.sleep(backoff)
+
+                        last_error = (
+                            f"Status {response.status_code}: {response.text}"
+                        )
+                        # Loop back → acquire() enforces the new interval
+                        continue
+                    else:
+                        error = (
+                            f"Status {response.status_code}: {response.text}"
+                        )
+                        logger.error(f"✗ Failed to create {name}: {error}")
+                        if progress:
+                            await progress.record(success=False, name=name)
+                        return None, error
+                else:
+                    error = (
+                        f"Status {response.status_code}: {response.text}"
+                    )
+                    logger.error(f"✗ Failed to create {name}: {error}")
+                    if progress:
+                        await progress.record(success=False, name=name)
+                    return None, error
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"⏳ Error creating {name}: {e} "
+                        f"(attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                    last_error = f"Create failed: {e}"
+                    # Loop back → acquire() spaces the next attempt
+                    continue
+                error = f"Create failed: {e}"
+                logger.error(f"✗ Failed to create {name}: {error}")
+                if progress:
+                    await progress.record(success=False, name=name)
+                return None, error
+
+        # Exhausted all retries
+        error = f"Failed after {max_retries + 1} attempts: {last_error}"
+        logger.error(f"✗ Failed to create {name}: {error}")
+        if progress:
+            await progress.record(success=False, name=name)
+        return None, error
+
+    def list_all_repos_graphql(
+        self, org: str
+    ) -> dict[str, dict[str, Any]]:
         """List all repositories in an org using GraphQL (single query).
 
         This is much faster than paginating through REST API.
@@ -584,6 +972,7 @@ class GitHubAPI:
             Dictionary mapping repo name to repo details
         """
         repos_map: dict[str, dict[str, Any]] = {}
+        repos_without_default_branch: list[str] = []
         cursor = None
         has_next_page = True
 
@@ -658,7 +1047,8 @@ class GitHubAPI:
                         if target:
                             latest_commit_sha = target.get("oid")
                     else:
-                        logger.warning(
+                        repos_without_default_branch.append(name)
+                        logger.debug(
                             "Repository %s has no default branch configured; "
                             "latest_commit_sha will be unavailable",
                             name,
@@ -689,18 +1079,41 @@ class GitHubAPI:
                 logger.error(f"GraphQL query failed: {e}")
                 break
 
+        if repos_without_default_branch:
+            logger.warning(
+                "%d/%d repositories have no default branch configured "
+                "(empty repos or failed pushes)",
+                len(repos_without_default_branch),
+                len(repos_map),
+            )
+
         logger.debug(f"Fetched {len(repos_map)} repositories from {org} using GraphQL")
         return repos_map
 
     async def batch_delete_repos(
-        self, owner: str, repo_names: list[str], max_concurrent: int = 10
+        self,
+        owner: str,
+        repo_names: list[str],
+        max_concurrent: int = 10,
+        rate_limit_interval: float = 0.5,
     ) -> dict[str, tuple[bool, str | None]]:
-        """Delete multiple repositories in parallel.
+        """Delete multiple repositories with rate-limit-aware scheduling.
+
+        A shared :class:`_AsyncRateLimiter` serialises the actual HTTP
+        calls so that no two delete requests fire closer together than
+        ``rate_limit_interval`` seconds.  This prevents burning through
+        the secondary-rate-limit budget before subsequent operations
+        (e.g. batch create) even start.
+
+        Retry budget scales with batch size so that large batches have
+        enough headroom to survive transient secondary-rate-limit blocks.
 
         Args:
             owner: Repository owner (user or org)
             repo_names: List of repository names to delete
-            max_concurrent: Maximum concurrent delete operations
+            max_concurrent: Maximum tasks in flight at once
+            rate_limit_interval: Minimum seconds between API calls
+                (adaptive — increased automatically on 403)
 
         Returns:
             Dictionary mapping repo name to (success, error_message)
@@ -708,9 +1121,25 @@ class GitHubAPI:
         if not repo_names:
             return {}
 
+        # Scale retries with batch size — large batches are more likely
+        # to trigger the secondary rate limit's rolling window.
+        batch_retries = max(5, min(15, len(repo_names) // 10))
+
         logger.info(
             f"Batch deleting {len(repo_names)} repositories "
-            f"(max {max_concurrent} concurrent)"
+            f"(max {max_concurrent} concurrent, "
+            f"{rate_limit_interval:.1f}s between requests, "
+            f"max {batch_retries} retries per repo)"
+        )
+
+        # Shared rate limiter — same pattern as batch_create_repos
+        rate_limiter = _AsyncRateLimiter(min_interval=rate_limit_interval)
+
+        # Progress counter — report every 10 completions
+        progress = _AsyncProgressCounter(
+            total=len(repo_names),
+            label="Delete",
+            report_every=max(1, len(repo_names) // 10),
         )
 
         # Create fresh async client for this batch operation
@@ -729,7 +1158,10 @@ class GitHubAPI:
             ) -> tuple[str, tuple[bool, str | None]]:
                 async with semaphore:
                     result = await self._delete_repo_async_with_client(
-                        client, owner, repo_name
+                        client, owner, repo_name,
+                        max_retries=batch_retries,
+                        rate_limiter=rate_limiter,
+                        progress=progress,
                     )
                     return repo_name, result
 
@@ -775,14 +1207,29 @@ class GitHubAPI:
         org: str,
         repo_configs: list[dict[str, Any]],
         max_concurrent: int = 10,
+        rate_limit_interval: float = 2.0,
     ) -> dict[str, tuple[GitHubRepo | None, str | None]]:
-        """Create multiple repositories in parallel.
+        """Create multiple repositories with rate-limit-aware scheduling.
+
+        A shared :class:`_AsyncRateLimiter` serialises the actual HTTP
+        calls so that, regardless of ``max_concurrent``, no two
+        creation requests fire closer together than
+        ``rate_limit_interval`` seconds.  If *any* task receives a 403
+        secondary-rate-limit response the limiter's interval is
+        automatically widened, slowing every subsequent request from
+        every task.
+
+        Retry budget and initial pacing scale with batch size so that
+        large mirrors (100+ repos) survive GitHub's secondary rate
+        limits without fatal failures.
 
         Args:
             org: Organization name
             repo_configs: List of repo config dicts with keys:
                          name, description, private
-            max_concurrent: Maximum concurrent create operations
+            max_concurrent: Maximum tasks in flight at once
+            rate_limit_interval: Minimum seconds between API calls
+                (adaptive — increased automatically on 403)
 
         Returns:
             Dictionary mapping repo name to (GitHubRepo or None, error or None)
@@ -790,9 +1237,32 @@ class GitHubAPI:
         if not repo_configs:
             return {}
 
+        # Scale retries with batch size — large batches are more likely
+        # to trigger the secondary rate limit's rolling window.
+        batch_retries = max(5, min(15, len(repo_configs) // 10))
+
+        # For very large batches, widen the initial interval to avoid
+        # hitting the limit in the first place.
+        if len(repo_configs) > 100:
+            rate_limit_interval = max(rate_limit_interval, 3.0)
+        if len(repo_configs) > 200:
+            rate_limit_interval = max(rate_limit_interval, 4.0)
+
         logger.info(
             f"Batch creating {len(repo_configs)} repositories "
-            f"(max {max_concurrent} concurrent)"
+            f"(max {max_concurrent} concurrent, "
+            f"{rate_limit_interval:.1f}s between requests, "
+            f"max {batch_retries} retries per repo)"
+        )
+
+        # Shared rate limiter — the single point of throttle for all tasks
+        rate_limiter = _AsyncRateLimiter(min_interval=rate_limit_interval)
+
+        # Progress counter — report every ~10% of completions
+        progress = _AsyncProgressCounter(
+            total=len(repo_configs),
+            label="Create",
+            report_every=max(1, len(repo_configs) // 10),
         )
 
         # Create fresh async client for this batch operation
@@ -817,6 +1287,9 @@ class GitHubAPI:
                         org=org,
                         description=config.get("description"),
                         private=config.get("private", False),
+                        max_retries=batch_retries,
+                        rate_limiter=rate_limiter,
+                        progress=progress,
                     )
                     return name, result
 
@@ -851,7 +1324,8 @@ class GitHubAPI:
                 logger.warning(f"Failed repos: {failed_repos[:10]}")  # Show first 10
             else:
                 logger.info(
-                    f"Batch create completed: {success_count}/{len(repo_configs)} successful"
+                    f"Batch create completed: "
+                    f"{success_count}/{len(repo_configs)} successful"
                 )
 
             return results_map

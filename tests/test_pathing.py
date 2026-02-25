@@ -254,6 +254,7 @@ class TestCheckPathConflicts:
                 check=True,
                 capture_output=True,
                 env={
+                    **os.environ,
                     "GIT_AUTHOR_NAME": "Test",
                     "GIT_AUTHOR_EMAIL": "test@example.com",
                     "GIT_COMMITTER_NAME": "Test",

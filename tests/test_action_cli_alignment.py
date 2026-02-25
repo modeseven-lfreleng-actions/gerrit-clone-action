@@ -187,9 +187,7 @@ class TestActionCLIFlagAlignment:
         # Known valid aliases that are part of boolean flag pairs
         # These should now be properly extracted by get_cli_option_names()
         # but we keep a small set for any edge cases
-        known_valid_aliases = {
-            "stop-on-first-error",  # Alias for --exit-on-error (backward compat)
-        }
+        known_valid_aliases: set[str] = set()
 
         invalid_flags = []
         for flag in cmd_building_flags:
@@ -285,7 +283,7 @@ class TestNoDeprecatedFlags:
 
     def test_no_standalone_path_flag(self, action_shell_script: str) -> None:
         """Verify --path is not used alone (should be --output-path)."""
-        # Pattern to find --path that is NOT part of --output-path or --ssh-private-key
+        # Pattern to find --path that is NOT part of --output-path or --ssh-identity-file
         # Look for: --path followed by space, quote, or end of line
         pattern = r"--path(?![a-z-])"
         matches = re.findall(pattern, action_shell_script)

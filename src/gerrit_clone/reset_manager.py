@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
 from rich.progress import (
     BarColumn,
@@ -22,7 +22,6 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
-from rich.text import Text
 
 from gerrit_clone.git_comparison import (
     compare_local_with_remote,
@@ -149,7 +148,7 @@ class ResetManager:
                 )
 
             self.console.print(
-                f"✅ Found {len(repos_status)} repositories"
+                f"✅ Fetched information on {len(repos_status)} repositories"
             )
 
         except Exception as e:
@@ -171,8 +170,6 @@ class ResetManager:
             return repos_map
 
         # Create progress display
-        current_repo = Text("", style="bold blue")
-
         progress_bar = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -180,19 +177,15 @@ class ResetManager:
             MofNCompleteColumn(),
             TextColumn("•"),
             TimeElapsedColumn(),
-            transient=False,
         )
         task = progress_bar.add_task(
             "Fetching PR/Issue counts", total=total_repos
         )
 
-        # Combine current repo and progress bar
-        display_group = Group(current_repo, progress_bar)
-
-        with Live(display_group, console=self.console, refresh_per_second=4, transient=False):
+        with Live(progress_bar, console=self.console, refresh_per_second=4, transient=True):
             # Enhance with PR/issue counts using REST API
             for name, repo_data in repos_map.items():
-                current_repo.plain = f"📊 {name}"
+                progress_bar.update(task, description=f"Fetching PR/Issue counts ({name})")
 
                 try:
                     # Get all open PRs (with pagination)
@@ -276,10 +269,10 @@ class ResetManager:
         """
         table = Table(title=f"📦 GitHub Organization: {self.org}")
 
-        table.add_column("Repository", style="cyan", no_wrap=True)
-        table.add_column("Open PRs", justify="right", style="yellow")
-        table.add_column("Open Issues", justify="right", style="magenta")
-        table.add_column("Last Commit", style="dim", no_wrap=True)
+        table.add_column("Repository", style="cyan", no_wrap=True, ratio=1)
+        table.add_column("Pull Requests", justify="right", style="yellow", no_wrap=True, min_width=14)
+        table.add_column("Issues", justify="right", style="magenta", no_wrap=True, min_width=8)
+        table.add_column("Last Commit", style="dim", no_wrap=True, min_width=12)
 
         total_prs = 0
         total_issues = 0
@@ -529,7 +522,8 @@ class ResetManager:
         GitHub repository names must:
         - Not be empty
         - Contain only alphanumeric characters, hyphens, underscores, and dots
-        - Not start or end with special characters
+        - Not start or end with a hyphen or underscore
+        - May start with a dot (e.g. ``.github`` for org-level config)
         - Be between 1 and 100 characters
 
         Args:
@@ -546,9 +540,12 @@ class ResetManager:
         if len(name) > 100:
             return False, "Repository name exceeds 100 characters"
 
-        # GitHub allows alphanumeric, hyphens, underscores, and dots
-        # Must not start/end with special characters
-        if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$", name):
+        # GitHub allows alphanumeric, hyphens, underscores, and dots.
+        # Names may start with a dot (e.g. ".github") but must not
+        # start or end with a hyphen or underscore.
+        if not re.match(
+            r"^\.?[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$", name
+        ):
             return False, "Repository name contains invalid characters or format"
 
         return True, None
