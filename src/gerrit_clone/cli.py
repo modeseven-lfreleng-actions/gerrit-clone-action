@@ -1496,6 +1496,11 @@ def mirror(
 
     console = Console(stderr=True)
 
+    # Initialize variables for exception handler scope
+    file_logger = None
+    error_collector = None
+    log_file_path = None
+
     try:
         # Validate mutually exclusive options
         if verbose and quiet:
@@ -1752,38 +1757,89 @@ def mirror(
         # Close GitHub API client
         github_api.close()
 
+        # Show error summary if there were issues
+        if error_collector and not quiet:
+            errors = [
+                record.message
+                for record in error_collector.errors + error_collector.critical_errors
+            ]
+            warnings = [record.message for record in error_collector.warnings]
+            if errors or warnings:
+                show_error_summary(console, errors, warnings)
+
+        # Write error summary to log file
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
+
         # Exit with appropriate code
         if batch_result.failed_count > 0:
+            if file_logger:
+                file_logger.debug(
+                    "Mirror completed with %d failures",
+                    batch_result.failed_count,
+                )
             raise typer.Exit(ExitCode.CLONE_ERROR)
         else:
+            if file_logger:
+                file_logger.debug("Mirror completed successfully")
             raise typer.Exit(0)
 
     except GitHubAPIError as e:
         console.print(f"[red]GitHub API Error:[/red] {e}")
+        if file_logger:
+            file_logger.error("GitHub API error: %s", str(e))
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
         raise typer.Exit(ExitCode.GENERAL_ERROR)
     except DiscoveryError as e:
         console.print(f"[red]Discovery Error:[/red] {e}")
+        if file_logger:
+            file_logger.error("Discovery error: %s", str(e))
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
         raise typer.Exit(ExitCode.DISCOVERY_ERROR)
     except ConfigurationError as e:
         console.print(f"[red]Configuration Error:[/red] {e}")
+        if file_logger:
+            file_logger.error("Configuration error: %s", str(e))
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
     except KeyboardInterrupt:
         console.print("\n[yellow]Mirror operation cancelled by user[/yellow]")
+        if file_logger:
+            file_logger.warning("Operation cancelled by user (KeyboardInterrupt)")
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         # Flush console to ensure message is displayed before exit
         if hasattr(console.file, "flush"):
             console.file.flush()
         raise typer.Exit(ExitCode.INTERRUPT)
     except typer.Exit:
         # Re-raise typer.Exit without catching it
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         raise
     except Exception as e:
         console.print(f"[red]Unexpected Error:[/red] {e}")
+        if file_logger:
+            file_logger.critical(
+                "Mirror crashed: %s", str(e), exc_info=True
+            )
+        if error_collector:
+            error_collector.add_critical_error(
+                f"Mirror crashed: {type(e).__name__}: {e!s}",
+                context="function: mirror",
+                exception=e,
+            )
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
         raise typer.Exit(ExitCode.GENERAL_ERROR)
@@ -1873,6 +1929,11 @@ def reset(
     """
     console = Console(stderr=True)
 
+    # Initialize variables for exception handler scope
+    file_logger = None
+    error_collector = None
+    log_file_path = None
+
     try:
         # Validate mutually exclusive options
         if verbose and quiet:
@@ -1949,6 +2010,12 @@ def reset(
 
         # Display final summary
         if result.deleted_repos > 0:
+            if file_logger:
+                file_logger.debug(
+                    "Reset complete: %d/%d repositories deleted",
+                    result.deleted_repos,
+                    result.total_repos,
+                )
             if not quiet:
                 console.print(
                     f"\n🎉 Reset complete: {result.deleted_repos}/{result.total_repos} "
@@ -1966,8 +2033,13 @@ def reset(
                         "had local/remote differences"
                     )
 
+            # Write error summary to log file
+            if error_collector and log_file_path:
+                error_collector.write_summary_to_file(log_file_path)
             raise typer.Exit(0)
         else:
+            if file_logger:
+                file_logger.debug("Reset: no repositories deleted")
             if not quiet:
                 if result.total_repos == 0:
                     console.print(
@@ -1975,22 +2047,51 @@ def reset(
                     )
                 else:
                     console.print("\n❌ No repositories were deleted")
+            # Write error summary to log file
+            if error_collector and log_file_path:
+                error_collector.write_summary_to_file(log_file_path)
             raise typer.Exit(0)
 
     except GitHubAuthError as e:
         console.print(f"[red]❌ GitHub authentication error:[/red] {e}")
+        if file_logger:
+            file_logger.error("GitHub authentication error: %s", str(e))
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
     except GitHubAPIError as e:
         console.print(f"[red]❌ GitHub API error:[/red] {e}")
+        if file_logger:
+            file_logger.error("GitHub API error: %s", str(e))
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         raise typer.Exit(ExitCode.GENERAL_ERROR)
     except KeyboardInterrupt:
         console.print("\n❌ Reset cancelled by user")
+        if file_logger:
+            file_logger.warning("Reset cancelled by user (KeyboardInterrupt)")
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         raise typer.Exit(1)
     except typer.Exit:
         # Re-raise typer.Exit exceptions without catching them as generic exceptions
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         raise
     except Exception as e:
         console.print(f"\n[red]Error:[/red] {e}")
+        if file_logger:
+            file_logger.critical(
+                "Reset crashed: %s", str(e), exc_info=True
+            )
+        if error_collector:
+            error_collector.add_critical_error(
+                f"Reset crashed: {type(e).__name__}: {e!s}",
+                context="function: reset",
+                exception=e,
+            )
+        if error_collector and log_file_path:
+            error_collector.write_summary_to_file(log_file_path)
         if verbose:
             import traceback
             console.print(traceback.format_exc())

@@ -308,6 +308,12 @@ class MirrorManager:
                     "Push successful to %s (up to date)",
                     github_repo.full_name,
                 )
+            if stdout.strip():
+                logger.debug(
+                    "Push stdout for %s: %s",
+                    github_repo.full_name,
+                    stdout.strip(),
+                )
 
             # After a successful mirror push, set the default branch on
             # GitHub to match the source project's HEAD.  ``git push
@@ -326,7 +332,10 @@ class MirrorManager:
             # Sanitize both stdout and stderr to avoid leaking tokens
             stdout = self._sanitize_token(e.stdout or "")
             stderr = self._sanitize_token(e.stderr or "")
-            error = f"Git push failed: {stderr}"
+            if stdout.strip():
+                error = f"Git push failed: {stderr} | stdout: {stdout}"
+            else:
+                error = f"Git push failed: {stderr}"
             logger.error(f"Push failed to {github_repo.full_name}: {error}")
             return False, error
         except Exception as e:

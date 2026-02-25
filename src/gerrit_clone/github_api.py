@@ -651,7 +651,10 @@ class GitHubAPI:
         url = f"{self.base_url}/repos/{owner}/{repo_name}"
         logger.debug(f"Async DELETE {url}")
 
-        last_error: str | None = None
+        # Initialise with a meaningful default so the "exhausted retries"
+        # message is never None (last_error is always re-set before each
+        # `continue`, but this guards against unexpected control-flow).
+        last_error: str = "unknown error"
 
         for attempt in range(max_retries + 1):
             if rate_limiter:
@@ -714,7 +717,15 @@ class GitHubAPI:
                         last_error = f"Rate limited: {response.text}"
                         continue
 
-                    error = f"Permission denied: {response.text}"
+                    if is_rate_limit:
+                        # Retry budget exhausted on a rate-limit 403
+                        error = (
+                            f"Rate limited after "
+                            f"{max_retries + 1} attempts: "
+                            f"{response.text}"
+                        )
+                    else:
+                        error = f"Permission denied: {response.text}"
                     logger.error(
                         f"✗ Failed to delete {owner}/{repo_name}: {error}"
                     )
@@ -801,7 +812,10 @@ class GitHubAPI:
 
         logger.debug(f"Async POST {url}")
 
-        last_error: str | None = None
+        # Initialise with a meaningful default so the "exhausted retries"
+        # message is never None (last_error is always re-set before each
+        # `continue`, but this guards against unexpected control-flow).
+        last_error: str = "unknown error"
 
         for attempt in range(max_retries + 1):
             # Gate every attempt through the shared rate limiter so that

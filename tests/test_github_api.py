@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -428,8 +429,20 @@ class TestBatchDeleteRepos:
         """Test that batch deletion respects max_concurrent limit."""
         api = GitHubAPI(token="test-token")
 
+        max_concurrent = 3
+        in_flight = 0
+        peak_in_flight = 0
+
         async def mock_delete_with_delay(*args, **kwargs):
-            response = Mock()  # Use Mock, not AsyncMock for response
+            nonlocal in_flight, peak_in_flight
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            # Yield control so other tasks can enter concurrently;
+            # multiple yields increase the chance of overlap.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            response = Mock()
             response.status_code = 204
             return response
 
@@ -452,12 +465,19 @@ class TestBatchDeleteRepos:
             results = await api.batch_delete_repos(
                 "test-org",
                 repo_names,
-                max_concurrent=3,
+                max_concurrent=max_concurrent,
                 rate_limit_interval=0.0,
             )
 
             assert len(results) == 10
             assert all(success for success, _ in results.values())
+            # The semaphore should have capped concurrency.
+            # With 10 tasks and max_concurrent=3 the peak must
+            # never exceed the limit.
+            assert peak_in_flight <= max_concurrent, (
+                f"Peak in-flight {peak_in_flight} exceeded "
+                f"max_concurrent {max_concurrent}"
+            )
 
         api.close()
 
