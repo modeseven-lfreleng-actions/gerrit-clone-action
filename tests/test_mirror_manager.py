@@ -256,6 +256,26 @@ class TestMirrorManager:
         assert manager.github_org == "test-org"
         assert manager.recreate is False
         assert manager.overwrite is False
+        assert manager.set_default_branch is True
+
+    def test_init_set_default_branch_explicit_false(self) -> None:
+        """Test MirrorManager initialization with set_default_branch=False."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+
+        github_api = Mock()
+
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            set_default_branch=False,
+        )
+
+        assert manager.set_default_branch is False
 
     @patch("gerrit_clone.mirror_manager.subprocess.run")
     def test_push_to_github_success(self, mock_run: Mock) -> None:
@@ -283,7 +303,8 @@ class TestMirrorManager:
             private=False,
         )
 
-        success, error = manager._push_to_github(local_path, github_repo)
+        with patch.object(manager, "_set_default_branch_from_local") as mock_set_branch:
+            success, error = manager._push_to_github(local_path, github_repo)
 
         assert success is True
         assert error is None
@@ -297,6 +318,80 @@ class TestMirrorManager:
             "--mirror",
             github_repo.ssh_url,
         ]
+        # Default set_default_branch=True, so should be called
+        mock_set_branch.assert_called_once_with(local_path, github_repo)
+
+    @patch("gerrit_clone.mirror_manager.subprocess.run")
+    def test_push_to_github_success_sets_default_branch_disabled(
+        self, mock_run: Mock
+    ) -> None:
+        """Test that _set_default_branch_from_local is NOT called when set_default_branch=False."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+            set_default_branch=False,
+        )
+
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        with patch.object(manager, "_set_default_branch_from_local") as mock_set_branch:
+            success, error = manager._push_to_github(local_path, github_repo)
+
+        assert success is True
+        assert error is None
+        mock_set_branch.assert_not_called()
+
+    @patch("gerrit_clone.mirror_manager.subprocess.run")
+    def test_push_to_github_failure_does_not_set_default_branch(
+        self, mock_run: Mock
+    ) -> None:
+        """Test that _set_default_branch_from_local is NOT called when push fails."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "git", stderr="Permission denied"
+        )
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        with patch.object(manager, "_set_default_branch_from_local") as mock_set_branch:
+            success, _error = manager._push_to_github(local_path, github_repo)
+
+        assert success is False
+        mock_set_branch.assert_not_called()
 
     @patch("gerrit_clone.mirror_manager.subprocess.run")
     def test_push_to_github_failure(self, mock_run: Mock) -> None:
@@ -985,3 +1080,229 @@ class TestMirrorManager:
         failed_count = sum(1 for r in result if not r.success)
         assert success_count == 2
         assert failed_count == 1
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="main")
+    def test_set_default_branch_from_local_success(self, mock_get_branch: Mock) -> None:
+        """Test _set_default_branch_from_local detects HEAD branch and calls the API."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        github_api.set_default_branch.return_value = True
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        mock_get_branch.assert_called_once_with(local_path)
+        github_api.set_default_branch.assert_called_once_with(
+            "test-org", "test-repo", "main"
+        )
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="master")
+    def test_set_default_branch_from_local_with_master(
+        self, mock_get_branch: Mock
+    ) -> None:
+        """Test _set_default_branch_from_local works with non-main branch names."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        github_api.set_default_branch.return_value = True
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        github_api.set_default_branch.assert_called_once_with(
+            "test-org", "test-repo", "master"
+        )
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value=None)
+    def test_set_default_branch_from_local_no_head_branch(
+        self, mock_get_branch: Mock, tmp_path: Path
+    ) -> None:
+        """Test _set_default_branch_from_local does nothing when HEAD branch cannot be determined.
+
+        For example, an empty repository or one with a detached HEAD.
+        Uses tmp_path to ensure no stale HEAD file exists on the runner.
+        """
+        local_path = tmp_path / "repo"
+        local_path.mkdir()
+
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=tmp_path,
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        # Should NOT call the API when branch is unknown
+        github_api.set_default_branch.assert_not_called()
+
+    @patch(
+        "gerrit_clone.mirror_manager.get_current_branch",
+        side_effect=FileNotFoundError("gone"),
+    )
+    def test_set_default_branch_from_local_repo_path_missing(
+        self, mock_get_branch: Mock, tmp_path: Path
+    ) -> None:
+        """Test _set_default_branch_from_local handles FileNotFoundError gracefully.
+
+        Uses tmp_path so the HEAD-file fallback path is guaranteed not to
+        exist, making the test deterministic across runners.
+        """
+        # Use a subdirectory that does NOT exist inside tmp_path
+        local_path = tmp_path / "nonexistent"
+
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=tmp_path,
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        # Should not raise
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        github_api.set_default_branch.assert_not_called()
+
+    @patch(
+        "gerrit_clone.mirror_manager.get_current_branch",
+        side_effect=ValueError("not a repo"),
+    )
+    def test_set_default_branch_from_local_invalid_repo(
+        self, mock_get_branch: Mock, tmp_path: Path
+    ) -> None:
+        """Test _set_default_branch_from_local handles ValueError gracefully.
+
+        Uses tmp_path so the HEAD-file fallback reads from a controlled
+        directory with no HEAD file, making the test deterministic.
+        """
+        local_path = tmp_path / "not-a-repo"
+        local_path.mkdir()
+
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=tmp_path,
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        # Should not raise
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        github_api.set_default_branch.assert_not_called()
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="main")
+    def test_set_default_branch_from_local_malformed_full_name(
+        self, mock_get_branch: Mock
+    ) -> None:
+        """Test _set_default_branch_from_local handles malformed full_name without crashing.
+
+        Upstream's implementation uses full_name.split('/')[0] for the owner,
+        which returns the whole string when there is no slash. The API call
+        still proceeds — it is the API's job to reject an invalid owner.
+        """
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="no-slash-here",  # Malformed: missing owner/repo separator
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+        )
+
+        # Should not raise; API is called with the mangled owner
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        github_api.set_default_branch.assert_called_once_with(
+            "no-slash-here", "test-repo", "main"
+        )

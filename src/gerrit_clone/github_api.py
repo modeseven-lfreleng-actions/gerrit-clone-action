@@ -620,7 +620,6 @@ class GitHubAPI:
         Raises:
             GitHubAPIError: For API errors
         """
-        logger.warning(f"Deleting GitHub repository: {owner}/{repo_name}")
         self._request("DELETE", f"/repos/{owner}/{repo_name}")
 
     async def _delete_repo_async_with_client(
@@ -998,6 +997,7 @@ class GitHubAPI:
                       target {{
                         ... on Commit {{
                           oid
+                          committedDate
                         }}
                       }}
                     }}
@@ -1041,11 +1041,14 @@ class GitHubAPI:
                     default_branch = None
                     latest_commit_sha = None
 
+                    last_commit_date = None
+
                     if default_branch_ref:
                         default_branch = default_branch_ref.get("name")
                         target = default_branch_ref.get("target")
                         if target:
                             latest_commit_sha = target.get("oid")
+                            last_commit_date = target.get("committedDate")
                     else:
                         repos_without_default_branch.append(name)
                         logger.debug(
@@ -1064,6 +1067,7 @@ class GitHubAPI:
                         "description": node.get("description"),
                         "default_branch": default_branch,
                         "latest_commit_sha": latest_commit_sha,
+                        "last_commit_date": last_commit_date,
                     }
 
                 has_next_page = page_info.get("hasNextPage", False)

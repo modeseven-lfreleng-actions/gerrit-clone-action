@@ -1214,6 +1214,7 @@ def test_list_all_repos_no_default_branch() -> None:
                                 "name": "main",
                                 "target": {
                                     "oid": "abc123def456",
+                                    "committedDate": "2025-01-18T12:34:56Z",
                                 },
                             },
                         },
@@ -1247,13 +1248,15 @@ def test_list_all_repos_no_default_branch() -> None:
         assert "repo-with-branch" in result
         assert "repo-no-branch" in result
 
-        # Repo with branch should have commit SHA
+        # Repo with branch should have commit SHA and date
         assert result["repo-with-branch"]["default_branch"] == "main"
         assert result["repo-with-branch"]["latest_commit_sha"] == "abc123def456"
+        assert result["repo-with-branch"]["last_commit_date"] == "2025-01-18T12:34:56Z"
 
         # Repo without branch should have None values
         assert result["repo-no-branch"]["default_branch"] is None
         assert result["repo-no-branch"]["latest_commit_sha"] is None
+        assert result["repo-no-branch"]["last_commit_date"] is None
 
         # Individual repos should only produce DEBUG-level messages now
         debug_calls = [
@@ -1281,3 +1284,172 @@ def test_list_all_repos_no_default_branch() -> None:
         assert "no default branch configured" in summary_fmt
 
     api.close()
+
+
+def test_list_all_repos_committed_date_absent() -> None:
+    """Test that last_commit_date is None when committedDate is absent from GraphQL response.
+
+    Older mock data or repos whose target fragment lacks committedDate should
+    still produce a valid entry with last_commit_date set to None rather than
+    raising an error.
+    """
+    api = GitHubAPI(token="test-token")
+
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "data": {
+            "organization": {
+                "repositories": {
+                    "nodes": [
+                        {
+                            "name": "repo-no-date",
+                            "nameWithOwner": "test-org/repo-no-date",
+                            "url": "https://github.com/test-org/repo-no-date",
+                            "sshUrl": "git@github.com:test-org/repo-no-date.git",
+                            "isPrivate": False,
+                            "description": "Repo with commit SHA but no date",
+                            "defaultBranchRef": {
+                                "name": "main",
+                                "target": {
+                                    "oid": "deadbeef1234",
+                                    # committedDate intentionally absent
+                                },
+                            },
+                        },
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": False,
+                        "endCursor": None,
+                    },
+                },
+            },
+        },
+    }
+
+    with patch.object(api.client, "post", return_value=mock_response):
+        result = api.list_all_repos_graphql("test-org")
+
+        assert len(result) == 1
+        assert result["repo-no-date"]["latest_commit_sha"] == "deadbeef1234"
+        assert result["repo-no-date"]["last_commit_date"] is None
+
+    api.close()
+
+
+def test_list_all_repos_committed_date_present() -> None:
+    """Test that last_commit_date is extracted from the GraphQL committedDate field."""
+    api = GitHubAPI(token="test-token")
+
+    mock_response = Mock()
+    mock_response.json.return_value = {
+        "data": {
+            "organization": {
+                "repositories": {
+                    "nodes": [
+                        {
+                            "name": "repo-with-date",
+                            "nameWithOwner": "test-org/repo-with-date",
+                            "url": "https://github.com/test-org/repo-with-date",
+                            "sshUrl": "git@github.com:test-org/repo-with-date.git",
+                            "isPrivate": False,
+                            "description": "Repo with full commit metadata",
+                            "defaultBranchRef": {
+                                "name": "develop",
+                                "target": {
+                                    "oid": "cafe0123babe",
+                                    "committedDate": "2024-12-25T08:00:00Z",
+                                },
+                            },
+                        },
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": False,
+                        "endCursor": None,
+                    },
+                },
+            },
+        },
+    }
+
+    with patch.object(api.client, "post", return_value=mock_response):
+        result = api.list_all_repos_graphql("test-org")
+
+        assert len(result) == 1
+        repo = result["repo-with-date"]
+        assert repo["latest_commit_sha"] == "cafe0123babe"
+        assert repo["last_commit_date"] == "2024-12-25T08:00:00Z"
+        assert repo["default_branch"] == "develop"
+
+    api.close()
+
+
+class TestSetDefaultBranch:
+    """Test GitHubAPI.set_default_branch method."""
+
+    def test_set_default_branch_success(self) -> None:
+        """Test successfully setting the default branch."""
+        with GitHubAPI(token="test-token") as api:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "default_branch": "main",
+                "name": "test-repo",
+            }
+            mock_response.content = b'{"default_branch": "main"}'
+            mock_response.headers = {}
+
+            with patch.object(api.client, "request", return_value=mock_response):
+                result = api.set_default_branch("test-org", "test-repo", "main")
+
+            assert result is True
+
+    def test_set_default_branch_not_found(self) -> None:
+        """Test setting default branch on a non-existent repository returns False."""
+        with GitHubAPI(token="test-token") as api:
+            mock_response = Mock()
+            mock_response.status_code = 404
+            mock_response.text = "Not Found"
+            mock_response.headers = {}
+
+            with patch.object(api.client, "request", return_value=mock_response):
+                result = api.set_default_branch("test-org", "missing-repo", "main")
+
+            assert result is False
+
+    def test_set_default_branch_api_error(self) -> None:
+        """Test handling of a generic API error when setting default branch."""
+        with GitHubAPI(token="test-token") as api:
+            mock_response = Mock()
+            mock_response.status_code = 422
+            mock_response.text = "Validation Failed"
+            mock_response.headers = {}
+
+            with patch.object(api.client, "request", return_value=mock_response):
+                result = api.set_default_branch(
+                    "test-org", "test-repo", "nonexistent-branch"
+                )
+
+            assert result is False
+
+    def test_set_default_branch_sends_correct_request(self) -> None:
+        """Test that set_default_branch sends the right HTTP method and payload."""
+        with GitHubAPI(token="test-token") as api:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "default_branch": "develop",
+                "name": "test-repo",
+            }
+            mock_response.content = b'{"default_branch": "develop"}'
+            mock_response.headers = {}
+
+            with patch.object(
+                api.client, "request", return_value=mock_response
+            ) as mock_request:
+                api.set_default_branch("test-org", "test-repo", "develop")
+
+                mock_request.assert_called_once_with(
+                    "PATCH",
+                    "https://api.github.com/repos/test-org/test-repo",
+                    json={"default_branch": "develop"},
+                )

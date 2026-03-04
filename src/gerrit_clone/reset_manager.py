@@ -116,11 +116,19 @@ class ResetManager:
             )
             return False
 
-    async def scan_github_organization(self) -> dict[str, GitHubRepoStatus]:
+    async def scan_github_organization(
+        self, skip_pr_issue_counts: bool = False
+    ) -> dict[str, GitHubRepoStatus]:
         """
         Scan GitHub organization and fetch repository information.
 
-        Uses GraphQL to fetch repositories with PR/issue counts.
+        Uses GraphQL to fetch repositories and basic metadata; per-repository
+        REST API calls in `_fetch_repos_with_graphql` populate PR/issue counts
+        unless `skip_pr_issue_counts` is True.
+
+        Args:
+            skip_pr_issue_counts: If True, skip fetching PR/issue counts
+                (useful when confirmation is not needed)
 
         Returns:
             Dictionary mapping repository name to GitHubRepoStatus
@@ -133,7 +141,9 @@ class ResetManager:
 
         try:
             # Use enhanced GraphQL query
-            repos_data = await self._fetch_repos_with_graphql()
+            repos_data = await self._fetch_repos_with_graphql(
+                skip_pr_issue_counts=skip_pr_issue_counts
+            )
 
             for name, repo in repos_data.items():
                 repos_status[name] = GitHubRepoStatus(
@@ -142,9 +152,9 @@ class ResetManager:
                     url=repo.get("html_url", f"https://github.com/{self.org}/{name}"),
                     open_prs=repo.get("open_prs", 0),
                     open_issues=repo.get("open_issues", 0),
-                    last_commit_sha=repo.get("last_commit_sha"),
+                    last_commit_sha=repo.get("latest_commit_sha"),
                     last_commit_date=repo.get("last_commit_date"),
-                    default_branch=repo.get("default_branch", "main"),
+                    default_branch=repo.get("default_branch") or "main",
                 )
 
             self.console.print(
@@ -160,13 +170,25 @@ class ResetManager:
 
         return repos_status
 
-    async def _fetch_repos_with_graphql(self) -> dict[str, dict[str, Any]]:
-        """Fetch repos with PR/issue counts using GraphQL with progress display."""
+    async def _fetch_repos_with_graphql(
+        self, skip_pr_issue_counts: bool = False
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch repos with PR/issue counts using GraphQL with progress display.
+
+        Args:
+            skip_pr_issue_counts: If True, skip the per-repo REST API calls
+                for PR/issue counts (significantly faster).
+        """
         # Use the existing GraphQL method and enhance with PR/issue queries
         repos_map = self.github_api.list_all_repos_graphql(self.org)
 
         total_repos = len(repos_map)
         if total_repos == 0:
+            return repos_map
+
+        # When skipping PR/issue counts, return the repo map immediately
+        # without making expensive per-repo REST API calls
+        if skip_pr_issue_counts:
             return repos_map
 
         # Create progress display
@@ -645,7 +667,11 @@ class ResetManager:
             ResetResult with operation details
         """
         # Scan GitHub organization
-        remote_repos = await self.scan_github_organization()
+        # Skip expensive PR/issue count fetching when --no-confirm is used,
+        # since the table and counts are only needed for manual confirmation
+        remote_repos = await self.scan_github_organization(
+            skip_pr_issue_counts=no_confirm
+        )
 
         if not remote_repos:
             self.console.print(
@@ -661,8 +687,13 @@ class ResetManager:
                 total_issues=0,
             )
 
-        # Display repos table
-        total_prs, total_issues = self.display_repos_table(remote_repos)
+        total_prs = 0
+        total_issues = 0
+
+        # Only display the repos table when confirmation is needed;
+        # when --no-confirm is used, the table output is superfluous
+        if not no_confirm:
+            total_prs, total_issues = self.display_repos_table(remote_repos)
 
         # Compare with local if requested
         unsynchronized: list[SyncComparison] = []

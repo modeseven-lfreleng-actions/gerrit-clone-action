@@ -151,6 +151,7 @@ class MirrorManager:
         overwrite: bool = False,
         progress_tracker: ProgressTracker | None = None,
         github_token: str | None = None,
+        set_default_branch: bool = True,
     ) -> None:
         """Initialize mirror manager.
 
@@ -165,6 +166,10 @@ class MirrorManager:
                 If provided, push operations will use HTTPS with token
                 auth instead of SSH. This avoids requiring SSH keys
                 for github.com in CI environments.
+            set_default_branch: Set the default branch on GitHub after push
+                (default: True). When enabled, the local HEAD symbolic ref
+                is read from the bare clone and used to configure the
+                default branch on the GitHub repository via the API.
         """
         self.config = config
         self.github_api = github_api
@@ -173,6 +178,7 @@ class MirrorManager:
         self.overwrite = overwrite
         self.progress_tracker = progress_tracker
         self.github_token = github_token
+        self.set_default_branch = set_default_branch
         self.clone_manager = CloneManager(config, progress_tracker)
 
     def _build_push_url(self, github_repo: GitHubRepo) -> str:
@@ -320,7 +326,8 @@ class MirrorManager:
             # --mirror`` pushes refs/heads/* but GitHub sometimes picks an
             # arbitrary branch as the default; explicitly setting it
             # ensures the GitHub repo matches the Gerrit source.
-            self._set_default_branch_from_local(local_path, github_repo)
+            if self.set_default_branch:
+                self._set_default_branch_from_local(local_path, github_repo)
 
             return True, None
 
