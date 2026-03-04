@@ -138,12 +138,20 @@ class _AsyncRateLimiter:
     call :meth:`increase_interval` to widen the gap for **all**
     tasks — this is the adaptive back-off that prevents the
     thundering-herd retry pattern.
+
+    After a streak of consecutive successes, call
+    :meth:`record_success` to gradually reduce the interval back
+    towards the original baseline.  This prevents the limiter from
+    being permanently stuck at the ceiling after a transient burst
+    of 403s.
     """
 
     def __init__(self, min_interval: float = 1.0) -> None:
         self._min_interval = min_interval
+        self._original_interval = min_interval
         self._lock = asyncio.Lock()
         self._last_time: float = 0.0
+        self._consecutive_successes: int = 0
 
     @property
     def interval(self) -> float:
@@ -171,12 +179,46 @@ class _AsyncRateLimiter:
         async with self._lock:
             old = self._min_interval
             self._min_interval = min(self._min_interval * factor, max_interval)
+            # Reset the success streak — we just got rate-limited.
+            self._consecutive_successes = 0
             if self._min_interval != old:
                 logger.info(
                     f"⚙️  Rate limiter: interval {old:.1f}s → "
                     f"{self._min_interval:.1f}s"
                 )
 
+    async def record_success(self, recovery_threshold: int = 5) -> None:
+        """Record a successful API call and maybe reduce the interval.
+
+        After *recovery_threshold* consecutive successes the interval
+        is halved (but never below the original baseline).  This lets
+        the limiter recover from transient secondary-rate-limit bursts
+        instead of being stuck at the 30 s ceiling for the remainder
+        of a large batch.
+
+        Args:
+            recovery_threshold: Number of consecutive successes before
+                the interval is reduced.
+        """
+        async with self._lock:
+            self._consecutive_successes += 1
+            if (
+                self._consecutive_successes >= recovery_threshold
+                and self._min_interval > self._original_interval
+            ):
+                old = self._min_interval
+                self._min_interval = max(
+                    self._original_interval,
+                    self._min_interval / 2.0,
+                )
+                self._consecutive_successes = 0
+                if self._min_interval != old:
+                    logger.info(
+                        f"⚙️  Rate limiter recovery: interval "
+                        f"{old:.1f}s → {self._min_interval:.1f}s "
+                        f"(after {recovery_threshold} consecutive "
+                        f"successes)"
+                    )
 
 class GitHubAPI:
     """GitHub API client for repository operations."""
@@ -675,6 +717,10 @@ class GitHubAPI:
                         )
                     else:
                         logger.info(f"✓ Deleted {owner}/{repo_name}")
+                    # Tell the rate limiter about the success so it
+                    # can gradually recover from elevated intervals.
+                    if rate_limiter:
+                        await rate_limiter.record_success()
                     if progress:
                         await progress.record(success=True, name=repo_name)
                     return True, None
@@ -839,6 +885,10 @@ class GitHubAPI:
                         )
                     else:
                         logger.info(f"✓ Created {name}")
+                    # Tell the rate limiter about the success so it
+                    # can gradually recover from elevated intervals.
+                    if rate_limiter:
+                        await rate_limiter.record_success()
                     if progress:
                         await progress.record(success=True, name=name)
                     return GitHubRepo.from_api_response(data), None

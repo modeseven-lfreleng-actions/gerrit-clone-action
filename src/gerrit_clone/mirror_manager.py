@@ -533,7 +533,7 @@ class MirrorManager:
             logger.info(f"🏗️  Batch creating {len(repos_to_create)} repositories...")
             create_results = asyncio.run(
                 self.github_api.batch_create_repos(
-                    self.github_org, repos_to_create, max_concurrent=5
+                    self.github_org, repos_to_create, max_concurrent=3
                 )
             )
             for name, (repo, error) in create_results.items():

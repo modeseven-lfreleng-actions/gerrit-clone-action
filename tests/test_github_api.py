@@ -17,6 +17,7 @@ from gerrit_clone.github_api import (
     GitHubNotFoundError,
     GitHubRateLimitError,
     GitHubRepo,
+    _AsyncRateLimiter,
     get_default_org_or_user,
     sanitize_description,
     transform_gerrit_name_to_github,
@@ -1453,3 +1454,113 @@ class TestSetDefaultBranch:
                     "https://api.github.com/repos/test-org/test-repo",
                     json={"default_branch": "develop"},
                 )
+
+
+class TestAsyncRateLimiterRecovery:
+    """Test _AsyncRateLimiter adaptive recovery via record_success()."""
+
+    @pytest.mark.asyncio
+    async def test_record_success_reduces_interval_after_threshold(self) -> None:
+        """After N consecutive successes the interval should halve."""
+        limiter = _AsyncRateLimiter(min_interval=1.0)
+
+        # Simulate a rate-limit escalation: 1.0 → 2.0
+        await limiter.increase_interval(factor=2.0)
+        assert limiter.interval == 2.0
+
+        # 4 successes — not yet at the default threshold of 5
+        for _ in range(4):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 2.0  # unchanged
+
+        # 5th success triggers recovery: 2.0 → 1.0 (halved, clamped to original)
+        await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 1.0
+
+    @pytest.mark.asyncio
+    async def test_record_success_never_goes_below_original(self) -> None:
+        """Interval must never drop below the original baseline."""
+        limiter = _AsyncRateLimiter(min_interval=2.0)
+
+        # Escalate: 2.0 → 4.0
+        await limiter.increase_interval(factor=2.0)
+        assert limiter.interval == 4.0
+
+        # 5 successes → halve: 4.0 → 2.0 (original)
+        for _ in range(5):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 2.0
+
+        # Another 5 successes — already at baseline, should stay put
+        for _ in range(5):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 2.0
+
+    @pytest.mark.asyncio
+    async def test_increase_resets_success_streak(self) -> None:
+        """A rate-limit hit should reset the consecutive-success counter."""
+        limiter = _AsyncRateLimiter(min_interval=1.0)
+
+        # Escalate to 2.0
+        await limiter.increase_interval(factor=2.0)
+
+        # 4 successes — one short of recovery
+        for _ in range(4):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 2.0
+
+        # Another rate-limit hit resets the streak and escalates
+        await limiter.increase_interval(factor=2.0)
+        assert limiter.interval == 4.0
+
+        # Now we need a full 5 successes again
+        for _ in range(4):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 4.0  # still elevated
+
+        await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 2.0  # halved from 4.0
+
+    @pytest.mark.asyncio
+    async def test_gradual_recovery_from_ceiling(self) -> None:
+        """Interval should step down gradually from the 30s ceiling."""
+        limiter = _AsyncRateLimiter(min_interval=2.0)
+
+        # Escalate all the way to 30s ceiling
+        for _ in range(5):
+            await limiter.increase_interval(factor=2.0, max_interval=30.0)
+        assert limiter.interval == 30.0
+
+        # Each batch of 5 successes should halve:
+        # 30.0 → 15.0 → 7.5 → 3.75 → 2.0 (clamped to original)
+        expected = [15.0, 7.5, 3.75, 2.0]
+        for exp in expected:
+            for _ in range(5):
+                await limiter.record_success(recovery_threshold=5)
+            assert limiter.interval == exp
+
+    @pytest.mark.asyncio
+    async def test_no_recovery_when_already_at_baseline(self) -> None:
+        """record_success should be a no-op when interval is at baseline."""
+        limiter = _AsyncRateLimiter(min_interval=1.0)
+        assert limiter.interval == 1.0
+
+        # Many successes — interval should stay at 1.0
+        for _ in range(20):
+            await limiter.record_success(recovery_threshold=5)
+        assert limiter.interval == 1.0
+
+    @pytest.mark.asyncio
+    async def test_custom_recovery_threshold(self) -> None:
+        """Recovery should respect a custom threshold value."""
+        limiter = _AsyncRateLimiter(min_interval=1.0)
+        await limiter.increase_interval(factor=2.0)
+        assert limiter.interval == 2.0
+
+        # With threshold=3, recovery should happen after 3 successes
+        for _ in range(2):
+            await limiter.record_success(recovery_threshold=3)
+        assert limiter.interval == 2.0  # not yet
+
+        await limiter.record_success(recovery_threshold=3)
+        assert limiter.interval == 1.0  # recovered
