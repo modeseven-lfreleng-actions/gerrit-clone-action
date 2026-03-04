@@ -673,31 +673,7 @@ class MirrorManager:
                 )
 
         try:
-            # Check if repo exists in our pre-fetched data
-            existed_before = github_name in existing_repos
-
-            if existed_before and not self.recreate:
-                logger.info(
-                    f"GitHub repository already exists: "
-                    f"{self.github_org}/{github_name}, skipping"
-                )
-                github_url = (
-                    f"https://github.com/{self.github_org}/{github_name}"
-                )
-                completed_at = datetime.now(UTC)
-                duration = (completed_at - started_at).total_seconds()
-                return MirrorResult(
-                    project=clone_result.project,
-                    github_name=github_name,
-                    github_url=github_url,
-                    status=MirrorStatus.SKIPPED,
-                    local_path=local_path,
-                    duration_seconds=duration,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                )
-
-            # Get GitHub repo from lookup (was created/deleted in batch)
+            # Get GitHub repo from lookup (was created/reused in batch)
             github_repo = repos_lookup.get(github_name)
             if not github_repo:
                 # This shouldn't happen, but handle gracefully
