@@ -1102,8 +1102,10 @@ class GitHubAPI:
                     else:
                         repos_without_default_branch.append(name)
                         logger.debug(
-                            "Repository %s has no default branch configured; "
-                            "latest_commit_sha will be unavailable",
+                            "Repository %s has no default branch configured "
+                            "(may be a Gerrit parent project or an empty repo "
+                            "from a failed push); latest_commit_sha will be "
+                            "unavailable",
                             name,
                         )
 
@@ -1134,11 +1136,13 @@ class GitHubAPI:
                 break
 
         if repos_without_default_branch:
-            logger.warning(
+            logger.info(
                 "%d/%d repositories have no default branch configured "
-                "(empty repos or failed pushes)",
+                "(typically Gerrit parent projects with no code branches, "
+                "or repos where a previous push failed): %s",
                 len(repos_without_default_branch),
                 len(repos_map),
+                ", ".join(sorted(repos_without_default_branch)),
             )
 
         logger.debug(f"Fetched {len(repos_map)} repositories from {org} using GraphQL")

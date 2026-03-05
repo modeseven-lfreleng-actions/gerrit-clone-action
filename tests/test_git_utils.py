@@ -15,9 +15,12 @@ import pytest
 from gerrit_clone.git_utils import (
     get_current_branch,
     get_current_commit_sha,
+    get_head_ref,
     get_remote_url,
+    is_gerrit_parent_project,
     is_git_repository,
     is_repo_dirty,
+    list_local_branches,
 )
 
 
@@ -459,3 +462,364 @@ class TestGetRemoteUrl:
             not_repo.mkdir()
             with pytest.raises(ValueError, match="Not a git repository"):
                 get_remote_url(not_repo)
+
+
+class TestGetHeadRef:
+    """Test get_head_ref function."""
+
+    def test_regular_repo_with_branch(self) -> None:
+        """Test reading HEAD ref from a regular repo on a branch."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "Test",
+                    "GIT_AUTHOR_EMAIL": "t@t",
+                    "GIT_COMMITTER_NAME": "Test",
+                    "GIT_COMMITTER_EMAIL": "t@t",
+                },
+            )
+            ref = get_head_ref(repo_path)
+            assert ref == "refs/heads/main"
+
+    def test_bare_repo_with_branch(self) -> None:
+        """Test reading HEAD ref from a bare repo."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create a source repo, then clone it bare
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "master"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "Test",
+                    "GIT_AUTHOR_EMAIL": "t@t",
+                    "GIT_COMMITTER_NAME": "Test",
+                    "GIT_COMMITTER_EMAIL": "t@t",
+                },
+            )
+            bare = Path(temp_dir) / "bare.git"
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(bare)],
+                check=True,
+                capture_output=True,
+            )
+            ref = get_head_ref(bare)
+            assert ref == "refs/heads/master"
+
+    def test_head_pointing_to_meta_config(self) -> None:
+        """Test reading HEAD when it points to refs/meta/config (Gerrit parent project)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Simulate a bare repo whose HEAD points to refs/meta/config
+            repo_path = Path(temp_dir) / "parent.git"
+            repo_path.mkdir()
+            (repo_path / "HEAD").write_text("ref: refs/meta/config\n")
+            ref = get_head_ref(repo_path)
+            assert ref == "refs/meta/config"
+
+    def test_detached_head(self) -> None:
+        """Test that a detached HEAD (raw SHA) returns None."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            (repo_path / "HEAD").write_text("abc123def456\n")
+            ref = get_head_ref(repo_path)
+            assert ref is None
+
+    def test_non_existent_path(self) -> None:
+        """Test that a missing path returns None."""
+        ref = get_head_ref(Path("/tmp/does-not-exist-ever-12345"))
+        assert ref is None
+
+    def test_non_bare_repo_via_dot_git(self) -> None:
+        """Test that get_head_ref falls back to .git/HEAD for non-bare repos."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "develop"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "Test",
+                    "GIT_AUTHOR_EMAIL": "t@t",
+                    "GIT_COMMITTER_NAME": "Test",
+                    "GIT_COMMITTER_EMAIL": "t@t",
+                },
+            )
+            ref = get_head_ref(repo_path)
+            assert ref == "refs/heads/develop"
+
+
+class TestListLocalBranches:
+    """Test list_local_branches function."""
+
+    def test_repo_with_multiple_branches(self) -> None:
+        """Test listing branches from a repo with several branches."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            subprocess.run(
+                ["git", "branch", "develop"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "branch", "feature-x"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            branches = list_local_branches(repo_path)
+            assert branches == ["develop", "feature-x", "main"]
+
+    def test_bare_repo_with_branches(self) -> None:
+        """Test listing branches from a bare clone."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            subprocess.run(
+                ["git", "init", "-b", "master"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            subprocess.run(
+                ["git", "branch", "release"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+            )
+            bare = Path(temp_dir) / "bare.git"
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(bare)],
+                check=True,
+                capture_output=True,
+            )
+            branches = list_local_branches(bare)
+            assert "master" in branches
+            assert "release" in branches
+
+    def test_repo_with_no_branches(self) -> None:
+        """Test that a fake repo with no refs/heads returns empty list."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Simulate a bare repo that has only refs/meta/config
+            repo_path = Path(temp_dir) / "parent.git"
+            repo_path.mkdir()
+            for d in ["objects", "refs", "refs/meta"]:
+                (repo_path / d).mkdir(parents=True, exist_ok=True)
+            (repo_path / "HEAD").write_text("ref: refs/meta/config\n")
+            (repo_path / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n\tbare = true\n"
+            )
+            branches = list_local_branches(repo_path)
+            assert branches == []
+
+    def test_non_existent_path(self) -> None:
+        """Test that a missing path returns empty list."""
+        branches = list_local_branches(Path("/tmp/does-not-exist-ever-12345"))
+        assert branches == []
+
+    def test_branches_are_sorted(self) -> None:
+        """Test that returned branches are sorted alphabetically."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            subprocess.run(
+                ["git", "init", "-b", "zebra"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            subprocess.run(
+                ["git", "branch", "alpha"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "branch", "middle"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            branches = list_local_branches(repo_path)
+            assert branches == ["alpha", "middle", "zebra"]
+
+
+class TestIsGerritParentProject:
+    """Test is_gerrit_parent_project function."""
+
+    def test_gerrit_parent_project(self) -> None:
+        """Test detection of a Gerrit parent project (HEAD -> refs/meta/config, no branches)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "parent.git"
+            repo_path.mkdir()
+            for d in ["objects", "refs", "refs/meta"]:
+                (repo_path / d).mkdir(parents=True, exist_ok=True)
+            (repo_path / "HEAD").write_text("ref: refs/meta/config\n")
+            (repo_path / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n\tbare = true\n"
+            )
+            assert is_gerrit_parent_project(repo_path) is True
+
+    def test_normal_repo_with_branches(self) -> None:
+        """Test that a normal repo with branches is NOT detected as parent project."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            assert is_gerrit_parent_project(repo_path) is False
+
+    def test_meta_config_head_with_branches(self) -> None:
+        """Test repo with HEAD -> refs/meta/config but that also has real branches.
+
+        This can happen when a Gerrit project has both metadata and code
+        branches (e.g. testsuite/pythonsdk-tests). It should NOT be
+        classified as a parent project.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create a real repo, then manually rewrite HEAD to refs/meta/config
+            repo_path = Path(temp_dir) / "repo"
+            repo_path.mkdir()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            subprocess.run(
+                ["git", "init", "-b", "master"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                env=env,
+            )
+            # Overwrite HEAD to point to refs/meta/config
+            (repo_path / ".git" / "HEAD").write_text("ref: refs/meta/config\n")
+            # Repo still has refs/heads/master, so it should NOT be a parent project
+            assert is_gerrit_parent_project(repo_path) is False
+
+    def test_non_existent_path(self) -> None:
+        """Test that a missing path returns False."""
+        assert is_gerrit_parent_project(Path("/tmp/does-not-exist-ever-12345")) is False
+
+    def test_head_on_normal_branch(self) -> None:
+        """Test that HEAD pointing to refs/heads/main is not a parent project."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo.git"
+            repo_path.mkdir()
+            (repo_path / "HEAD").write_text("ref: refs/heads/main\n")
+            assert is_gerrit_parent_project(repo_path) is False
+
+    def test_detached_head(self) -> None:
+        """Test that a detached HEAD (raw SHA) is not a parent project."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir) / "repo.git"
+            repo_path.mkdir()
+            (repo_path / "HEAD").write_text("abc123def456789\n")
+            assert is_gerrit_parent_project(repo_path) is False

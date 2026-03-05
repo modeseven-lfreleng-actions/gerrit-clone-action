@@ -457,11 +457,17 @@ class TestMirrorManager:
         success, _error = manager._push_to_github(local_path, github_repo)
 
         assert success is True
-        mock_run.assert_called_once()
-        # Check that GIT_SSH_COMMAND was set in env
-        call_env = mock_run.call_args[1].get("env")
-        assert call_env is not None
-        assert "GIT_SSH_COMMAND" in call_env
+        # The push call is the first invocation; subsequent calls may
+        # come from _set_default_branch_from_local (e.g. git for-each-ref
+        # via list_local_branches).  Verify the push was issued and that
+        # GIT_SSH_COMMAND was passed in its environment.
+        push_call = mock_run.call_args_list[0]
+        push_cmd = push_call[0][0]  # positional arg: command list
+        assert push_cmd[:3] == ["git", "-C", str(local_path)]
+        assert "--mirror" in push_cmd
+        push_env = push_call[1].get("env")
+        assert push_env is not None
+        assert "GIT_SSH_COMMAND" in push_env
 
     def test_build_push_url_with_token_uses_https(self) -> None:
         """Test that _build_push_url returns plain HTTPS URL when token is set."""
@@ -548,10 +554,14 @@ class TestMirrorManager:
             private=False,
         )
 
-        success, error = manager._push_to_github(local_path, github_repo)
+        with patch.object(manager, "_set_default_branch_from_local"):
+            success, error = manager._push_to_github(local_path, github_repo)
 
         assert success is True
         assert error is None
+        # Only the push call should have been made (default branch
+        # setting is mocked out above to avoid extra subprocess calls
+        # from git_utils helpers like list_local_branches).
         mock_run.assert_called_once()
         call_args = mock_run.call_args
         # The push URL must be the plain HTTPS URL (no token embedded)
@@ -609,7 +619,8 @@ class TestMirrorManager:
             private=False,
         )
 
-        success, _error = manager._push_to_github(local_path, github_repo)
+        with patch.object(manager, "_set_default_branch_from_local"):
+            success, _error = manager._push_to_github(local_path, github_repo)
 
         assert success is True
         mock_run.assert_called_once()

@@ -1468,6 +1468,19 @@ def mirror(
         ),
         envvar="GERRIT_SET_DEFAULT_BRANCH",
     ),
+    fix_default_branch: bool = typer.Option(
+        True,
+        "--fix-default-branch/--no-fix-default-branch",
+        help=(
+            "After syncing, repair any existing GitHub repositories that "
+            "have no default branch configured (default: enabled). "
+            "Gerrit parent projects (HEAD → refs/meta/config, no code "
+            "branches) are identified and logged at INFO level rather "
+            "than flagged as errors. Real repositories whose previous "
+            "push failed are fixed by selecting the best candidate branch."
+        ),
+        envvar="GERRIT_FIX_DEFAULT_BRANCH",
+    ),
 ) -> None:
     """Mirror repositories from a Gerrit server to GitHub.
 
@@ -1496,6 +1509,10 @@ def mirror(
         # Mirror without setting default branch on GitHub
         gerrit-clone mirror --server gerrit.onap.org --org myorg \\
           --no-set-default-branch
+
+        # Disable the post-sync default branch repair pass
+        gerrit-clone mirror --server gerrit.onap.org --org myorg \\
+          --no-fix-default-branch
 
         # Use HTTP API for discovery (no SSH required)
         gerrit-clone mirror --server gerrit.onap.org --org myorg \\
@@ -1596,6 +1613,8 @@ def mirror(
                 output_path=str(output_path),
                 recreate=recreate,
                 overwrite=overwrite,
+                set_default_branch=set_default_branch,
+                fix_default_branch=fix_default_branch,
                 verbose=verbose,
                 quiet=quiet,
             ),
@@ -1720,6 +1739,7 @@ def mirror(
             overwrite=overwrite,
             github_token=github_token,
             set_default_branch=set_default_branch,
+            fix_default_branch=fix_default_branch,
         )
 
         # Start mirroring

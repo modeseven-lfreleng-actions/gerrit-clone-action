@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from gerrit_clone.clone_manager import CloneManager
-from gerrit_clone.git_utils import get_current_branch
+from gerrit_clone.git_utils import (
+    get_current_branch,
+    get_head_ref,
+    is_gerrit_parent_project,
+    list_local_branches,
+)
 from gerrit_clone.github_api import (
     GitHubAPI,
     GitHubRepo,
@@ -152,6 +157,7 @@ class MirrorManager:
         progress_tracker: ProgressTracker | None = None,
         github_token: str | None = None,
         set_default_branch: bool = True,
+        fix_default_branch: bool = True,
     ) -> None:
         """Initialize mirror manager.
 
@@ -170,6 +176,14 @@ class MirrorManager:
                 (default: True). When enabled, the local HEAD symbolic ref
                 is read from the bare clone and used to configure the
                 default branch on the GitHub repository via the API.
+            fix_default_branch: Repair GitHub repos that have no default
+                branch configured (default: True).  During the post-push
+                phase, any existing GitHub repository whose
+                ``defaultBranchRef`` is ``null`` will be inspected.  If
+                the local clone has ``refs/heads/*`` branches, the best
+                candidate is set as the GitHub default.  Gerrit parent
+                projects (HEAD → ``refs/meta/config``, no branches) are
+                skipped with an informational message.
         """
         self.config = config
         self.github_api = github_api
@@ -179,6 +193,7 @@ class MirrorManager:
         self.progress_tracker = progress_tracker
         self.github_token = github_token
         self.set_default_branch = set_default_branch
+        self.fix_default_branch = fix_default_branch
         self.clone_manager = CloneManager(config, progress_tracker)
 
     def _build_push_url(self, github_repo: GitHubRepo) -> str:
@@ -360,6 +375,17 @@ class MirrorManager:
         project's HEAD configuration.  The branch name is then set as
         the default branch on the GitHub repository via the API.
 
+        **Gerrit parent projects** (HEAD → ``refs/meta/config`` with no
+        ``refs/heads/*`` branches) are detected and logged at INFO level
+        rather than treated as errors.  These are organisational
+        containers in the Gerrit hierarchy and will always appear empty
+        on GitHub.
+
+        When HEAD points to a non-branch ref (e.g. ``refs/meta/config``)
+        but the repository *does* contain ``refs/heads/*`` branches, the
+        method falls back to the first available branch (preferring
+        ``master`` or ``main``).
+
         This is a best-effort operation; failures are logged but do not
         cause the mirror to be marked as failed.
 
@@ -367,6 +393,7 @@ class MirrorManager:
             local_path: Local (bare) clone path
             github_repo: Target GitHub repository that was just pushed to
         """
+        # --- Step 1: try the fast path (HEAD is a normal branch) ----------
         try:
             branch = get_current_branch(local_path)
         except (FileNotFoundError, ValueError):
@@ -375,24 +402,56 @@ class MirrorManager:
         if not branch:
             # Fall back to reading HEAD directly for bare repos where
             # ``git symbolic-ref`` might fail in unusual layouts.
-            try:
-                head_file = local_path / "HEAD"
-                if head_file.exists():
-                    content = head_file.read_text().strip()
-                    if content.startswith("ref: refs/heads/"):
-                        branch = content[len("ref: refs/heads/"):]
-            except Exception:
-                pass
+            head_ref = get_head_ref(local_path)
+            if head_ref and head_ref.startswith("refs/heads/"):
+                branch = head_ref[len("refs/heads/"):]
 
-        if branch:
-            owner = github_repo.full_name.split("/")[0]
-            self.github_api.set_default_branch(owner, github_repo.name, branch)
-        else:
-            logger.debug(
-                "Could not determine default branch for %s; "
-                "GitHub will use its own default",
-                github_repo.full_name,
-            )
+        # --- Step 2: if HEAD isn't a branch, classify and try fallback ----
+        if not branch:
+            if is_gerrit_parent_project(local_path):
+                # Gerrit parent project — no branches at all.  This is
+                # expected and not an error; log at INFO so operators can
+                # distinguish it from genuinely broken repos.
+                logger.info(
+                    "Gerrit parent project %s (HEAD → refs/meta/config, "
+                    "no branches) — skipping default branch configuration",
+                    github_repo.full_name,
+                )
+                return
+
+            # HEAD points to a non-branch ref (e.g. refs/meta/config)
+            # but the repo *does* have branches.  Pick the best candidate.
+            branches = list_local_branches(local_path)
+            if branches:
+                # Prefer well-known defaults, then fall back to first
+                for candidate in ("master", "main", "develop"):
+                    if candidate in branches:
+                        branch = candidate
+                        break
+                if not branch:
+                    branch = branches[0]
+
+                head_ref = get_head_ref(local_path)
+                logger.info(
+                    "HEAD for %s points to %s (not a branch); "
+                    "falling back to '%s' as default branch",
+                    github_repo.full_name,
+                    head_ref or "unknown ref",
+                    branch,
+                )
+            else:
+                # No HEAD branch and no refs/heads/* at all, but also
+                # not a recognised parent project.  Log and move on.
+                logger.info(
+                    "Repository %s has no branches under refs/heads/; "
+                    "cannot set a default branch on GitHub",
+                    github_repo.full_name,
+                )
+                return
+
+        # --- Step 3: apply the default branch on GitHub -------------------
+        owner = github_repo.full_name.split("/")[0]
+        self.github_api.set_default_branch(owner, github_repo.name, branch)
 
     def mirror_projects(self, projects: list[Project]) -> list[MirrorResult]:
         """Mirror projects from Gerrit to GitHub.
@@ -607,7 +666,156 @@ class MirrorManager:
             push_skipped,
         )
 
+        # Step 6: Repair pass — fix repos with no default branch
+        if self.fix_default_branch:
+            self._fix_default_branches(
+                clone_results, existing_repos, repos_lookup
+            )
+
         return mirror_results
+
+    def _fix_default_branches(
+        self,
+        clone_results: list[Any],
+        existing_repos: dict[str, dict[str, Any]],
+        repos_lookup: dict[str, GitHubRepo],
+    ) -> None:
+        """Repair GitHub repositories that have no default branch configured.
+
+        This post-push pass inspects every existing GitHub repo whose
+        ``defaultBranchRef`` was ``null`` in the GraphQL fetch.  For each
+        one it checks the corresponding local clone:
+
+        * **Gerrit parent project** (HEAD → ``refs/meta/config``, no
+          ``refs/heads/*`` branches) — logged at INFO level and skipped.
+          These are organisational containers in the Gerrit hierarchy and
+          will always appear empty on GitHub; this is expected.
+        * **Real repository with branches** — the best candidate branch
+          is selected (preferring ``master``, ``main``, ``develop``) and
+          set as the GitHub default via the API.
+        * **No local clone available** — skipped with a debug message.
+
+        Args:
+            clone_results: Results from the clone phase (used to locate
+                local paths)
+            existing_repos: Pre-fetched GitHub repo data from GraphQL
+            repos_lookup: Map of GitHub repo names to GitHubRepo objects
+        """
+        # Identify repos that have no default branch in the GraphQL data
+        repos_needing_fix: list[str] = [
+            name
+            for name, data in existing_repos.items()
+            if data.get("default_branch") is None
+        ]
+
+        if not repos_needing_fix:
+            return
+
+        logger.info(
+            "🔧 Default branch repair: checking %d repositories "
+            "with no default branch configured",
+            len(repos_needing_fix),
+        )
+
+        # Build a lookup from GitHub name → local clone path
+        clone_path_lookup: dict[str, Path] = {}
+        for cr in clone_results:
+            if cr.success and cr.path:
+                gh_name = transform_gerrit_name_to_github(cr.project.name)
+                clone_path_lookup[gh_name] = cr.path
+
+        parent_count = 0
+        fixed_count = 0
+        no_clone_count = 0
+        no_branches_count = 0
+
+        for github_name in repos_needing_fix:
+            local_path = clone_path_lookup.get(github_name)
+            if not local_path or not local_path.exists():
+                logger.debug(
+                    "No local clone for %s/%s; cannot repair default branch",
+                    self.github_org,
+                    github_name,
+                )
+                no_clone_count += 1
+                continue
+
+            # Check for Gerrit parent project
+            if is_gerrit_parent_project(local_path):
+                logger.info(
+                    "ℹ️  %s/%s is a Gerrit parent project "
+                    "(HEAD → refs/meta/config, no branches) — "
+                    "no default branch to set",
+                    self.github_org,
+                    github_name,
+                )
+                parent_count += 1
+                continue
+
+            # Try to find a suitable branch
+            branches = list_local_branches(local_path)
+            if not branches:
+                logger.info(
+                    "ℹ️  %s/%s has no branches under refs/heads/; "
+                    "cannot set a default branch",
+                    self.github_org,
+                    github_name,
+                )
+                no_branches_count += 1
+                continue
+
+            # Pick best candidate branch
+            branch: str | None = None
+            for candidate in ("master", "main", "develop"):
+                if candidate in branches:
+                    branch = candidate
+                    break
+            if not branch:
+                branch = branches[0]
+
+            # Get the GitHubRepo object to call the API
+            github_repo = repos_lookup.get(github_name)
+            if not github_repo:
+                logger.debug(
+                    "No GitHubRepo object for %s; skipping repair",
+                    github_name,
+                )
+                continue
+
+            head_ref = get_head_ref(local_path)
+            logger.info(
+                "🔧 Fixing default branch for %s/%s: "
+                "HEAD is %s, setting default to '%s'",
+                self.github_org,
+                github_name,
+                head_ref or "unknown",
+                branch,
+            )
+            owner = github_repo.full_name.split("/")[0]
+            success = self.github_api.set_default_branch(
+                owner, github_repo.name, branch
+            )
+            if success:
+                fixed_count += 1
+
+        # Summary
+        parts: list[str] = []
+        if parent_count:
+            parts.append(
+                f"{parent_count} Gerrit parent project(s) (expected, no action needed)"
+            )
+        if fixed_count:
+            parts.append(f"{fixed_count} repaired")
+        if no_clone_count:
+            parts.append(f"{no_clone_count} skipped (no local clone)")
+        if no_branches_count:
+            parts.append(f"{no_branches_count} skipped (no branches)")
+
+        if parts:
+            logger.info(
+                "🔧 Default branch repair complete: %s",
+                "; ".join(parts),
+            )
 
     def _push_to_github_from_clone_result_optimized(
         self,

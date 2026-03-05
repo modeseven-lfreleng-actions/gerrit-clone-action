@@ -123,6 +123,23 @@ inputs:
       and branch options.
     required: false
     default: "true"
+  set-default-branch:
+    description: >-
+      After pushing to GitHub, set the default branch to match the HEAD
+      symbolic ref from the Gerrit clone (default: enabled). Gerrit
+      parent projects (HEAD → refs/meta/config, no code branches) are
+      detected and skipped with an informational message.
+    required: false
+    default: "true"
+  fix-default-branch:
+    description: >-
+      After syncing, repair any existing GitHub repositories that have
+      no default branch configured (default: enabled). Gerrit parent
+      projects are identified and logged at INFO level rather than
+      flagged as errors. Real repositories whose previous push failed
+      are fixed by selecting the best candidate branch.
+    required: false
+    default: "true"
   use-https:
     description: "Use HTTPS for cloning instead of SSH"
     required: false

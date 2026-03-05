@@ -1267,22 +1267,35 @@ def test_list_all_repos_no_default_branch() -> None:
         ]
         assert len(debug_calls) == 1  # one debug entry for repo-no-branch
 
-        # A single summary WARNING should be emitted (not per-repo)
+        # A single summary INFO should be emitted (not WARNING) listing
+        # the affected repo names so operators can distinguish Gerrit
+        # parent projects from genuinely broken repos.
+        info_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if len(call[0]) >= 1 and "no default branch configured" in str(call[0][0])
+        ]
+        assert len(info_calls) == 1
+        # Logger receives (format_string, arg1, arg2, ...) — check the
+        # positional args that will be interpolated via %-formatting.
+        summary_fmt = info_calls[0][0][0]
+        summary_positional = info_calls[0][0][1:]
+        # First two positional args are the counts: (1, 2)
+        assert summary_positional[0] == 1  # 1 repo without default branch
+        assert summary_positional[1] == 2  # 2 total repos
+        # Third positional arg is the comma-separated repo names
+        assert summary_positional[2] == "repo-no-branch"
+        # Message should mention the condition and reference Gerrit parent projects
+        assert "no default branch configured" in summary_fmt
+        assert "Gerrit parent project" in summary_fmt
+
+        # No WARNING should be emitted for this condition
         warning_calls = [
             call
             for call in mock_logger.warning.call_args_list
             if len(call[0]) >= 1 and "no default branch configured" in str(call[0][0])
         ]
-        assert len(warning_calls) == 1
-        # Logger receives (format_string, arg1, arg2, ...) — check the
-        # positional args that will be interpolated via %-formatting.
-        summary_fmt = warning_calls[0][0][0]
-        summary_positional = warning_calls[0][0][1:]
-        # First two positional args are the counts: (1, 2)
-        assert summary_positional[0] == 1  # 1 repo without default branch
-        assert summary_positional[1] == 2  # 2 total repos
-        # Message should mention the condition but not list individual repos
-        assert "no default branch configured" in summary_fmt
+        assert len(warning_calls) == 0
 
     api.close()
 
