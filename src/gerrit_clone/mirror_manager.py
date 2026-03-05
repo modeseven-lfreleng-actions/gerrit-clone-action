@@ -669,7 +669,8 @@ class MirrorManager:
         # Step 6: Repair pass — fix repos with no default branch
         if self.fix_default_branch:
             self._fix_default_branches(
-                clone_results, existing_repos, repos_lookup
+                clone_results, existing_repos, repos_lookup,
+                mirror_results,
             )
 
         return mirror_results
@@ -679,6 +680,7 @@ class MirrorManager:
         clone_results: list[Any],
         existing_repos: dict[str, dict[str, Any]],
         repos_lookup: dict[str, GitHubRepo],
+        mirror_results: list[MirrorResult] | None = None,
     ) -> None:
         """Repair GitHub repositories that have no default branch configured.
 
@@ -686,6 +688,11 @@ class MirrorManager:
         ``defaultBranchRef`` was ``null`` in the GraphQL fetch.  For each
         one it checks the corresponding local clone:
 
+        * **Push failed** — skipped immediately.  If the push to GitHub
+          was rejected (e.g. secret scanning, auth errors) the remote
+          repo is still empty and setting a default branch is guaranteed
+          to fail with a 422.  Logging a second error would only obscure
+          the real problem.
         * **Gerrit parent project** (HEAD → ``refs/meta/config``, no
           ``refs/heads/*`` branches) — logged at INFO level and skipped.
           These are organisational containers in the Gerrit hierarchy and
@@ -700,6 +707,9 @@ class MirrorManager:
                 local paths)
             existing_repos: Pre-fetched GitHub repo data from GraphQL
             repos_lookup: Map of GitHub repo names to GitHubRepo objects
+            mirror_results: Results from the push phase.  Repos whose
+                push failed are excluded from the repair pass to avoid
+                compounding errors on empty repositories.
         """
         # Identify repos that have no default branch in the GraphQL data
         repos_needing_fix: list[str] = [
@@ -707,6 +717,34 @@ class MirrorManager:
             for name, data in existing_repos.items()
             if data.get("default_branch") is None
         ]
+
+        if not repos_needing_fix:
+            return
+
+        # Build a set of GitHub repo names whose push failed so we can
+        # skip them.  Attempting to set the default branch on an empty
+        # repo (where the push was rejected) always produces a 422 error
+        # that just adds noise to the logs.
+        push_failed_names: set[str] = set()
+        if mirror_results:
+            for mr in mirror_results:
+                if mr.status == MirrorStatus.FAILED:
+                    push_failed_names.add(mr.github_name)
+
+        # Exclude repos whose push failed — they are still empty on
+        # GitHub so setting a default branch is impossible.
+        repos_to_skip = push_failed_names & set(repos_needing_fix)
+        if repos_to_skip:
+            logger.info(
+                "🔧 Skipping default branch repair for %d repo(s) whose "
+                "push failed (repo is still empty on GitHub): %s",
+                len(repos_to_skip),
+                ", ".join(sorted(repos_to_skip)),
+            )
+            repos_needing_fix = [
+                name for name in repos_needing_fix
+                if name not in push_failed_names
+            ]
 
         if not repos_needing_fix:
             return
@@ -726,6 +764,7 @@ class MirrorManager:
 
         parent_count = 0
         fixed_count = 0
+        skip_push_failed_count = len(repos_to_skip) if mirror_results else 0
         no_clone_count = 0
         no_branches_count = 0
 
@@ -800,6 +839,10 @@ class MirrorManager:
 
         # Summary
         parts: list[str] = []
+        if skip_push_failed_count:
+            parts.append(
+                f"{skip_push_failed_count} skipped (push failed, repo empty)"
+            )
         if parent_count:
             parts.append(
                 f"{parent_count} Gerrit parent project(s) (expected, no action needed)"
