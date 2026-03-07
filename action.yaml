@@ -57,8 +57,15 @@ inputs:
     default: "true"
   include-project:
     description: >-
-      Restrict cloning to specific project(s). Use comma-separated list for
-      multiple projects.
+      Restrict cloning to specific project(s). Supports shell-style wildcards
+      (*, ?, [seq]), hierarchical matching (e.g. 'ccsdk' includes ccsdk/apps),
+      and comma or space-separated lists.
+    required: false
+  exclude-project:
+    description: >-
+      Exclude specific project(s) from cloning. Applied after include filters.
+      Supports shell-style wildcards (*, ?, [seq]), hierarchical matching,
+      and comma or space-separated lists.
     required: false
   ssh-debug:
     description: >-
@@ -566,6 +573,18 @@ runs:
             project=$(echo "$project" | xargs)
             if [ -n "$project" ]; then
               cmd+=(--include-project "$project")
+            fi
+          done
+        fi
+
+        # Add exclude-project options (supports multiple)
+        if [ -n "${{ inputs.exclude-project }}" ]; then
+          IFS=',' read -ra EXCLUDES \
+            <<< "${{ inputs.exclude-project }}"
+          for project in "${EXCLUDES[@]}"; do
+            project=$(echo "$project" | xargs)
+            if [ -n "$project" ]; then
+              cmd+=(--exclude-project "$project")
             fi
           done
         fi

@@ -103,7 +103,12 @@ class ConfigManager:
             verbose: Enable verbose logging
             quiet: Suppress non-error output
             config_file: Explicit config file path
-            include_projects: Optional list of project names to clone (filters all projects)
+            include_projects: Optional list of project name patterns to include.
+                Supports shell-style wildcards (*, ?, [seq]), hierarchical
+                matching, and comma/space-separated values.
+            exclude_projects: Optional list of project name patterns to exclude.
+                Applied after include filters.  Same pattern syntax as
+                include_projects.
             ssh_debug: Enable verbose SSH debugging (-vvv) for authentication issues
             exit_on_error: Exit immediately when the first clone error occurs
             source_type: Source type (gerrit or github)
