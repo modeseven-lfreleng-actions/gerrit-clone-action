@@ -6,10 +6,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
 
 
 def is_git_repository(repo_path: Path) -> bool:
@@ -231,3 +228,105 @@ def get_remote_url(repo_path: Path, remote: str = "origin") -> str | None:
         return None
     except Exception:
         return None
+
+
+def get_head_ref(repo_path: Path) -> str | None:
+    """Read the raw HEAD symbolic reference from a repository.
+
+    Unlike :func:`get_current_branch`, this returns the full ref string
+    (e.g. ``refs/heads/master`` or ``refs/meta/config``), which is needed
+    to distinguish Gerrit parent projects from normal repositories.
+
+    Works with both regular and bare repositories by reading the HEAD
+    file directly.
+
+    Args:
+        repo_path: Path to the git repository
+
+    Returns:
+        The full ref string (e.g. ``refs/heads/main``,
+        ``refs/meta/config``), or ``None`` if HEAD is detached,
+        the file is missing, or the format is unrecognised.
+    """
+    try:
+        head_file = repo_path / "HEAD"
+        if not head_file.exists():
+            # Try .git/HEAD for non-bare repos
+            head_file = repo_path / ".git" / "HEAD"
+        if not head_file.exists():
+            return None
+
+        content = head_file.read_text().strip()
+        if content.startswith("ref: "):
+            return content[len("ref: "):]
+        # Detached HEAD (raw SHA) — no symbolic ref
+        return None
+    except Exception:
+        return None
+
+
+def list_local_branches(repo_path: Path) -> list[str]:
+    """List all local branch names in a repository.
+
+    For bare clones this lists everything under ``refs/heads/``.
+    Returns an empty list if the repo has no branches (e.g. a Gerrit
+    parent project whose only ref is ``refs/meta/config``).
+
+    Args:
+        repo_path: Path to the git repository (regular or bare)
+
+    Returns:
+        Sorted list of branch names (without the ``refs/heads/`` prefix),
+        or an empty list on error.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(repo_path),
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        branches = [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        return sorted(branches)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception):
+        return []
+
+
+def is_gerrit_parent_project(repo_path: Path) -> bool:
+    """Detect whether a local clone is a Gerrit organisational parent project.
+
+    Gerrit uses "parent projects" to structure its project hierarchy
+    (e.g. ``aai`` is the parent of ``aai/aai-common``, ``aai/babel``,
+    etc.).  These projects typically:
+
+    * Have their HEAD pointing to ``refs/meta/config``
+    * Contain **no** ``refs/heads/*`` branches
+    * Hold only Gerrit metadata (``refs/meta/config``, ``refs/changes/*``)
+
+    Such repositories will always appear empty on GitHub because there
+    are no code branches to display.
+
+    Args:
+        repo_path: Path to the local (usually bare) clone
+
+    Returns:
+        ``True`` if the repository looks like a Gerrit parent project
+        (HEAD → ``refs/meta/config`` and no branches under
+        ``refs/heads/``), ``False`` otherwise.
+    """
+    head_ref = get_head_ref(repo_path)
+    if head_ref != "refs/meta/config":
+        return False
+
+    branches = list_local_branches(repo_path)
+    return len(branches) == 0

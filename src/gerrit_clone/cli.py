@@ -26,10 +26,6 @@ from gerrit_clone.error_codes import (
     DiscoveryError,
     ExitCode,
 )
-from gerrit_clone.netrc import (
-    NetrcParseError,
-    resolve_gerrit_credentials,
-)
 from gerrit_clone.file_logging import cli_args_to_dict, init_logging
 from gerrit_clone.github_api import (
     GitHubAPI,
@@ -43,7 +39,16 @@ from gerrit_clone.mirror_manager import (
     MirrorManager,
     filter_projects_by_hierarchy,
 )
-from gerrit_clone.models import DiscoveryMethod, RefreshBatchResult, RetryPolicy, SourceType
+from gerrit_clone.models import (
+    DiscoveryMethod,
+    RefreshBatchResult,
+    RetryPolicy,
+    SourceType,
+)
+from gerrit_clone.netrc import (
+    NetrcParseError,
+    resolve_gerrit_credentials,
+)
 from gerrit_clone.refresh_manager import refresh_repositories
 from gerrit_clone.reset_manager import ResetManager
 from gerrit_clone.rich_status import (
@@ -606,7 +611,7 @@ def clone(
             log_file=log_file,
             disable_file=disable_log_file,
             log_level=log_level,
-            console_level="DEBUG" if verbose else "INFO",
+            console_level="DEBUG" if verbose else "WARNING",
             quiet=quiet,
             verbose=verbose,
             cli_args=cli_args,
@@ -1123,7 +1128,7 @@ def refresh(
         log_file=log_file_path,
         disable_file=False,
         log_level="DEBUG",
-        console_level="DEBUG" if verbose else "INFO",
+        console_level="DEBUG" if verbose else "WARNING",
         quiet=quiet,
         verbose=verbose,
         cli_args=cli_args,
@@ -1454,6 +1459,28 @@ def mirror(
         help="Whether to fail if .netrc file is not found (default: optional)",
         envvar="GERRIT_NETRC_OPTIONAL",
     ),
+    set_default_branch: bool = typer.Option(
+        True,
+        "--set-default-branch/--no-set-default-branch",
+        help=(
+            "After pushing to GitHub, set the default branch to match the "
+            "HEAD symbolic ref from the Gerrit clone (default: enabled)"
+        ),
+        envvar="GERRIT_SET_DEFAULT_BRANCH",
+    ),
+    fix_default_branch: bool = typer.Option(
+        True,
+        "--fix-default-branch/--no-fix-default-branch",
+        help=(
+            "After syncing, repair any existing GitHub repositories that "
+            "have no default branch configured (default: enabled). "
+            "Gerrit parent projects (HEAD → refs/meta/config, no code "
+            "branches) are identified and logged at INFO level rather "
+            "than flagged as errors. Real repositories whose previous "
+            "push failed are fixed by selecting the best candidate branch."
+        ),
+        envvar="GERRIT_FIX_DEFAULT_BRANCH",
+    ),
 ) -> None:
     """Mirror repositories from a Gerrit server to GitHub.
 
@@ -1478,6 +1505,14 @@ def mirror(
         # Use HTTPS for cloning and include archived projects
         gerrit-clone mirror --server gerrit.onap.org --org myorg \\
           --https --include-archived
+
+        # Mirror without setting default branch on GitHub
+        gerrit-clone mirror --server gerrit.onap.org --org myorg \\
+          --no-set-default-branch
+
+        # Disable the post-sync default branch repair pass
+        gerrit-clone mirror --server gerrit.onap.org --org myorg \\
+          --no-fix-default-branch
 
         # Use HTTP API for discovery (no SSH required)
         gerrit-clone mirror --server gerrit.onap.org --org myorg \\
@@ -1568,7 +1603,7 @@ def mirror(
             log_file=log_file_path,
             disable_file=False,
             log_level="DEBUG",
-            console_level="DEBUG" if verbose else "INFO",
+            console_level="DEBUG" if verbose else "WARNING",
             quiet=quiet,
             verbose=verbose,
             cli_args=cli_args_to_dict(
@@ -1578,6 +1613,8 @@ def mirror(
                 output_path=str(output_path),
                 recreate=recreate,
                 overwrite=overwrite,
+                set_default_branch=set_default_branch,
+                fix_default_branch=fix_default_branch,
                 verbose=verbose,
                 quiet=quiet,
             ),
@@ -1701,6 +1738,8 @@ def mirror(
             recreate=recreate,
             overwrite=overwrite,
             github_token=github_token,
+            set_default_branch=set_default_branch,
+            fix_default_branch=fix_default_branch,
         )
 
         # Start mirroring
@@ -1965,7 +2004,7 @@ def reset(
             log_file=log_file_path,
             disable_file=False,
             log_level="DEBUG",
-            console_level="DEBUG" if verbose else "INFO",
+            console_level="DEBUG" if verbose else "WARNING",
             quiet=quiet,
             verbose=verbose,
             cli_args=cli_args_to_dict(

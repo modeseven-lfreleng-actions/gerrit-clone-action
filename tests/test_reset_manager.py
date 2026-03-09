@@ -624,3 +624,298 @@ class TestResetManager:
         # Should be lowercase alphanumeric
         assert hash_code.isalnum()
         assert hash_code.islower()
+
+    @pytest.mark.asyncio
+    async def test_fetch_repos_skip_pr_issue_counts(self, reset_manager):
+        """Test that skip_pr_issue_counts=True skips REST API calls entirely.
+
+        When --no-confirm is used, we only need the repository list from
+        GraphQL and should not make expensive per-repo REST calls for
+        PR/issue counts.
+        """
+        reset_manager.github_api.list_all_repos_graphql.return_value = {
+            "repo-a": {
+                "name": "repo-a",
+                "full_name": "test-org/repo-a",
+                "html_url": "https://github.com/test-org/repo-a",
+                "last_commit_date": "2025-01-18T12:34:56Z",
+            },
+            "repo-b": {
+                "name": "repo-b",
+                "full_name": "test-org/repo-b",
+                "html_url": "https://github.com/test-org/repo-b",
+                "last_commit_date": None,
+            },
+        }
+
+        repos_data = await reset_manager._fetch_repos_with_graphql(
+            skip_pr_issue_counts=True
+        )
+
+        # Should return the repos without modification
+        assert len(repos_data) == 2
+        assert "repo-a" in repos_data
+        assert "repo-b" in repos_data
+
+        # _request_paginated should never have been called
+        reset_manager.github_api._request_paginated.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_repos_default_fetches_pr_issue_counts(self, reset_manager):
+        """Test that skip_pr_issue_counts=False (default) does fetch PR/issue counts."""
+        reset_manager.github_api.list_all_repos_graphql.return_value = {
+            "test-repo": {
+                "name": "test-repo",
+                "full_name": "test-org/test-repo",
+                "html_url": "https://github.com/test-org/test-repo",
+            }
+        }
+
+        mock_prs = [
+            {"user": {"login": "human-user"}, "number": 1},
+        ]
+        mock_issues: list[Any] = []
+
+        reset_manager.github_api._request_paginated.side_effect = [
+            mock_prs,
+            mock_issues,
+        ]
+
+        with patch("gerrit_clone.reset_manager.Live"):
+            repos_data = await reset_manager._fetch_repos_with_graphql(
+                skip_pr_issue_counts=False
+            )
+
+        # Should have made REST API calls
+        assert reset_manager.github_api._request_paginated.call_count == 2
+        assert repos_data["test-repo"]["open_prs"] == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_reset_no_confirm_skips_table_and_pr_fetching(
+        self, reset_manager
+    ):
+        """Test that execute_reset with no_confirm=True skips table display and PR fetching.
+
+        When --no-confirm is provided, the tabulated output of PRs/issues is
+        superfluous and the time to gather that data is wasted.
+        """
+        # Mock scan to return repos
+        mock_repos = {
+            "repo-a": GitHubRepoStatus(
+                name="repo-a",
+                full_name="test-org/repo-a",
+                url="https://github.com/test-org/repo-a",
+                open_prs=0,
+                open_issues=0,
+                last_commit_sha=None,
+                last_commit_date=None,
+                default_branch="main",
+            ),
+        }
+
+        with (
+            patch.object(
+                reset_manager,
+                "scan_github_organization",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ) as mock_scan,
+            patch.object(
+                reset_manager,
+                "display_repos_table",
+                return_value=(0, 0),
+            ) as mock_table,
+            patch.object(
+                reset_manager,
+                "delete_all_repos",
+                new_callable=AsyncMock,
+                return_value={"repo-a": (True, None)},
+            ),
+        ):
+            result = await reset_manager.execute_reset(no_confirm=True)
+
+            # scan_github_organization should be called with skip_pr_issue_counts=True
+            mock_scan.assert_awaited_once_with(skip_pr_issue_counts=True)
+
+            # display_repos_table should NOT be called
+            mock_table.assert_not_called()
+
+            assert result.deleted_repos == 1
+            assert result.total_prs == 0
+            assert result.total_issues == 0
+
+    @pytest.mark.asyncio
+    async def test_execute_reset_with_confirm_shows_table_and_fetches_prs(
+        self, reset_manager
+    ):
+        """Test that execute_reset with no_confirm=False displays the table and fetches data."""
+        mock_repos = {
+            "repo-a": GitHubRepoStatus(
+                name="repo-a",
+                full_name="test-org/repo-a",
+                url="https://github.com/test-org/repo-a",
+                open_prs=3,
+                open_issues=1,
+                last_commit_sha="abc123",
+                last_commit_date="2025-06-01T10:00:00Z",
+                default_branch="main",
+            ),
+        }
+
+        with (
+            patch.object(
+                reset_manager,
+                "scan_github_organization",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ) as mock_scan,
+            patch.object(
+                reset_manager,
+                "display_repos_table",
+                return_value=(3, 1),
+            ) as mock_table,
+            patch.object(
+                reset_manager,
+                "prompt_for_confirmation",
+                return_value=False,
+            ),
+        ):
+            result = await reset_manager.execute_reset(no_confirm=False)
+
+            # scan should NOT skip PR/issue counts
+            mock_scan.assert_awaited_once_with(skip_pr_issue_counts=False)
+
+            # display_repos_table SHOULD be called
+            mock_table.assert_called_once_with(mock_repos)
+
+            # User declined confirmation, so nothing deleted
+            assert result.deleted_repos == 0
+            assert result.total_prs == 3
+            assert result.total_issues == 1
+
+    def test_display_repos_table_renders_commit_date(self, reset_manager, mock_console):
+        """Test that display_repos_table renders last_commit_date from GraphQL data.
+
+        The GraphQL committedDate field should flow through to the table's
+        'Last Commit' column.
+        """
+        repos = {
+            "repo-with-date": GitHubRepoStatus(
+                name="repo-with-date",
+                full_name="test-org/repo-with-date",
+                url="https://github.com/test-org/repo-with-date",
+                open_prs=0,
+                open_issues=0,
+                last_commit_sha="abc123",
+                last_commit_date="2025-06-15T14:30:00Z",
+                default_branch="main",
+            ),
+            "repo-no-date": GitHubRepoStatus(
+                name="repo-no-date",
+                full_name="test-org/repo-no-date",
+                url="https://github.com/test-org/repo-no-date",
+                open_prs=0,
+                open_issues=0,
+                last_commit_sha=None,
+                last_commit_date=None,
+                default_branch="main",
+            ),
+        }
+
+        total_prs, total_issues = reset_manager.display_repos_table(repos)
+
+        output = mock_console.file.getvalue()
+
+        # Repo with a commit date should show the formatted date
+        assert "2025-06-15" in output
+
+        # Repo without a commit date should show N/A
+        assert "N/A" in output
+
+        assert total_prs == 0
+        assert total_issues == 0
+
+    @pytest.mark.asyncio
+    async def test_scan_github_organization_passes_skip_flag(self, reset_manager):
+        """Test that scan_github_organization passes skip_pr_issue_counts to _fetch_repos_with_graphql."""
+        reset_manager.github_api.list_all_repos_graphql.return_value = {
+            "repo-a": {
+                "name": "repo-a",
+                "full_name": "test-org/repo-a",
+                "html_url": "https://github.com/test-org/repo-a",
+                "last_commit_date": None,
+            },
+        }
+
+        with patch.object(
+            reset_manager,
+            "_fetch_repos_with_graphql",
+            new_callable=AsyncMock,
+            return_value={
+                "repo-a": {
+                    "name": "repo-a",
+                    "full_name": "test-org/repo-a",
+                    "html_url": "https://github.com/test-org/repo-a",
+                    "last_commit_date": None,
+                },
+            },
+        ) as mock_fetch:
+            await reset_manager.scan_github_organization(skip_pr_issue_counts=True)
+            mock_fetch.assert_awaited_once_with(skip_pr_issue_counts=True)
+
+            mock_fetch.reset_mock()
+            await reset_manager.scan_github_organization(skip_pr_issue_counts=False)
+            mock_fetch.assert_awaited_once_with(skip_pr_issue_counts=False)
+
+    @pytest.mark.asyncio
+    async def test_execute_reset_no_confirm_still_deletes_repos(self, reset_manager):
+        """Test that execute_reset with no_confirm=True proceeds directly to deletion."""
+        mock_repos = {
+            "repo-x": GitHubRepoStatus(
+                name="repo-x",
+                full_name="test-org/repo-x",
+                url="https://github.com/test-org/repo-x",
+                open_prs=0,
+                open_issues=0,
+                last_commit_sha=None,
+                last_commit_date=None,
+                default_branch="main",
+            ),
+            "repo-y": GitHubRepoStatus(
+                name="repo-y",
+                full_name="test-org/repo-y",
+                url="https://github.com/test-org/repo-y",
+                open_prs=0,
+                open_issues=0,
+                last_commit_sha=None,
+                last_commit_date=None,
+                default_branch="main",
+            ),
+        }
+
+        with (
+            patch.object(
+                reset_manager,
+                "scan_github_organization",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
+            patch.object(
+                reset_manager,
+                "delete_all_repos",
+                new_callable=AsyncMock,
+                return_value={
+                    "repo-x": (True, None),
+                    "repo-y": (True, None),
+                },
+            ) as mock_delete,
+        ):
+            result = await reset_manager.execute_reset(no_confirm=True)
+
+            # Should have called delete with both repo names
+            mock_delete.assert_awaited_once()
+            deleted_names = mock_delete.call_args[0][0]
+            assert set(deleted_names) == {"repo-x", "repo-y"}
+
+            assert result.deleted_repos == 2
+            assert result.total_repos == 2
