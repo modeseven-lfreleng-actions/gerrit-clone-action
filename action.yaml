@@ -55,10 +55,17 @@ inputs:
     description: "Skip archived/read-only repositories"
     required: false
     default: "true"
-  include-project:
+  include-projects:
     description: >-
-      Restrict cloning to specific project(s). Use comma-separated list for
-      multiple projects.
+      Restrict cloning to specific project(s). Supports shell-style wildcards
+      (*, ?, [seq]), hierarchical matching (e.g. 'ccsdk' includes ccsdk/apps),
+      and comma or space-separated lists.
+    required: false
+  exclude-projects:
+    description: >-
+      Exclude specific project(s) from cloning. Applied after include filters.
+      Supports shell-style wildcards (*, ?, [seq]), hierarchical matching,
+      and comma or space-separated lists.
     required: false
   ssh-debug:
     description: >-
@@ -558,14 +565,26 @@ runs:
           cmd+=(--config-file "${{ inputs.config-file }}")
         fi
 
-        # Add include-project options (supports multiple)
-        if [ -n "${{ inputs.include-project }}" ]; then
+        # Add include-projects options (supports multiple)
+        if [ -n "${{ inputs.include-projects }}" ]; then
           IFS=',' read -ra PROJECTS \
-            <<< "${{ inputs.include-project }}"
+            <<< "${{ inputs.include-projects }}"
           for project in "${PROJECTS[@]}"; do
             project=$(echo "$project" | xargs)
             if [ -n "$project" ]; then
-              cmd+=(--include-project "$project")
+              cmd+=(--include-projects "$project")
+            fi
+          done
+        fi
+
+        # Add exclude-projects options (supports multiple)
+        if [ -n "${{ inputs.exclude-projects }}" ]; then
+          IFS=',' read -ra EXCLUDES \
+            <<< "${{ inputs.exclude-projects }}"
+          for project in "${EXCLUDES[@]}"; do
+            project=$(echo "$project" | xargs)
+            if [ -n "$project" ]; then
+              cmd+=(--exclude-projects "$project")
             fi
           done
         fi
