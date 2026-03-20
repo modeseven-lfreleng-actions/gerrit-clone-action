@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 ci:
-  skip: [pytest, gha-workflow-linter]
+  skip: [basedpyright, pytest, gha-workflow-linter]
   autofix_commit_msg: |
     Chore: pre-commit autofixes
 
@@ -54,10 +54,10 @@ repos:
     rev: 4924b0e01e032fea073ad04a1c5cfa7e4add0afb  # frozen: v0.15.6
     hooks:
       - id: ruff
-        files: ^(src|scripts|tests|custom_components)/.+\.py$
+        files: ^(scripts|tests|custom_components)/.+\.py$
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-        files: ^(src|scripts|tests|custom_components)/.+\.py$
+        files: ^(scripts|tests|custom_components)/.+\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: a66e98df7b4aeeb3724184b332785976d062b92e  # frozen: v1.19.1

@@ -44,6 +44,7 @@ from gerrit_clone.models import (
     RefreshBatchResult,
     RetryPolicy,
     SourceType,
+    normalize_project_list,
 )
 from gerrit_clone.netrc import (
     NetrcParseError,
@@ -213,7 +214,7 @@ def clone(
         help="Skip archived/read-only repositories",
         envvar="GERRIT_SKIP_ARCHIVED",
     ),
-    include_projects: list[str] = typer.Option(
+    include_projects: list[str] | None = typer.Option(
         None,
         "--include-projects",
         "--include-project",  # Backward-compatible alias
@@ -224,7 +225,7 @@ def clone(
         ),
         envvar=None,
     ),
-    exclude_projects: list[str] = typer.Option(
+    exclude_projects: list[str] | None = typer.Option(
         None,
         "--exclude-projects",
         "--exclude-project",  # Backward-compatible alias
@@ -1001,7 +1002,7 @@ def refresh(
         dir_okay=True,
         resolve_path=False,
     ),
-    include_projects: list[str] = typer.Option(
+    include_projects: list[str] | None = typer.Option(
         None,
         "--include-projects",
         "--include-project",  # Backward-compatible alias
@@ -1012,7 +1013,7 @@ def refresh(
         ),
         envvar=None,
     ),
-    exclude_projects: list[str] = typer.Option(
+    exclude_projects: list[str] | None = typer.Option(
         None,
         "--exclude-projects",
         "--exclude-project",  # Backward-compatible alias
@@ -1197,8 +1198,10 @@ def refresh(
         console.print(f"Skip Conflicts: [cyan]{skip_conflicts}[/cyan]")
         console.print(f"Auto Stash: [cyan]{auto_stash}[/cyan]")
         console.print(f"Filter: [cyan]{'Gerrit only' if filter_gerrit_only else 'All repos'}[/cyan]")
-        console.print(f"Include Filter: [cyan]{', '.join(include_projects) if include_projects else '—'}[/cyan]")
-        console.print(f"Exclude Filter: [cyan]{', '.join(exclude_projects) if exclude_projects else '—'}[/cyan]")
+        inc_display = normalize_project_list(list(include_projects)) if include_projects else []
+        exc_display = normalize_project_list(list(exclude_projects)) if exclude_projects else []
+        console.print(f"Include Filter: [cyan]{', '.join(inc_display) if inc_display else '—'}[/cyan]")
+        console.print(f"Exclude Filter: [cyan]{', '.join(exc_display) if exc_display else '—'}[/cyan]")
         console.print(f"Dry Run: [cyan]{dry_run}[/cyan]")
         console.print(f"Force: [cyan]{force}[/cyan]")
         console.print(f"Recursive: [cyan]{recursive}[/cyan]")
@@ -1724,33 +1727,24 @@ def mirror(
             )
 
         # Parse project filters (include)
-        project_filters: list[str] = []
-        if include_projects:
-            # Split on commas first, then whitespace within each segment
-            for comma_part in include_projects.split(","):
-                for token in comma_part.split():
-                    clean = token.strip()
-                    if clean:
-                        project_filters.append(clean)
-            if not quiet:
-                console.print(
-                    f"📋 Include filters: "
-                    f"[cyan]{', '.join(project_filters)}[/cyan]"
-                )
+        project_filters = normalize_project_list(
+            [include_projects] if include_projects else []
+        )
+        if project_filters and not quiet:
+            console.print(
+                f"📋 Include filters: "
+                f"[cyan]{', '.join(project_filters)}[/cyan]"
+            )
 
         # Parse project filters (exclude)
-        exclude_filters: list[str] = []
-        if exclude_projects_str:
-            for comma_part in exclude_projects_str.split(","):
-                for token in comma_part.split():
-                    clean = token.strip()
-                    if clean:
-                        exclude_filters.append(clean)
-            if not quiet:
-                console.print(
-                    f"🚫 Exclude filters: "
-                    f"[cyan]{', '.join(exclude_filters)}[/cyan]"
-                )
+        exclude_filters = normalize_project_list(
+            [exclude_projects_str] if exclude_projects_str else []
+        )
+        if exclude_filters and not quiet:
+            console.print(
+                f"🚫 Exclude filters: "
+                f"[cyan]{', '.join(exclude_filters)}[/cyan]"
+            )
 
         # Build Gerrit configuration
         from gerrit_clone.models import Config
