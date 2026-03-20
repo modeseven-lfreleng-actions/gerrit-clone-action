@@ -186,7 +186,12 @@ class RefreshManager:
                 # matching Gerrit's hierarchical naming convention.
                 try:
                     rel = repo_path.relative_to(base_resolved)
-                    project_name = rel.as_posix()
+                    if rel == Path("."):
+                        # repo is exactly at base_path; use directory
+                        # name so filters can match it.
+                        project_name = repo_path.name
+                    else:
+                        project_name = rel.as_posix()
                 except ValueError:
                     # Fallback: use just the directory name
                     project_name = repo_path.name

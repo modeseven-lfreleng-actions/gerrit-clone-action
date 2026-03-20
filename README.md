@@ -1135,8 +1135,8 @@ jobs:
 | `use-gh-cli`           | No       | `false`               | Use GitHub CLI (`gh`) for cloning instead of git                                                     |
 | `output-path`          | No       | `.`                   | Clone destination (auto-creates `./{SERVER}/` or `./github.com/{ORG}/` structure when not specified) |
 | `skip-archived`        | No       | `true`                | Skip archived and inactive repositories                                                              |
-| `include-projects`     | No       |                       | Restrict cloning to specific project(s) (comma-separated)                                            |
-| `exclude-projects`     | No       |                       | Exclude specific project(s); supports wildcard and hierarchical patterns                             |
+| `include-projects`     | No       |                       | Restrict to specific project(s); comma/space-separated, wildcard and hierarchical patterns           |
+| `exclude-projects`     | No       |                       | Exclude specific project(s); comma/space-separated, wildcard and hierarchical patterns               |
 | `ssh-debug`            | No       | `false`               | Enable verbose SSH (-vvv) for troubleshooting                                                        |
 | `allow-nested-git`     | No       | `true`                | Allow nested git working trees                                                                       |
 | `nested-protection`    | No       | `true`                | Auto-add nested child repo paths to parent .git/info/exclude                                         |
