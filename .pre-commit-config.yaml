@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 ci:
-  skip: [pytest]
+  skip: [pytest, gha-workflow-linter]
   autofix_commit_msg: |
     Chore: pre-commit autofixes
 
@@ -51,13 +51,13 @@ repos:
         types: [yaml]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: a27a2e47c7751b639d2b5badf0ef6ff11fee893f  # frozen: v0.15.4
+    rev: 4924b0e01e032fea073ad04a1c5cfa7e4add0afb  # frozen: v0.15.6
     hooks:
       - id: ruff
-        files: ^(scripts|tests|custom_components)/.+\.py$
+        files: ^(src|scripts|tests|custom_components)/.+\.py$
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-        files: ^(scripts|tests|custom_components)/.+\.py$
+        files: ^(src|scripts|tests|custom_components)/.+\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: a66e98df7b4aeeb3724184b332785976d062b92e  # frozen: v1.19.1
@@ -84,7 +84,7 @@ repos:
       - id: shellcheck
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: 76b3d32d3f4b965e1d6425253c59407420ae2c43  # frozen: v0.47.0
+    rev: e72a3ca1632f0b11a07d171449fe447a7ff6795e  # frozen: v0.48.0
     hooks:
       - id: markdownlint
         args: ["--fix"]
@@ -103,9 +103,20 @@ repos:
 
   # Check for misspellings in documentation files
   - repo: https://github.com/codespell-project/codespell
-    rev: 63c8f8312b7559622c0d82815639671ae42132ac # frozen: v2.4.1
+    rev: 2ccb47ff45ad361a21071a7eedda4c37e6ae8c5a  # frozen: v2.4.2
     hooks:
       - id: codespell
+
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
+  - repo: https://github.com/DetachHead/basedpyright-prek-mirror
+    rev: f391127ab7cab6e18596c2f1e3d938193919c0fd  # frozen: 1.38.2
+    hooks:
+      - id: basedpyright
+
+  - repo: https://github.com/lfreleng-actions/gha-workflow-linter
+    rev: a7caf8f3a1a05688d1cee46615ff94def617e5a3  # frozen: v1.0.2
+    hooks:
+      - id: gha-workflow-linter
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 8db279a37c552206d2df62269ff6f9d31125815a  # frozen: 0.37.0
