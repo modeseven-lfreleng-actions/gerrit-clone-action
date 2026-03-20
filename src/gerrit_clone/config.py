@@ -435,6 +435,13 @@ class ConfigManager:
             # SSH port specified but using HTTPS, switch to HTTPS port
             config_dict["port"] = 443
 
+        # Coerce string include/exclude_projects to single-element lists
+        # so Config.__post_init__ can safely iterate and normalize them.
+        for key in ("include_projects", "exclude_projects"):
+            val = config_dict.get(key)
+            if isinstance(val, str):
+                config_dict[key] = [val]
+
         # Validate required fields
         if "host" not in config_dict:
             raise ConfigurationError(

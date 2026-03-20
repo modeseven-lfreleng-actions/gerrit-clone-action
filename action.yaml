@@ -391,6 +391,9 @@ runs:
     - name: "Clone repositories"
       id: clone
       shell: bash
+      env:
+        INPUT_INCLUDE_PROJECTS: ${{ inputs.include-projects }}
+        INPUT_EXCLUDE_PROJECTS: ${{ inputs.exclude-projects }}
       run: |
         # Use action-managed SSH agent socket if it exists; otherwise,
         # fall back to any existing SSH_AUTH_SOCK on the runner so that
@@ -566,11 +569,12 @@ runs:
         fi
 
         # Add include-projects options (supports multiple)
-        if [ -n "${{ inputs.include-projects }}" ]; then
-          IFS=',' read -ra PROJECTS \
-            <<< "${{ inputs.include-projects }}"
+        # Use env var to avoid shell injection from ${{ }} in
+        # command substitutions; normalize commas to spaces.
+        if [ -n "$INPUT_INCLUDE_PROJECTS" ]; then
+          read -ra PROJECTS \
+            <<< "$(printf '%s' "$INPUT_INCLUDE_PROJECTS" | tr ',' ' ')"
           for project in "${PROJECTS[@]}"; do
-            project=$(echo "$project" | xargs)
             if [ -n "$project" ]; then
               cmd+=(--include-projects "$project")
             fi
@@ -578,11 +582,12 @@ runs:
         fi
 
         # Add exclude-projects options (supports multiple)
-        if [ -n "${{ inputs.exclude-projects }}" ]; then
-          IFS=',' read -ra EXCLUDES \
-            <<< "${{ inputs.exclude-projects }}"
+        # Use env var to avoid shell injection from ${{ }} in
+        # command substitutions; normalize commas to spaces.
+        if [ -n "$INPUT_EXCLUDE_PROJECTS" ]; then
+          read -ra EXCLUDES \
+            <<< "$(printf '%s' "$INPUT_EXCLUDE_PROJECTS" | tr ',' ' ')"
           for project in "${EXCLUDES[@]}"; do
-            project=$(echo "$project" | xargs)
             if [ -n "$project" ]; then
               cmd+=(--exclude-projects "$project")
             fi
