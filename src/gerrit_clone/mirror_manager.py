@@ -10,13 +10,12 @@ import base64
 import os
 import shutil
 import subprocess
-import time
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from gerrit_clone.clone_manager import CloneManager
 from gerrit_clone.git_utils import (
@@ -33,6 +32,7 @@ from gerrit_clone.github_api import (
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneStatus, Config, Project
 from gerrit_clone.progress import ProgressTracker
+from gerrit_clone.rate_limit import TokenBucketLimiter
 
 logger = get_logger(__name__)
 
@@ -453,6 +453,69 @@ class MirrorManager:
         owner = github_repo.full_name.split("/")[0]
         self.github_api.set_default_branch(owner, github_repo.name, branch)
 
+    def _validate_graphql_results(
+        self,
+        existing_repos: dict[str, dict[str, Any]],
+        successful_clones: int,
+    ) -> dict[str, dict[str, Any]]:
+        """Validate GraphQL results and fall back to REST if suspect.
+
+        If the GraphQL query returned zero repos for an org that
+        should have repos (based on the number of successful clones
+        and the recreate flag), something went wrong — typically a
+        transient 502.  Rather than proceeding to mass-create repos
+        that already exist (burning secondary rate-limit budget), we
+        fall back to the paginated REST API.
+
+        Args:
+            existing_repos: Result from ``list_all_repos_graphql``.
+            successful_clones: Number of successfully cloned projects.
+
+        Returns:
+            Validated (possibly re-fetched) repo map.
+        """
+        if existing_repos:
+            return existing_repos
+
+        # GraphQL returned nothing.  If we're not recreating and
+        # there are cloned projects, this is suspicious.
+        if successful_clones > 0 and not self.recreate:
+            logger.warning(
+                "⚠️  GraphQL returned 0 existing repos but we have "
+                "%d successful clones.  Falling back to REST API "
+                "to avoid unnecessary repo creation attempts.",
+                successful_clones,
+            )
+            try:
+                rest_repos = self.github_api.list_repos(
+                    org=self.github_org
+                )
+                fallback: dict[str, dict[str, Any]] = {}
+                for repo in rest_repos:
+                    fallback[repo.name] = {
+                        "name": repo.name,
+                        "full_name": repo.full_name,
+                        "html_url": repo.html_url,
+                        "clone_url": repo.clone_url,
+                        "ssh_url": repo.ssh_url,
+                        "private": repo.private,
+                        "description": repo.description,
+                        "default_branch": None,
+                        "latest_commit_sha": None,
+                        "last_commit_date": None,
+                    }
+                logger.info(
+                    "REST API fallback found %d existing repos",
+                    len(fallback),
+                )
+                return fallback
+            except Exception as exc:
+                logger.error(
+                    "REST API fallback also failed: %s", exc
+                )
+
+        return existing_repos
+
     def mirror_projects(self, projects: list[Project]) -> list[MirrorResult]:
         """Mirror projects from Gerrit to GitHub.
 
@@ -462,6 +525,10 @@ class MirrorManager:
 
         Optimizations:
         - Uses GraphQL to fetch all existing GitHub repos in one query
+        - Validates GraphQL results and falls back to REST on failure
+        - Shares a single TokenBucketLimiter across delete and create
+          phases so rate-limit state is preserved
+        - Pre-flight rate-limit budget check before batch operations
         - Batch deletes repos in parallel (if recreate=True)
         - Batch creates repos in parallel
         - Push operations happen in parallel via CloneManager
@@ -483,15 +550,30 @@ class MirrorManager:
             logger.info("🧹 Overwrite enabled - cleaning existing directories...")
             self._cleanup_existing_repos(projects)
 
+        # Step 0b: Pre-flight rate-limit budget check (synchronous)
+        logger.info("📊 Checking rate-limit budget before batch operations...")
+        self.github_api.budget.preflight_check_sync(
+            self.github_api.client
+        )
+
         # Step 1: Clone from Gerrit using existing CloneManager
         # This handles all the dependency ordering and safe parallel operations
         logger.info("📥 Cloning repositories from Gerrit...")
         clone_results = self.clone_manager.clone_projects(projects)
 
-        # Step 2: Batch fetch existing GitHub repos (GraphQL - one query!)
+        successful_clones = sum(
+            1 for cr in clone_results if cr.success
+        )
+
+        # Step 2: Batch fetch existing GitHub repos (GraphQL with retry)
         logger.info("🔍 Fetching existing GitHub repositories (GraphQL)...")
         existing_repos = self.github_api.list_all_repos_graphql(
             self.github_org
+        )
+
+        # Validate: if GraphQL returned nothing suspicious, try REST
+        existing_repos = self._validate_graphql_results(
+            existing_repos, successful_clones
         )
         logger.info(f"Found {len(existing_repos)} existing GitHub repositories")
 
@@ -545,11 +627,32 @@ class MirrorManager:
         )
 
         # Step 4: Execute batch operations
+        # Create a shared TokenBucketLimiter so rate-limit state
+        # (including reduced rate from 403 responses) persists
+        # across the delete → create transition.
+        total_mutations = len(repos_to_delete) + len(repos_to_create)
+        if total_mutations > 200:
+            base_rate = 0.25  # 1 req per 4s for very large batches
+        elif total_mutations > 100:
+            base_rate = 0.33  # 1 req per 3s
+        else:
+            base_rate = 0.5  # 1 req per 2s
+
+        shared_limiter = TokenBucketLimiter(
+            rate=base_rate,
+            burst=max(2, min(5, total_mutations // 30)),
+            min_rate=0.02,
+            recovery_seconds=120.0,
+        )
+
         if repos_to_delete:
             logger.info(f"🗑️  Batch deleting {len(repos_to_delete)} repositories...")
             delete_results = asyncio.run(
                 self.github_api.batch_delete_repos(
-                    self.github_org, repos_to_delete, max_concurrent=5
+                    self.github_org,
+                    repos_to_delete,
+                    max_concurrent=5,
+                    shared_limiter=shared_limiter,
                 )
             )
             failed_deletes = [
@@ -573,26 +676,20 @@ class MirrorManager:
             else:
                 logger.info(f"✓ All {len(repos_to_delete)} repos deleted successfully")
 
-            # Cool down proportionally to the number of mutations just
-            # performed.  GitHub's secondary rate limit tracks content-
-            # mutation "points" over a rolling window; the more deletes
-            # we just did, the longer we need to wait before the create
-            # phase starts so that the budget has time to recover.
-            successful_deletes = len(repos_to_delete) - len(failed_deletes)
-            if successful_deletes > 0:
-                cooldown = max(5, successful_deletes * 0.5)
-                logger.info(
-                    f"⏳ Cooling down {cooldown:.0f}s after "
-                    f"{successful_deletes} deletes "
-                    "(secondary rate-limit recovery)..."
-                )
-                time.sleep(cooldown)
+            # The shared_limiter already carries reduced rate from
+            # any 403s encountered during deletes.  Its time-based
+            # recovery will gradually restore throughput during the
+            # create phase.  No fixed cooldown needed — the token
+            # bucket handles pacing automatically.
 
         if repos_to_create:
             logger.info(f"🏗️  Batch creating {len(repos_to_create)} repositories...")
             create_results = asyncio.run(
                 self.github_api.batch_create_repos(
-                    self.github_org, repos_to_create, max_concurrent=3
+                    self.github_org,
+                    repos_to_create,
+                    max_concurrent=3,
+                    shared_limiter=shared_limiter,
                 )
             )
             for name, (repo, error) in create_results.items():
