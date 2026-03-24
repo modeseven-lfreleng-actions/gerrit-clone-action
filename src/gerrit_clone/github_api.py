@@ -1069,8 +1069,15 @@ class GitHubAPI:
             page_succeeded = False
             for retry in range(max_retries + 1):
                 try:
+                    # Use a longer timeout for GraphQL than the
+                    # default 30 s client timeout.  GitHub's first
+                    # query against a cold org cache regularly
+                    # exceeds 30 s, causing nginx to return 502
+                    # before the backend finishes.
                     response = self.client.post(
-                        url, json={"query": query}
+                        url,
+                        json={"query": query},
+                        timeout=60.0,
                     )
 
                     # Record rate-limit headers from GraphQL too
@@ -1085,8 +1092,10 @@ class GitHubAPI:
                         429,
                     ):
                         if retry < max_retries:
+                            # Start at 5 s so a cold-cache 502
+                            # has time to warm before we retry.
                             backoff = min(
-                                30, 2 * (2**retry)
+                                30, 5 * (2**retry)
                             )
                             logger.warning(
                                 "GraphQL transient error "
@@ -1136,7 +1145,7 @@ class GitHubAPI:
                         )
                         if retry < max_retries:
                             backoff = min(
-                                30, 2 * (2**retry)
+                                30, 5 * (2**retry)
                             )
                             logger.warning(
                                 "Retrying GraphQL query "
