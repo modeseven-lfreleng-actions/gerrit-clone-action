@@ -14,12 +14,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from rich.console import Console
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.output_utils import format_rate_limit_table
 from gerrit_clone.rate_limit import (
     AsyncProgressCounter,
     RateLimitBudget,
     TokenBucketLimiter,
+    extract_rate_limit_info,
     is_rate_limited,
     parse_retry_after,
 )
@@ -1093,6 +1096,23 @@ class GitHubAPI:
                                 retry + 1,
                                 max_retries,
                             )
+                            # Log rate-limit diagnostics on first failure
+                            if retry == 0:
+                                rate_info = extract_rate_limit_info(
+                                    response
+                                )
+                                diag_table = format_rate_limit_table(
+                                    rate_info,
+                                    budget_snapshot=self._budget.snapshot,
+                                    response_status=response.status_code,
+                                    response_body=response.text[:500]
+                                    if response.text
+                                    else None,
+                                )
+                                diag_console = Console(
+                                    stderr=True
+                                )
+                                diag_console.print(diag_table)
                             time_mod.sleep(backoff)
                             continue
                         logger.error(
@@ -1123,6 +1143,20 @@ class GitHubAPI:
                                 retry + 1,
                                 max_retries,
                             )
+                            # Log diagnostics on first GraphQL error
+                            if retry == 0:
+                                rate_info = extract_rate_limit_info(
+                                    response
+                                )
+                                diag_table = format_rate_limit_table(
+                                    rate_info,
+                                    budget_snapshot=self._budget.snapshot,
+                                    response_status=response.status_code,
+                                )
+                                diag_console = Console(
+                                    stderr=True
+                                )
+                                diag_console.print(diag_table)
                             time_mod.sleep(backoff)
                             continue
                         break

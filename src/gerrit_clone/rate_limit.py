@@ -204,6 +204,23 @@ class RateLimitBudget:
             resource=resource,
         )
 
+        if remaining <= int(limit * self.critical_threshold):
+            logger.warning(
+                "🚨 Rate-limit budget critical: %d/%d remaining "
+                "(resets in %.0fs)",
+                remaining,
+                limit,
+                max(0, reset_epoch - time_mod.time()),
+            )
+        elif remaining <= int(limit * self.low_threshold):
+            logger.info(
+                "⚠️  Rate-limit budget low: %d/%d remaining "
+                "(resets in %.0fs)",
+                remaining,
+                limit,
+                max(0, reset_epoch - time_mod.time()),
+            )
+
     # -- pre-flight check ------------------------------------------------
 
     async def preflight_check(
