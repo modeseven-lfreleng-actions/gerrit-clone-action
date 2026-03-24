@@ -379,6 +379,10 @@ class TokenBucketLimiter:
             recovery_seconds: Seconds after a rate-limit hit before
                 the refill rate is fully restored.
         """
+        # Ensure min_rate never exceeds rate so that a rate-limit
+        # event cannot *increase* throughput.
+        if min_rate > rate:
+            min_rate = rate
         self._rate = rate
         self._base_rate = rate
         self._min_rate = min_rate

@@ -746,6 +746,7 @@ class TestMirrorManager:
         )
         github_api = Mock()
         github_api.list_all_repos_graphql = Mock(return_value={})
+        github_api.list_repos = Mock(return_value=[])
         github_api.batch_delete_repos = AsyncMock(return_value={})
 
         # Mock batch_create_repos to return dict[name, tuple[repo, error]]
@@ -845,6 +846,7 @@ class TestMirrorManager:
         )
         github_api = Mock()
         github_api.list_all_repos_graphql = Mock(return_value={})
+        github_api.list_repos = Mock(return_value=[])
         github_api.batch_delete_repos = AsyncMock(return_value={})
 
         test_repo = GitHubRepo(
@@ -904,6 +906,7 @@ class TestMirrorManager:
         )
         github_api = Mock()
         github_api.list_all_repos_graphql = Mock(return_value={})
+        github_api.list_repos = Mock(return_value=[])
         github_api.batch_delete_repos = AsyncMock(return_value={})
 
         test_repo = GitHubRepo(
@@ -959,6 +962,7 @@ class TestMirrorManager:
         )
         github_api = Mock()
         github_api.list_all_repos_graphql = Mock(return_value={})
+        github_api.list_repos = Mock(return_value=[])
         github_api.batch_delete_repos = AsyncMock(return_value={})
 
         test_repo = GitHubRepo(
@@ -1018,6 +1022,7 @@ class TestMirrorManager:
         )
         github_api = Mock()
         github_api.list_all_repos_graphql = Mock(return_value={})
+        github_api.list_repos = Mock(return_value=[])
         github_api.batch_delete_repos = AsyncMock(return_value={})
 
         def mock_ensure_repo(github_name: str, **kwargs: object) -> GitHubRepo:

@@ -477,9 +477,10 @@ class MirrorManager:
         if existing_repos:
             return existing_repos
 
-        # GraphQL returned nothing.  If we're not recreating and
-        # there are cloned projects, this is suspicious.
-        if successful_clones > 0 and not self.recreate:
+        # GraphQL returned nothing but we have cloned projects; this is
+        # suspicious regardless of recreate mode and warrants a REST
+        # fallback to avoid unnecessary repo creation attempts.
+        if successful_clones > 0:
             logger.warning(
                 "⚠️  GraphQL returned 0 existing repos but we have "
                 "%d successful clones.  Falling back to REST API "
@@ -513,6 +514,15 @@ class MirrorManager:
                 logger.error(
                     "REST API fallback also failed: %s", exc
                 )
+                # Both GraphQL and REST failed — proceeding with an
+                # empty existence set would recreate the original
+                # cascade failure (mass POST → 422 → rate-limit
+                # exhaustion).  Raise so the caller can abort.
+                raise RuntimeError(
+                    "Cannot determine existing GitHub repos: "
+                    "both GraphQL and REST API failed.  Aborting "
+                    "mirror to avoid mass-creation of duplicates."
+                ) from exc
 
         return existing_repos
 

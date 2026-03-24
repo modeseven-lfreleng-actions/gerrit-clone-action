@@ -856,6 +856,10 @@ class GitHubAPI:
                                 f"{self.base_url}/repos/"
                                 f"{org}/{name}"
                             )
+                            if rate_limiter:
+                                await rate_limiter.acquire(
+                                    tokens=1.0
+                                )
                             get_response = await client.get(
                                 get_url
                             )
