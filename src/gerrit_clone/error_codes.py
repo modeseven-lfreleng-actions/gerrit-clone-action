@@ -274,7 +274,7 @@ def is_network_error(exception: Exception) -> bool:
         # Check for common network-related exceptions
         if isinstance(
             exception,
-            RequestsConnectionError | RequestsTimeout | urllib.error.URLError,
+            (RequestsConnectionError, RequestsTimeout, urllib.error.URLError),
         ):
             return True
     except ImportError:

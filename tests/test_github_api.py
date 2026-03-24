@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -129,6 +130,7 @@ class TestGitHubRepo:
             "ssh_url": "git@github.com:org/test-repo.git",
             "private": False,
             "description": "Test repository",
+            "default_branch": "main",
         }
 
         repo = GitHubRepo.from_api_response(api_data)
@@ -140,6 +142,7 @@ class TestGitHubRepo:
         assert repo.ssh_url == "git@github.com:org/test-repo.git"
         assert repo.private is False
         assert repo.description == "Test repository"
+        assert repo.default_branch == "main"
 
     def test_from_api_response_no_description(self) -> None:
         """Test creating GitHubRepo without description."""
@@ -157,6 +160,36 @@ class TestGitHubRepo:
         assert repo.name == "test-repo"
         assert repo.description is None
         assert repo.private is True
+        assert repo.default_branch is None
+
+    def test_from_api_response_with_default_branch(self) -> None:
+        """Test that default_branch is captured from API response."""
+        api_data = {
+            "name": "test-repo",
+            "full_name": "org/test-repo",
+            "html_url": "https://github.com/org/test-repo",
+            "clone_url": "https://github.com/org/test-repo.git",
+            "ssh_url": "git@github.com:org/test-repo.git",
+            "private": False,
+            "default_branch": "develop",
+        }
+
+        repo = GitHubRepo.from_api_response(api_data)
+
+        assert repo.default_branch == "develop"
+
+    def test_default_branch_field_defaults_to_none(self) -> None:
+        """Test that GitHubRepo.default_branch defaults to None."""
+        repo = GitHubRepo(
+            name="test-repo",
+            full_name="org/test-repo",
+            html_url="https://github.com/org/test-repo",
+            clone_url="https://github.com/org/test-repo.git",
+            ssh_url="git@github.com:org/test-repo.git",
+            private=False,
+        )
+
+        assert repo.default_branch is None
 
 
 class TestGitHubAPI:
@@ -349,9 +382,14 @@ class TestBatchDeleteRepos:
         """Test successful batch deletion of repositories."""
         api = GitHubAPI(token="test-token")
 
-        # Mock httpx.AsyncClient to return successful responses
-        mock_response = AsyncMock()
+        # Mock httpx.AsyncClient to return successful responses.
+        # Use Mock (not AsyncMock) for the response so that
+        # response.headers.get() returns a plain Mock instead of
+        # an unawaited coroutine — avoids RuntimeWarning from
+        # budget.update_from_headers().
+        mock_response = Mock()
         mock_response.status_code = 204
+        mock_response.headers = {}
 
         mock_client = AsyncMock()
         mock_client.delete = AsyncMock(return_value=mock_response)
@@ -388,13 +426,13 @@ class TestBatchDeleteRepos:
         # (plain "Permission denied" without "rate limit" in the text)
         call_count = [0]
 
-        async def mock_delete_side_effect(*args, **kwargs):
+        async def mock_delete_side_effect(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
+            response.headers = {}
             if "repo2" in args[0]:
                 response.status_code = 403
                 response.text = "Permission denied"
-                response.headers = {}
             else:
                 response.status_code = 204
             return response
@@ -435,7 +473,7 @@ class TestBatchDeleteRepos:
         in_flight = 0
         peak_in_flight = 0
 
-        async def mock_delete_with_delay(*args, **kwargs):
+        async def mock_delete_with_delay(*args: Any, **kwargs: Any):
             nonlocal in_flight, peak_in_flight
             in_flight += 1
             peak_in_flight = max(peak_in_flight, in_flight)
@@ -493,11 +531,12 @@ class TestBatchDeleteRepos:
         """
         api = GitHubAPI(token="test-token")
 
-        async def mock_delete_with_exception(*args, **kwargs):
+        async def mock_delete_with_exception(*args: Any, **kwargs: Any):
             if "repo2" in args[0]:
                 raise Exception("Network error")
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 204
+            response.headers = {}
             return response
 
         mock_client = AsyncMock()
@@ -542,10 +581,11 @@ class TestBatchCreateRepos:
         # Mock httpx.AsyncClient to return successful responses
         call_count = [0]
 
-        async def mock_post(*args, **kwargs):
+        async def mock_post(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             json_data = kwargs.get("json", {})
             name = json_data.get("name", f"repo{call_count[0]}")
             response.json = Mock(
@@ -599,10 +639,11 @@ class TestBatchCreateRepos:
         """Test batch creation with some failures."""
         api = GitHubAPI(token="test-token")
 
-        async def mock_post_with_failure(*args, **kwargs):
+        async def mock_post_with_failure(*args: Any, **kwargs: Any):
             json_data = kwargs.get("json", {})
             name = json_data.get("name", "")
             response = Mock()  # Use Mock, not AsyncMock for response
+            response.headers = {}
 
             if name == "repo2":
                 response.status_code = 422
@@ -621,9 +662,18 @@ class TestBatchCreateRepos:
                 )
             return response
 
+        # For the 422 follow-up GET, return a 404 so the creation is
+        # still recorded as a failure.  Use Mock (not AsyncMock) with
+        # headers={} so budget.update_from_headers() doesn't receive
+        # an AsyncMock (which would produce unawaited-coroutine
+        # RuntimeWarnings from .headers.get()).
+        mock_get_response = Mock()
+        mock_get_response.status_code = 404
+        mock_get_response.headers = {}
+
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=mock_post_with_failure)
-        mock_client.get = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_get_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
@@ -664,10 +714,11 @@ class TestBatchCreateRepos:
 
         call_count = [0]
 
-        async def mock_post_with_delay(*args, **kwargs):
+        async def mock_post_with_delay(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             json_data = kwargs.get("json", {})
             name = json_data.get("name", f"repo{call_count[0]}")
             response.json = Mock(
@@ -721,7 +772,7 @@ class TestBatchCreateRepos:
         """
         api = GitHubAPI(token="test-token")
 
-        async def mock_post_with_exception(*args, **kwargs):
+        async def mock_post_with_exception(*args: Any, **kwargs: Any):
             json_data = kwargs.get("json", {})
             name = json_data.get("name", "")
 
@@ -730,6 +781,7 @@ class TestBatchCreateRepos:
 
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             response.json = Mock(
                 return_value={
                     "name": name,

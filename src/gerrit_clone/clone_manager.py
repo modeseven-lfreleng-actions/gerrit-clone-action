@@ -781,7 +781,7 @@ def clone_repositories(config: Config) -> BatchResult:
             else:
                 # Port is guaranteed to be set for Gerrit sources (defaults to 29418)
                 # Validated in Config.__post_init__ - use cast for type narrowing
-                port = cast("int", config.port)
+                port = cast(int, config.port)  # noqa: TC006
                 logger.debug("Connecting to Gerrit server %s:%s", config.host, port)
                 connecting_to_server(config.host, port)
 

@@ -373,7 +373,7 @@ def clone(
         "--verbose",
         "-v",
         help="Enable verbose/debug output",
-        envvar="VERBOSE_DEBUG",
+        envvar=["VERBOSE_DEBUG", "GERRIT_VERBOSE"],
     ),
     quiet: bool = typer.Option(
         False,
@@ -1093,7 +1093,7 @@ def refresh(
         "--verbose",
         "-v",
         help="Enable verbose output with detailed logging",
-        envvar="VERBOSE_DEBUG",
+        envvar=["VERBOSE_DEBUG", "GERRIT_VERBOSE"],
     ),
     quiet: bool = typer.Option(
         False,
@@ -1477,7 +1477,7 @@ def mirror(
         "--verbose",
         "-v",
         help="Enable verbose/debug output",
-        envvar="VERBOSE_DEBUG",
+        envvar=["VERBOSE_DEBUG", "GERRIT_VERBOSE"],
     ),
     quiet: bool = typer.Option(
         False,
@@ -2007,7 +2007,7 @@ def reset(
         "--verbose",
         "-v",
         help="Enable verbose/debug output",
-        envvar="VERBOSE_DEBUG",
+        envvar=["VERBOSE_DEBUG", "GERRIT_VERBOSE"],
     ),
     quiet: bool = typer.Option(
         False,

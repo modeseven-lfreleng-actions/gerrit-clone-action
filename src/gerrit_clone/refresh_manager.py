@@ -337,7 +337,7 @@ class RefreshManager:
 
         with (
             Live(
-                display_group, console=Console(), refresh_per_second=4, transient=False
+                display_group, console=Console(stderr=True), refresh_per_second=4, transient=False
             ),
             interruptible_executor(
                 max_workers=self.threads,

@@ -453,6 +453,18 @@ class MirrorManager:
                 return
 
         # --- Step 3: apply the default branch on GitHub -------------------
+        # Skip the API call when GitHub already has the correct default
+        # branch.  On a routine resync every repo would otherwise incur
+        # a redundant PATCH request, wasting REST API rate-limit budget.
+        if github_repo.default_branch == branch:
+            logger.debug(
+                "Default branch for %s already set to '%s'; "
+                "skipping redundant API call",
+                github_repo.full_name,
+                branch,
+            )
+            return
+
         owner = github_repo.full_name.split("/")[0]
         self.github_api.set_default_branch(owner, github_repo.name, branch)
 
@@ -504,7 +516,7 @@ class MirrorManager:
                         "ssh_url": repo.ssh_url,
                         "private": repo.private,
                         "description": repo.description,
-                        "default_branch": None,
+                        "default_branch": repo.default_branch,
                         "latest_commit_sha": None,
                         "last_commit_date": None,
                     }
@@ -631,6 +643,7 @@ class MirrorManager:
                     ssh_url=repo_data["ssh_url"],
                     private=repo_data["private"],
                     description=repo_data.get("description"),
+                    default_branch=repo_data.get("default_branch"),
                 )
 
         logger.info(
@@ -645,11 +658,11 @@ class MirrorManager:
         # across the delete → create transition.
         total_mutations = len(repos_to_delete) + len(repos_to_create)
         if total_mutations > 200:
-            base_rate = 0.25  # 1 req per 4s for very large batches
+            base_rate = 0.25  # 0.25 tokens/s ~ 1 mutation req per 8s (2 tokens each)
         elif total_mutations > 100:
-            base_rate = 0.33  # 1 req per 3s
+            base_rate = 0.33  # 0.33 tokens/s ~ 1 mutation req per 6s
         else:
-            base_rate = 0.5  # 1 req per 2s
+            base_rate = 0.5  # 0.5 tokens/s ~ 1 mutation req per 4s
 
         shared_limiter = TokenBucketLimiter(
             rate=base_rate,

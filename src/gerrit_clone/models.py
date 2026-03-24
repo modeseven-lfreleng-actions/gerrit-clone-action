@@ -107,8 +107,11 @@ def match_project_pattern(project_name: str, pattern: str) -> bool:
 def normalize_project_list(raw: list[str]) -> list[str]:
     """Normalize a list of project patterns.
 
-    Strips whitespace, drops empty entries, splits on commas and spaces,
-    and de-duplicates while preserving insertion order.
+    Strips whitespace and leading slashes, drops empty entries,
+    splits on commas and spaces, and de-duplicates while
+    preserving insertion order.  Leading-slash stripping ensures
+    that ``/ccsdk`` matches the discovered project name ``ccsdk``
+    (Gerrit projects are stored without a leading ``/``).
 
     Args:
         raw: List of raw pattern strings (may contain commas/spaces).
@@ -122,7 +125,7 @@ def normalize_project_list(raw: list[str]) -> list[str]:
         # Split on commas first, then whitespace within each segment
         for comma_part in entry.split(","):
             for token in comma_part.split():
-                clean = token.strip()
+                clean = token.strip().lstrip("/")
                 if clean and clean not in seen:
                     normalized.append(clean)
                     seen.add(clean)

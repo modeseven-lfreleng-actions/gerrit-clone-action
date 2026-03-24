@@ -41,6 +41,7 @@ class GitHubRepo:
     ssh_url: str
     private: bool
     description: str | None = None
+    default_branch: str | None = None
 
     @classmethod
     def from_api_response(cls, data: dict[str, Any]) -> GitHubRepo:
@@ -60,6 +61,7 @@ class GitHubRepo:
             ssh_url=data["ssh_url"],
             private=data["private"],
             description=data.get("description"),
+            default_branch=data.get("default_branch"),
         )
 
 
@@ -1334,7 +1336,9 @@ class GitHubAPI:
 
         batch_retries = max(5, min(15, len(repo_names) // 10))
 
-        # Derive token-bucket rate from interval
+        # Derive token-bucket rate from interval (tokens/s).
+        # Mutations cost 2 tokens each, so effective mutation
+        # rate is rate / 2.
         rate = 1.0 / max(rate_limit_interval, 0.1)
         rate_limiter = shared_limiter or TokenBucketLimiter(
             rate=rate,
@@ -1343,13 +1347,15 @@ class GitHubAPI:
             recovery_seconds=120.0,
         )
 
+        effective_delete_rate = rate_limiter.rate / 2.0
         logger.info(
             "Batch deleting %d repositories "
-            "(max %d concurrent, ~%.2f req/s%s, "
+            "(max %d concurrent, ~%.2f tokens/s (~%.2f delete req/s)%s, "
             "max %d retries per repo)",
             len(repo_names),
             max_concurrent,
             rate_limiter.rate,
+            effective_delete_rate,
             " [shared limiter]" if shared_limiter else "",
             batch_retries,
         )
@@ -1488,6 +1494,8 @@ class GitHubAPI:
         if len(repo_configs) > 200:
             effective_interval = max(effective_interval, 4.0)
 
+        # Mutations cost 2 tokens each, so effective mutation
+        # rate is rate / 2.
         rate = 1.0 / max(effective_interval, 0.1)
         rate_limiter = shared_limiter or TokenBucketLimiter(
             rate=rate,
@@ -1496,13 +1504,15 @@ class GitHubAPI:
             recovery_seconds=120.0,
         )
 
+        effective_create_rate = rate_limiter.rate / 2.0
         logger.info(
             "Batch creating %d repositories "
-            "(max %d concurrent, ~%.2f req/s%s, "
+            "(max %d concurrent, ~%.2f tokens/s (~%.2f create req/s)%s, "
             "max %d retries per repo)",
             len(repo_configs),
             max_concurrent,
             rate_limiter.rate,
+            effective_create_rate,
             " [shared limiter]" if shared_limiter else "",
             batch_retries,
         )

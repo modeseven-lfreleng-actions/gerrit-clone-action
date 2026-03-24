@@ -64,8 +64,10 @@ def setup_logging(
     diagnostics.
 
     Args:
-        level: Base log level — used as the *minimum* console handler
-            level in normal mode (neither quiet nor verbose).
+        level: Base log level — in normal mode, the console handler
+            is set to ``max(WARNING, level)`` so only WARNING and
+            above reach the terminal.  User-facing output should
+            use ``console.print`` or ``log_and_print`` instead.
             Defaults to ``"INFO"``.
         quiet: If True, only errors and above
         verbose: If True, debug logging enabled for gerrit_clone
@@ -93,7 +95,7 @@ def setup_logging(
 
     # Resolve the caller-supplied level string to a numeric constant
     # so it can serve as a floor for the handler in normal mode.
-    base_level = getattr(logging, level.upper(), logging.WARNING)
+    base_level = getattr(logging, level.upper(), logging.INFO)
 
     if quiet:
         # Quiet: only errors reach the console
@@ -115,11 +117,25 @@ def setup_logging(
     # Unlock the gerrit_clone logger hierarchy based on mode
     app_logger = logging.getLogger("gerrit_clone")
     if verbose:
-        app_logger.setLevel(logging.DEBUG)
+        desired_app_level = logging.DEBUG
     elif quiet:
-        app_logger.setLevel(logging.ERROR)
+        desired_app_level = logging.ERROR
     else:
-        app_logger.setLevel(max(logging.WARNING, base_level))
+        # In normal mode, honour the caller-supplied base level and
+        # avoid overriding a more-verbose configuration that may have
+        # been set up by file_logging.
+        desired_app_level = base_level
+
+    current_level = app_logger.level
+    # Only *lower* (make more verbose) the logger level — never
+    # raise it.  This preserves a DEBUG/INFO level that file_logging
+    # may have already configured, so file output keeps capturing
+    # everything.  --quiet suppresses the *console* via the handler
+    # level (ERROR) set above; it intentionally does NOT touch the
+    # logger level when file logging is active, because the logger
+    # gate must remain open for records to reach the file handler.
+    if current_level == logging.NOTSET or current_level > desired_app_level:
+        app_logger.setLevel(desired_app_level)
 
     # Suppress noisy third-party HTTP transport modules
     logging.getLogger("httpx").setLevel(logging.WARNING)

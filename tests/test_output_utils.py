@@ -104,7 +104,7 @@ class TestLogAndPrint:
         assert "Styled message" in console_text
 
     def test_log_and_print_without_style(self) -> None:
-        """Test that when style is None, plain print() is used."""
+        """Test that when style is None, console.print is used."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
         logger = logging.getLogger("test_without_style")
@@ -112,11 +112,13 @@ class TestLogAndPrint:
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
 
-        console = Console(file=StringIO(), width=80)
+        console_stream = StringIO()
+        console = Console(file=console_stream, width=80, force_terminal=False)
 
-        with patch("builtins.print") as mock_print:
-            log_and_print(logger, console, "Plain message", level="info")
-            mock_print.assert_called_once_with("Plain message")
+        log_and_print(logger, console, "Plain message", level="info")
+
+        console_text = console_stream.getvalue()
+        assert "Plain message" in console_text
 
     def test_log_and_print_default_level(self) -> None:
         """Test that the default level is info."""
@@ -227,3 +229,56 @@ class TestFormatRateLimitTable:
         # The truncated version (200 chars + ellipsis) should be present
         assert "x" * 200 in rendered
         assert "…" in rendered
+
+    def test_zero_remaining_preserved(self) -> None:
+        """Test that a '0' remaining value is not replaced by '?'."""
+        rate_info = {
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Limit": "5000",
+        }
+        table = format_rate_limit_table(rate_info)
+
+        console_output = StringIO()
+        console = Console(file=console_output, width=400, force_terminal=False)
+        console.print(table)
+        rendered = console_output.getvalue()
+
+        assert "0 / 5000" in rendered
+        assert "?" not in rendered
+
+    def test_retry_after_numeric_gets_suffix(self) -> None:
+        """Test that a numeric Retry-After value gets an 's' suffix."""
+        rate_info = {"Retry-After": "120"}
+        table = format_rate_limit_table(rate_info)
+
+        console_output = StringIO()
+        console = Console(file=console_output, width=400, force_terminal=False)
+        console.print(table)
+        rendered = console_output.getvalue()
+
+        assert "120s" in rendered
+
+    def test_retry_after_float_gets_suffix(self) -> None:
+        """Test that a float Retry-After value gets an 's' suffix."""
+        rate_info = {"Retry-After": "30.5"}
+        table = format_rate_limit_table(rate_info)
+
+        console_output = StringIO()
+        console = Console(file=console_output, width=400, force_terminal=False)
+        console.print(table)
+        rendered = console_output.getvalue()
+
+        assert "30.5s" in rendered
+
+    def test_retry_after_http_date_no_suffix(self) -> None:
+        """Test that an HTTP-date Retry-After is shown without 's' suffix."""
+        rate_info = {"Retry-After": "Thu, 01 Jan 2026 00:00:00 GMT"}
+        table = format_rate_limit_table(rate_info)
+
+        console_output = StringIO()
+        console = Console(file=console_output, width=400, force_terminal=False)
+        console.print(table)
+        rendered = console_output.getvalue()
+
+        assert "Thu, 01 Jan 2026 00:00:00 GMT" in rendered
+        assert "GMTs" not in rendered

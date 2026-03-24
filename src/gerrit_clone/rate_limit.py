@@ -104,8 +104,10 @@ class RateLimitBudget:
     *before* we hit the limit, and proactively pause when the budget
     is running low.
 
-    Thread-safety: all mutations go through an ``asyncio.Lock`` so the
-    budget can be shared across concurrent async tasks.
+    Thread-safety: asynchronous mutations are serialized via an internal
+    ``asyncio.Lock`` so the budget can be safely shared across concurrent
+    async tasks. Synchronous helpers do not take this lock and must be
+    externally synchronized if used from multiple threads.
     """
 
     def __init__(
@@ -340,7 +342,7 @@ class RateLimitBudget:
             return 0.0
 
         # Add a small buffer so we don't race the reset boundary
-        wait = min(wait + 2.0, wait * 1.05)
+        wait = max(wait + 2.0, wait * 1.05)
         logger.warning(
             "🛑 Rate-limit budget exhausted (%d/%d). "
             "Pausing %.0fs until reset...",
@@ -396,6 +398,25 @@ class TokenBucketLimiter:
             recovery_seconds: Seconds after a rate-limit hit before
                 the refill rate is fully restored.
         """
+        # Validate inputs before any clamping so callers get clear
+        # feedback on obviously wrong values.
+        if rate <= 0:
+            raise ValueError(
+                f"rate must be positive, got {rate}"
+            )
+        if burst <= 0:
+            raise ValueError(
+                f"burst must be positive, got {burst}"
+            )
+        if min_rate <= 0:
+            raise ValueError(
+                f"min_rate must be positive, got {min_rate}"
+            )
+        if recovery_seconds <= 0:
+            raise ValueError(
+                f"recovery_seconds must be positive, "
+                f"got {recovery_seconds}"
+            )
         # Ensure min_rate never exceeds rate so that a rate-limit
         # event cannot *increase* throughput.
         min_rate = min(min_rate, rate)
@@ -477,11 +498,19 @@ class TokenBucketLimiter:
 
         Args:
             tokens: Number of tokens to consume.  Use ``1.0`` for
-                read operations and ``2.0`` for mutations.
+                read operations and ``2.0`` for mutations.  Must be
+                greater than 0 and less than or equal to the burst
+                size.
 
         Returns:
             Number of seconds spent waiting.
         """
+        if tokens <= 0 or tokens > self._burst:
+            raise ValueError(
+                f"tokens must be in the range (0, {self._burst}], "
+                f"got {tokens!r}"
+            )
+
         total_wait = 0.0
 
         while True:
@@ -589,9 +618,16 @@ class TokenBucketLimiter:
         header.  Every task that subsequently calls :meth:`acquire`
         will sleep until the deadline.
 
+        A non-positive *seconds* value is treated as a no-op so
+        that callers do not need to guard against zero/negative
+        durations parsed from malformed headers.
+
         Args:
-            seconds: Duration to pause (from now).
+            seconds: Duration to pause (from now).  Values <= 0
+                are ignored.
         """
+        if seconds <= 0:
+            return
         async with self._lock:
             self._tokens = 0.0
             deadline = time_mod.monotonic() + seconds

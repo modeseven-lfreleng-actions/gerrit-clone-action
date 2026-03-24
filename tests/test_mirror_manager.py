@@ -1323,6 +1323,111 @@ class TestMirrorManager:
             "no-slash-here", "test-repo", "main"
         )
 
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="main")
+    def test_set_default_branch_skips_when_already_correct(
+        self, mock_get_branch: Mock
+    ) -> None:
+        """Test that set_default_branch_from_local skips the API call when branch matches."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+            default_branch="main",
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        # Branch already matches — API must NOT be called
+        github_api.set_default_branch.assert_not_called()
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="main")
+    def test_set_default_branch_calls_api_when_different(
+        self, mock_get_branch: Mock
+    ) -> None:
+        """Test that set_default_branch_from_local calls API when branch differs."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        github_api.set_default_branch.return_value = True
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+            default_branch="develop",
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        # Branch differs — API must be called
+        github_api.set_default_branch.assert_called_once_with(
+            "test-org", "test-repo", "main"
+        )
+
+    @patch("gerrit_clone.mirror_manager.get_current_branch", return_value="main")
+    def test_set_default_branch_calls_api_when_none(
+        self, mock_get_branch: Mock
+    ) -> None:
+        """Test that set_default_branch_from_local calls API when default_branch is None."""
+        config = Config(
+            host="gerrit.example.org",
+            port=29418,
+            path=Path("/tmp/test"),
+        )
+        github_api = Mock()
+        github_api.set_default_branch.return_value = True
+        manager = MirrorManager(
+            config=config,
+            github_api=github_api,
+            github_org="test-org",
+        )
+
+        local_path = Path("/tmp/test/repo")
+        github_repo = GitHubRepo(
+            name="test-repo",
+            full_name="test-org/test-repo",
+            ssh_url="git@github.com:test-org/test-repo.git",
+            clone_url="https://github.com/test-org/test-repo.git",
+            html_url="https://github.com/test-org/test-repo",
+            private=False,
+            # default_branch not set — defaults to None
+        )
+
+        manager._set_default_branch_from_local(local_path, github_repo)
+
+        # default_branch is None — API must be called
+        github_api.set_default_branch.assert_called_once_with(
+            "test-org", "test-repo", "main"
+        )
+
 
 class TestFixDefaultBranches:
     """Tests for _fix_default_branches skipping repos whose push failed."""

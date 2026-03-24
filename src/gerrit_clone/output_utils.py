@@ -37,8 +37,9 @@ def log_and_print(
     Sends *message* to both the logging framework (at the requested
     severity) and to the user-facing console.  When a Rich *style* is
     provided the console output is styled via ``console.print``; when
-    it is ``None`` the message is emitted through plain ``print`` so
-    that it appears even when Rich is not rendering to a real terminal.
+    it is ``None`` the message is emitted through ``console.print``
+    without styling so that all output flows through the same Rich
+    console (typically configured to stderr).
 
     Args:
         logger: Logger instance to use for the structured log entry.
@@ -46,7 +47,7 @@ def log_and_print(
         message: The human-readable message to emit.
         style: Optional Rich style string (e.g. ``"bold red"``).
             When provided, ``console.print`` is used with this style.
-            When ``None``, plain ``print`` is used instead.
+            When ``None``, ``console.print`` is used without styling.
         level: Log level name — one of ``'debug'``, ``'info'``,
             ``'warning'``, or ``'error'``.  Defaults to ``'info'``.
 
@@ -66,7 +67,7 @@ def log_and_print(
     if style:
         console.print(message, style=style)
     else:
-        print(message)
+        console.print(message)
 
 
 def format_rate_limit_table(
@@ -105,9 +106,11 @@ def format_rate_limit_table(
     remaining = rate_info.get("X-RateLimit-Remaining")
     limit = rate_info.get("X-RateLimit-Limit")
     if remaining is not None or limit is not None:
+        remaining_display = "?" if remaining is None else str(remaining)
+        limit_display = "?" if limit is None else str(limit)
         table.add_row(
             "Remaining / Limit",
-            f"{remaining or '?'} / {limit or '?'}",
+            f"{remaining_display} / {limit_display}",
         )
 
     # -- Resource type --
@@ -137,7 +140,15 @@ def format_rate_limit_table(
     # -- Retry-After (if present) --
     retry_after = rate_info.get("Retry-After")
     if retry_after is not None:
-        table.add_row("Retry-After", f"{retry_after}s")
+        retry_after_str = str(retry_after).strip()
+        try:
+            float(retry_after_str)
+        except (TypeError, ValueError):
+            # HTTP-date or other non-numeric value — show as-is
+            display = retry_after_str
+        else:
+            display = f"{retry_after_str}s"
+        table.add_row("Retry-After", display)
 
     # -- Response status --
     if response_status is not None:

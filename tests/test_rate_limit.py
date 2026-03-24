@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -512,15 +512,54 @@ class TestTokenBucketLimiter:
     async def test_global_retry_after_blocks_acquire(self) -> None:
         """Acquire should wait when global retry-after is active."""
         limiter = TokenBucketLimiter(rate=100.0, burst=100)
-        # Set a very short retry-after so the test doesn't hang
-        await limiter.set_global_retry_after(0.1)
 
-        start = time.monotonic()
-        await limiter.acquire(tokens=1.0)
-        elapsed = time.monotonic() - start
+        # Stateful monotonic: starts at 1000.0, jumps to 1011.0
+        # after the first real sleep so the limiter sees the
+        # deadline as passed on the next loop iteration.
+        current_time = 1000.0
+        sleep_durations: list[float] = []
 
-        # Should have waited at least ~0.1s
-        assert elapsed >= 0.08  # Allow small timing tolerance
+        def fake_monotonic() -> float:
+            return current_time
+
+        async def fake_sleep(duration: float) -> None:
+            nonlocal current_time
+            sleep_durations.append(duration)
+            current_time += duration  # advance virtual clock
+
+        with (
+            patch(
+                "gerrit_clone.rate_limit.time_mod.monotonic", side_effect=fake_monotonic
+            ),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await limiter.set_global_retry_after(10.0)
+            await limiter.acquire(tokens=1.0)
+
+        # acquire should have slept for the full retry-after duration
+        assert len(sleep_durations) >= 1
+        assert sleep_durations[0] == pytest.approx(10.0, abs=0.5)
+
+    @pytest.mark.asyncio
+    async def test_acquire_rejects_zero_tokens(self) -> None:
+        """acquire(tokens=0) should raise ValueError."""
+        limiter = TokenBucketLimiter(rate=10.0, burst=10)
+        with pytest.raises(ValueError, match="tokens must be in the range"):
+            await limiter.acquire(tokens=0)
+
+    @pytest.mark.asyncio
+    async def test_acquire_rejects_negative_tokens(self) -> None:
+        """acquire(tokens=-1) should raise ValueError."""
+        limiter = TokenBucketLimiter(rate=10.0, burst=10)
+        with pytest.raises(ValueError, match="tokens must be in the range"):
+            await limiter.acquire(tokens=-1.0)
+
+    @pytest.mark.asyncio
+    async def test_acquire_rejects_tokens_exceeding_burst(self) -> None:
+        """acquire(tokens > burst) should raise ValueError."""
+        limiter = TokenBucketLimiter(rate=10.0, burst=5)
+        with pytest.raises(ValueError, match="tokens must be in the range"):
+            await limiter.acquire(tokens=6.0)
 
 
 # -------------------------------------------------------------------
@@ -742,20 +781,35 @@ class TestTokenBucketLimiterIntegration:
         """Global retry-after should pause all tasks."""
         limiter = TokenBucketLimiter(rate=100.0, burst=100)
 
-        # Set a 0.15s global retry
-        await limiter.record_rate_limit(retry_after=0.15)
+        # Stateful monotonic: starts at 1000.0, advances by the
+        # sleep duration each time fake_sleep is called.
+        current_time = 1000.0
+        sleep_durations: list[float] = []
 
-        start = time.monotonic()
-        # All three tasks should wait
-        await asyncio.gather(
-            limiter.acquire(tokens=1.0),
-            limiter.acquire(tokens=1.0),
-            limiter.acquire(tokens=1.0),
-        )
-        elapsed = time.monotonic() - start
+        def fake_monotonic() -> float:
+            return current_time
 
-        # Should have waited at least ~0.15s for the global pause
-        assert elapsed >= 0.1
+        async def fake_sleep(duration: float) -> None:
+            nonlocal current_time
+            sleep_durations.append(duration)
+            current_time += duration
+
+        with (
+            patch(
+                "gerrit_clone.rate_limit.time_mod.monotonic", side_effect=fake_monotonic
+            ),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await limiter.record_rate_limit(retry_after=10.0)
+
+            await asyncio.gather(
+                limiter.acquire(tokens=1.0),
+                limiter.acquire(tokens=1.0),
+                limiter.acquire(tokens=1.0),
+            )
+
+        # All three tasks should have encountered the global pause
+        assert any(d >= 9.0 for d in sleep_durations)
 
     @pytest.mark.asyncio
     async def test_full_lifecycle(self) -> None:

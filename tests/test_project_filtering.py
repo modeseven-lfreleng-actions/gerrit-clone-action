@@ -173,6 +173,16 @@ class TestNormalizeProjectList:
         result = normalize_project_list(["*sdk*, testsuite/*"])
         assert result == ["*sdk*", "testsuite/*"]
 
+    def test_leading_slash_stripped(self) -> None:
+        """Leading slashes are stripped so /ccsdk matches ccsdk."""
+        result = normalize_project_list(["/ccsdk, /oom", "/parent/child"])
+        assert result == ["ccsdk", "oom", "parent/child"]
+
+    def test_leading_slash_deduplicates(self) -> None:
+        """Slash and non-slash variants collapse to one entry."""
+        result = normalize_project_list(["ccsdk", "/ccsdk"])
+        assert result == ["ccsdk"]
+
 
 # ---------------------------------------------------------------------------
 # filter_projects
