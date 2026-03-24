@@ -17,12 +17,10 @@ import httpx
 from rich.console import Console
 
 from gerrit_clone.logging import get_logger
-from gerrit_clone.output_utils import format_rate_limit_table
 from gerrit_clone.rate_limit import (
     AsyncProgressCounter,
     RateLimitBudget,
     TokenBucketLimiter,
-    extract_rate_limit_info,
     is_rate_limited,
     parse_retry_after,
 )
@@ -1097,7 +1095,8 @@ class GitHubAPI:
                             backoff = min(
                                 30, 5 * (2**retry)
                             )
-                            logger.warning(
+                            # Detailed message for file log only
+                            logger.info(
                                 "GraphQL transient error "
                                 "%d for %s, retrying in "
                                 "%ds (%d/%d)",
@@ -1107,23 +1106,22 @@ class GitHubAPI:
                                 retry + 1,
                                 max_retries,
                             )
-                            # Log rate-limit diagnostics on first failure
-                            if retry == 0:
-                                rate_info = extract_rate_limit_info(
-                                    response
-                                )
-                                diag_table = format_rate_limit_table(
-                                    rate_info,
-                                    budget_snapshot=self._budget.snapshot,
-                                    response_status=response.status_code,
-                                    response_body=response.text[:500]
-                                    if response.text
-                                    else None,
-                                )
-                                diag_console = Console(
-                                    stderr=True
-                                )
-                                diag_console.print(diag_table)
+                            # Compact one-liner for the console
+                            snap = self._budget.snapshot
+                            budget_pct = (
+                                f"{snap.budget_fraction:.1%}"
+                                if snap.limit > 0
+                                else "unknown"
+                            )
+                            Console(stderr=True).print(
+                                f"[yellow]⚠️ GraphQL transient "
+                                f"error {response.status_code} "
+                                f"for GitHub Organisation: "
+                                f"{org}, retrying in {backoff}s "
+                                f"({retry + 1}/{max_retries}) "
+                                f"[Budget remaining: "
+                                f"{budget_pct}][/yellow]"
+                            )
                             time_mod.sleep(backoff)
                             continue
                         logger.error(
@@ -1140,34 +1138,28 @@ class GitHubAPI:
 
                     if "errors" in data:
                         errors = data["errors"]
-                        logger.error(
-                            f"GraphQL errors: {errors}"
+                        # Full error detail for file log only
+                        logger.info(
+                            "GraphQL errors: %s", errors
                         )
                         if retry < max_retries:
                             backoff = min(
                                 30, 5 * (2**retry)
                             )
-                            logger.warning(
-                                "Retrying GraphQL query "
-                                "in %ds (%d/%d)",
-                                backoff,
-                                retry + 1,
-                                max_retries,
+                            snap = self._budget.snapshot
+                            budget_pct = (
+                                f"{snap.budget_fraction:.1%}"
+                                if snap.limit > 0
+                                else "unknown"
                             )
-                            # Log diagnostics on first GraphQL error
-                            if retry == 0:
-                                rate_info = extract_rate_limit_info(
-                                    response
-                                )
-                                diag_table = format_rate_limit_table(
-                                    rate_info,
-                                    budget_snapshot=self._budget.snapshot,
-                                    response_status=response.status_code,
-                                )
-                                diag_console = Console(
-                                    stderr=True
-                                )
-                                diag_console.print(diag_table)
+                            Console(stderr=True).print(
+                                f"[yellow]⚠️ GraphQL error "
+                                f"for GitHub Organisation: "
+                                f"{org}, retrying in {backoff}s "
+                                f"({retry + 1}/{max_retries}) "
+                                f"[Budget remaining: "
+                                f"{budget_pct}][/yellow]"
+                            )
                             time_mod.sleep(backoff)
                             continue
                         break
@@ -1264,14 +1256,30 @@ class GitHubAPI:
 
                 except Exception as e:
                     if retry < max_retries:
-                        backoff = min(30, 2 * (2**retry))
-                        logger.warning(
+                        backoff = min(30, 5 * (2**retry))
+                        # Full traceback for file log only
+                        logger.info(
                             "GraphQL query failed: %s "
                             "(retrying in %ds, %d/%d)",
                             e,
                             backoff,
                             retry + 1,
                             max_retries,
+                        )
+                        snap = self._budget.snapshot
+                        budget_pct = (
+                            f"{snap.budget_fraction:.1%}"
+                            if snap.limit > 0
+                            else "unknown"
+                        )
+                        Console(stderr=True).print(
+                            f"[yellow]⚠️ GraphQL query "
+                            f"failed for GitHub "
+                            f"Organisation: {org}, "
+                            f"retrying in {backoff}s "
+                            f"({retry + 1}/{max_retries}) "
+                            f"[Budget remaining: "
+                            f"{budget_pct}][/yellow]"
                         )
                         time_mod.sleep(backoff)
                         continue
