@@ -262,7 +262,7 @@ def compare_local_with_remote(
     return comparisons
 
 
-def _determine_sync_status(
+def _determine_sync_status(  # noqa: PLR0911
     local: LocalRepoStatus | None,
     remote: GitHubRepoStatus,
 ) -> tuple[bool, str]:

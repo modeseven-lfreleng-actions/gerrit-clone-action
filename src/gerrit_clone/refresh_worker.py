@@ -11,12 +11,14 @@ import re
 import subprocess
 import time
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gerrit_clone.git_utils import is_git_repository
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import Config, RefreshResult, RefreshStatus, RetryPolicy
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -130,7 +132,9 @@ class RefreshWorker:
                 if result.detached_head:
                     # Check if we're on Gerrit's meta/config branch
                     if state.get("on_meta_config", False):
-                        logger.debug(f"🔧 {project_name}: On Gerrit meta/config branch, switching to code branch")
+                        logger.debug(
+                            f"🔧 {project_name}: On Gerrit meta/config branch, switching to code branch"
+                        )
                     else:
                         logger.debug(f"🔧 {project_name}: Fixing detached HEAD state")
 
@@ -139,47 +143,62 @@ class RefreshWorker:
                         state = self._check_repository_state(repo_path)
                         result.current_branch = state.get("branch")
                         result.detached_head = state.get("detached_head", False)
-                        logger.debug(f"✓ {project_name}: Checked out branch '{result.current_branch}'")
+                        logger.debug(
+                            f"✓ {project_name}: Checked out branch '{result.current_branch}'"
+                        )
+                    # Check if this is a meta-only repo (parent project)
+                    elif result.error_message and "meta-only" in result.error_message:
+                        result.status = RefreshStatus.SKIPPED
+                        result.completed_at = datetime.now(UTC)
+                        result.duration_seconds = (
+                            result.completed_at - started_at
+                        ).total_seconds()
+                        logger.debug(
+                            f"⊘ {project_name}: Skipping Gerrit parent project (no code branches)"
+                        )
+                        return result
                     else:
-                        # Check if this is a meta-only repo (parent project)
-                        if result.error_message and "meta-only" in result.error_message:
-                            result.status = RefreshStatus.SKIPPED
-                            result.completed_at = datetime.now(UTC)
-                            result.duration_seconds = (
-                                result.completed_at - started_at
-                            ).total_seconds()
-                            logger.debug(f"⊘ {project_name}: Skipping Gerrit parent project (no code branches)")
-                            return result
-                        else:
-                            result.status = RefreshStatus.FAILED
-                            result.error_message = result.error_message or "Failed to fix detached HEAD state"
-                            result.completed_at = datetime.now(UTC)
-                            result.duration_seconds = (
-                                result.completed_at - started_at
-                            ).total_seconds()
-                            logger.error(f"❌ {project_name}: Failed to fix detached HEAD")
-                            return result
+                        result.status = RefreshStatus.FAILED
+                        result.error_message = (
+                            result.error_message or "Failed to fix detached HEAD state"
+                        )
+                        result.completed_at = datetime.now(UTC)
+                        result.duration_seconds = (
+                            result.completed_at - started_at
+                        ).total_seconds()
+                        logger.error(f"❌ {project_name}: Failed to fix detached HEAD")
+                        return result
 
                 # Fix upstream tracking
                 if not state.get("has_upstream", False) and result.current_branch:
-                    logger.debug(f"🔧 {project_name}: Fixing upstream tracking for '{result.current_branch}'")
+                    logger.debug(
+                        f"🔧 {project_name}: Fixing upstream tracking for '{result.current_branch}'"
+                    )
                     if self._fix_upstream_tracking(repo_path, result):
                         # Re-check state after fix
                         state = self._check_repository_state(repo_path)
                         result.current_branch = state.get("branch")
                         result.detached_head = state.get("detached_head", False)
-                        result.had_uncommitted_changes = state.get("has_uncommitted", False)
+                        result.had_uncommitted_changes = state.get(
+                            "has_uncommitted", False
+                        )
                         logger.debug(f"✓ {project_name}: Set upstream tracking")
                     else:
-                        logger.warning(f"⚠️ {project_name}: Could not set upstream, will try default branch")
+                        logger.warning(
+                            f"⚠️ {project_name}: Could not set upstream, will try default branch"
+                        )
                         # Try switching to default branch as fallback
                         if self._fix_detached_head(repo_path, result):
                             # Update state after successful default branch checkout
                             state = self._check_repository_state(repo_path)
                             result.current_branch = state.get("branch")
                             result.detached_head = state.get("detached_head", False)
-                            result.had_uncommitted_changes = state.get("has_uncommitted", False)
-                            logger.debug(f"✓ {project_name}: Switched to default branch '{result.current_branch}'")
+                            result.had_uncommitted_changes = state.get(
+                                "has_uncommitted", False
+                            )
+                            logger.debug(
+                                f"✓ {project_name}: Switched to default branch '{result.current_branch}'"
+                            )
                         else:
                             # Both upstream fix and default branch checkout failed
                             result.status = RefreshStatus.FAILED
@@ -188,17 +207,23 @@ class RefreshWorker:
                             result.duration_seconds = (
                                 result.completed_at - started_at
                             ).total_seconds()
-                            logger.error(f"❌ {project_name}: Could not fix repository state")
+                            logger.error(
+                                f"❌ {project_name}: Could not fix repository state"
+                            )
                             return result
 
                 # Always stash in force mode
                 if result.had_uncommitted_changes:
-                    logger.debug(f"💾 {project_name}: Force stashing uncommitted changes")
+                    logger.debug(
+                        f"💾 {project_name}: Force stashing uncommitted changes"
+                    )
                     if self._stash_changes(repo_path):
                         result.stash_created = True
                     else:
                         result.status = RefreshStatus.FAILED
-                        result.error_message = "Failed to stash uncommitted changes in force mode"
+                        result.error_message = (
+                            "Failed to stash uncommitted changes in force mode"
+                        )
                         result.completed_at = datetime.now(UTC)
                         result.duration_seconds = (
                             result.completed_at - started_at
@@ -299,9 +324,7 @@ class RefreshWorker:
             result.status = RefreshStatus.FAILED
             result.error_message = f"Unexpected error: {e}"
             result.completed_at = datetime.now(UTC)
-            result.duration_seconds = (
-                result.completed_at - started_at
-            ).total_seconds()
+            result.duration_seconds = (result.completed_at - started_at).total_seconds()
             logger.error(f"❌ {project_name}: {e}")
             return result
 
@@ -328,7 +351,7 @@ class RefreshWorker:
             attempt += 1
             try:
                 success = self._perform_refresh(repo_path, result)
-                if success:
+                if success:  # noqa: SIM103
                     return True
 
                 # If we get here, refresh failed but didn't raise exception
@@ -396,15 +419,15 @@ class RefreshWorker:
 
             return success
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as err:
             error_msg = f"Git operation timeout after {self.timeout}s"
             result.error_message = error_msg
-            raise RefreshTimeoutError(error_msg)
+            raise RefreshTimeoutError(error_msg) from err
 
         except Exception as e:
             error_msg = f"Unexpected error during refresh: {e}"
             result.error_message = error_msg
-            raise RefreshError(error_msg)
+            raise RefreshError(error_msg) from e
 
     def _execute_git_fetch(self, repo_path: Path, result: RefreshResult) -> bool:
         """Execute git fetch operation.
@@ -452,8 +475,8 @@ class RefreshWorker:
                 else:
                     return False
 
-        except subprocess.TimeoutExpired:
-            raise RefreshTimeoutError(f"Fetch timeout after {self.timeout}s")
+        except subprocess.TimeoutExpired as err:
+            raise RefreshTimeoutError(f"Fetch timeout after {self.timeout}s") from err
 
     def _execute_git_pull(self, repo_path: Path, result: RefreshResult) -> bool:
         """Execute git pull operation.
@@ -503,7 +526,10 @@ class RefreshWorker:
                 result.error_message = error_msg
 
                 # Check for conflicts
-                if "CONFLICT" in process_result.stdout or "CONFLICT" in process_result.stderr:
+                if (
+                    "CONFLICT" in process_result.stdout
+                    or "CONFLICT" in process_result.stderr
+                ):
                     result.status = RefreshStatus.CONFLICTS
                     logger.error(f"⚠️ {result.project_name}: Merge conflicts detected")
                     return False
@@ -513,8 +539,8 @@ class RefreshWorker:
                 else:
                     return False
 
-        except subprocess.TimeoutExpired:
-            raise RefreshTimeoutError(f"Pull timeout after {self.timeout}s")
+        except subprocess.TimeoutExpired as err:
+            raise RefreshTimeoutError(f"Pull timeout after {self.timeout}s") from err
 
     def _is_git_repository(self, path: Path) -> bool:
         """Check if path is a valid Git repository (regular or bare).
@@ -580,11 +606,7 @@ class RefreshWorker:
 
         # Additional check: Gerrit servers often have specific hostnames
         gerrit_hosts = ["gerrit", "review", "code-review"]
-        for host in gerrit_hosts:
-            if host in remote_url.lower():
-                return True
-
-        return False
+        return any(host in remote_url.lower() for host in gerrit_hosts)
 
     def _check_repository_state(self, repo_path: Path) -> dict[str, Any]:
         """Check the state of the repository.
@@ -665,7 +687,14 @@ class RefreshWorker:
         """
         try:
             result = subprocess.run(
-                ["git", "stash", "push", "--include-untracked", "-m", "gerrit-clone refresh auto-stash"],
+                [
+                    "git",
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "-m",
+                    "gerrit-clone refresh auto-stash",
+                ],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -763,7 +792,9 @@ class RefreshWorker:
                 )
 
                 if meta_result.returncode == 0 and meta_result.stdout.strip():
-                    logger.debug(f"{repo_path.name}: Confirmed as Gerrit parent project (has meta/config, no heads)")
+                    logger.debug(
+                        f"{repo_path.name}: Confirmed as Gerrit parent project (has meta/config, no heads)"
+                    )
                     return True
 
             return False
@@ -801,14 +832,16 @@ class RefreshWorker:
 
             if ls_remote_result.returncode == 0:
                 # Parse output like "ref: refs/heads/master	HEAD"
-                for line in ls_remote_result.stdout.strip().split('\n'):
+                for line in ls_remote_result.stdout.strip().split("\n"):
                     if line.startswith("ref:"):
                         ref = line.split()[1]
                         if ref.startswith("refs/heads/"):
                             branch_name = ref.replace("refs/heads/", "")
                             # Verify this isn't a Gerrit meta ref
                             if not branch_name.startswith("meta/"):
-                                logger.debug(f"Found default branch via ls-remote: {branch_name}")
+                                logger.debug(
+                                    f"Found default branch via ls-remote: {branch_name}"
+                                )
                                 return branch_name
 
             # Try to get origin/HEAD symbolic ref
@@ -869,7 +902,9 @@ class RefreshWorker:
         try:
             # Check if we're on Gerrit's meta/config branch
             if self._is_on_meta_config(repo_path):
-                logger.debug(f"🔧 {repo_path.name}: Detected Gerrit meta/config branch, switching to code branch")
+                logger.debug(
+                    f"🔧 {repo_path.name}: Detected Gerrit meta/config branch, switching to code branch"
+                )
 
             # Fetch remote to ensure we have latest branch info
             # This is crucial for repos that might not have been fetched recently
@@ -887,9 +922,13 @@ class RefreshWorker:
 
             # Check if this is a Gerrit parent project (meta-only, no code branches)
             if self._is_meta_only_repo(repo_path):
-                logger.debug(f"{repo_path.name}: Gerrit parent project (meta-only), no code branches to refresh")
+                logger.debug(
+                    f"{repo_path.name}: Gerrit parent project (meta-only), no code branches to refresh"
+                )
                 # Update result to indicate this is a skip, not a failure
-                result.error_message = "Gerrit parent project (meta-only, no code branches)"
+                result.error_message = (
+                    "Gerrit parent project (meta-only, no code branches)"
+                )
                 return False
 
             # Get default branch
@@ -910,11 +949,18 @@ class RefreshWorker:
             )
 
             if checkout_result.returncode == 0:
-                logger.debug(f"Checked out branch '{default_branch}' in {repo_path.name}")
+                logger.debug(
+                    f"Checked out branch '{default_branch}' in {repo_path.name}"
+                )
 
                 # Set upstream tracking if not already set
                 set_upstream_result = subprocess.run(
-                    ["git", "branch", f"--set-upstream-to=origin/{default_branch}", default_branch],
+                    [
+                        "git",
+                        "branch",
+                        f"--set-upstream-to=origin/{default_branch}",
+                        default_branch,
+                    ],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
@@ -927,7 +973,9 @@ class RefreshWorker:
 
                 return True
             else:
-                logger.debug(f"Failed to checkout '{default_branch}': {checkout_result.stderr}")
+                logger.debug(
+                    f"Failed to checkout '{default_branch}': {checkout_result.stderr}"
+                )
                 return False
 
         except Exception as e:
@@ -959,12 +1007,19 @@ class RefreshWorker:
             )
 
             if check_result.returncode != 0:
-                logger.debug(f"Remote branch origin/{result.current_branch} does not exist")
+                logger.debug(
+                    f"Remote branch origin/{result.current_branch} does not exist"
+                )
                 return False
 
             # Set upstream tracking
             upstream_result = subprocess.run(
-                ["git", "branch", f"--set-upstream-to=origin/{result.current_branch}", result.current_branch],
+                [
+                    "git",
+                    "branch",
+                    f"--set-upstream-to=origin/{result.current_branch}",
+                    result.current_branch,
+                ],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -973,7 +1028,9 @@ class RefreshWorker:
             )
 
             if upstream_result.returncode == 0:
-                logger.debug(f"Set upstream tracking for '{result.current_branch}' to 'origin/{result.current_branch}'")
+                logger.debug(
+                    f"Set upstream tracking for '{result.current_branch}' to 'origin/{result.current_branch}'"
+                )
                 return True
             else:
                 logger.debug(f"Failed to set upstream: {upstream_result.stderr}")
@@ -1049,13 +1106,20 @@ class RefreshWorker:
             # - Custom connection pooling implementation (significant complexity)
             ssh_opts = [
                 "ssh",
-                "-o", "BatchMode=yes",
-                "-o", "ControlMaster=no",  # Disable multiplexing for thread safety
-                "-o", "ConnectTimeout=10",
-                "-o", "ServerAliveInterval=5",
-                "-o", "ServerAliveCountMax=3",
-                "-o", "ConnectionAttempts=2",
-                "-o", "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ControlMaster=no",  # Disable multiplexing for thread safety
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "ConnectionAttempts=2",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
             ]
             env["GIT_SSH_COMMAND"] = " ".join(ssh_opts)
 
@@ -1095,7 +1159,11 @@ class RefreshWorker:
         # Authentication errors
         if any(
             phrase in combined
-            for phrase in ["permission denied", "authentication failed", "could not read"]
+            for phrase in [
+                "permission denied",
+                "authentication failed",
+                "could not read",
+            ]
         ):
             return f"Authentication error during {operation}"
 
@@ -1230,7 +1298,7 @@ class RefreshWorker:
         # Look for patterns like:
         # "Updating abc123..def456"
         # "Fast-forward"
-        # "1 file changed, 2 insertions(+), 3 deletions(-)"
+        # "1 file changed, 2 insertions(+), 3 deletions(-)"  # noqa: ERA001
 
         if "Already up to date" in output or "Already up-to-date" in output:
             return 0

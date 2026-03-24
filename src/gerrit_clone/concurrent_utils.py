@@ -10,9 +10,12 @@ import signal
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Any, Callable, Generator
+from typing import TYPE_CHECKING, Any
 
 from gerrit_clone.logging import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 logger = get_logger(__name__)
 
@@ -24,7 +27,7 @@ _logging_lock = threading.Lock()
 class SuppressLoggingFilter(logging.Filter):
     """Filter that suppresses all log messages when logging is disabled."""
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: ARG002
         """Return False to suppress messages when _logging_suppressed is True."""
         with _logging_lock:
             return not _logging_suppressed
@@ -38,7 +41,7 @@ def suppress_logging_after_interrupt() -> None:
 
     Thread-safe: Uses a lock to safely modify the global flag.
     """
-    global _logging_suppressed
+    global _logging_suppressed  # noqa: PLW0603
     with _logging_lock:
         _logging_suppressed = True
 
@@ -151,7 +154,7 @@ def handle_sigint_gracefully() -> None:
 
     Call this at the start of CLI commands that use threading.
     """
-    def signal_handler(signum: int, frame: object) -> None:
+    def signal_handler(signum: int, frame: object) -> None:  # noqa: ARG001
         raise KeyboardInterrupt()
 
     signal.signal(signal.SIGINT, signal_handler)

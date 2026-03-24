@@ -9,13 +9,23 @@ import json
 import os
 import threading
 from concurrent.futures import as_completed
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from typing import cast
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from gerrit_clone.concurrent_utils import interruptible_executor
-from gerrit_clone.git_utils import is_git_repository
+from gerrit_clone.git_utils import get_current_commit_sha, is_git_repository
+from gerrit_clone.github_worker import clone_github_repository
 from gerrit_clone.logging import get_logger, suppress_console_logging
 from gerrit_clone.models import (
     BatchResult,
@@ -23,13 +33,18 @@ from gerrit_clone.models import (
     CloneStatus,
     Config,
     Project,
+    RefreshStatus,
+    RetryPolicy,
     SourceType,
+    filter_projects,
 )
 from gerrit_clone.progress import ProgressTracker, create_progress_tracker
+from gerrit_clone.refresh_worker import RefreshWorker
 from gerrit_clone.rich_status import (
     clone_completed,
     connecting_to_server,
     create_status_manager,
+    print_status_message,
     starting_clone,
 )
 from gerrit_clone.rich_status import (
@@ -88,8 +103,6 @@ class CloneManager:
         include_pats = getattr(self.config, "include_projects", None)
         exclude_pats = getattr(self.config, "exclude_projects", None)
         if include_pats or exclude_pats:
-            from gerrit_clone.models import filter_projects
-
             before_count = len(unique_projects)
             unique_projects = filter_projects(
                 unique_projects,
@@ -389,24 +402,22 @@ class CloneManager:
             # Mark parents in this batch (depth == 0 or any project with children)
             project_name_index: set[str] = getattr(self, "_project_name_index", set())
             batch_depth = batch[0].name.count("/") if batch else 0
-            announced_parents = 0
             for pr in batch:
                 prefix = pr.name + "/"
-                if any(cand.startswith(prefix) for cand in self._nested_candidates):
-                    if pr.name in project_name_index:
-                        if (
-                            pr.name not in self._nested_parent_usage
-                            and batch_depth == 0
-                        ):
-                            # First time we see this parent (top-level batch)
-                            logger.debug(
-                                f"👪 Parent ready for nesting: {pr.name} (children pending)"
-                            )
-                        self._nested_parent_usage.add(pr.name)
+                if any(cand.startswith(prefix) for cand in self._nested_candidates) and pr.name in project_name_index:
+                    if (
+                        pr.name not in self._nested_parent_usage
+                        and batch_depth == 0
+                    ):
+                        # First time we see this parent (top-level batch)
+                        logger.debug(
+                            f"👪 Parent ready for nesting: {pr.name} (children pending)"
+                        )
+                    self._nested_parent_usage.add(pr.name)
 
             # Promote first few nested parents summary (only for top-level batch)
             if batch_depth == 0 and self._nested_parent_usage:
-                sample_parents = sorted(list(self._nested_parent_usage))[:5]
+                sample_parents = sorted(self._nested_parent_usage)[:5]
                 logger.debug(
                     f"📂 Parent repositories prepared ({len(self._nested_parent_usage)}): {sample_parents}{' ...' if len(self._nested_parent_usage) > 5 else ''}"
                 )
@@ -449,14 +460,14 @@ class CloneManager:
                 detected = len(detected_set)
                 if total_candidates:
                     if detected:
-                        sample = sorted(list(detected_set))[:5]
+                        sample = sorted(detected_set)[:5]
                         logger.debug(
                             f"🧬 Nested repositories detected: {detected}/{total_candidates} "
                             f"(examples: {sample}{' ...' if detected > 5 else ''})"
                         )
                         # Undetected sample (potential missed nesting)
                         undetected = sorted(
-                            list(self._nested_candidates - detected_set)
+                            self._nested_candidates - detected_set
                         )
                         if undetected:
                             undet_sample = undetected[:5]
@@ -584,11 +595,11 @@ class CloneManager:
             except TimeoutError:
                 logger.error(f"Clone operations timed out after {overall_timeout}s")
                 # Cancel all remaining futures
-                for future in future_to_project:
+                for future, project in future_to_project.items():
                     if not future.done():
                         future.cancel()
                         logger.warning(
-                            f"Cancelled clone for {future_to_project[future].name}"
+                            f"Cancelled clone for {project.name}"
                         )
 
                 # Create failed results for any incomplete projects
@@ -632,7 +643,6 @@ class CloneManager:
 
         # Use appropriate clone method based on source type
         if self.config.source_type == SourceType.GITHUB:
-            from gerrit_clone.github_worker import clone_github_repository
             result = clone_github_repository(project, self.config)
         else:
             # Create a new worker instance for this task (thread safety)
@@ -685,7 +695,7 @@ def _check_existing_manifest(config: Config, console: Any | None = None) -> dict
         return None
 
     try:
-        with open(manifest_path, "r") as f:
+        with manifest_path.open() as f:
             manifest: dict[str, Any] = json.load(f)
 
         # Check for configuration mismatches
@@ -715,7 +725,6 @@ def _check_existing_manifest(config: Config, console: Any | None = None) -> dict
         if warnings:
             # Create console if not provided (ensures safe display timing)
             if console is None:
-                from rich.console import Console
                 console = Console(stderr=True)
             console.print("\n[yellow]⚠️  Configuration Changes Detected:[/yellow]")
             for warning in warnings:
@@ -729,11 +738,10 @@ def _check_existing_manifest(config: Config, console: Any | None = None) -> dict
         if manifest.get("already_exists", 0) > 0 or manifest.get("succeeded", 0) > 0:
             # Create console if not provided (ensures safe display timing)
             if console is None:
-                from rich.console import Console
                 console = Console(stderr=True)
             total_existing = manifest.get("succeeded", 0) + manifest.get("already_exists", 0)
             console.print(
-                f"[cyan]ℹ️  Found {total_existing} existing repositories from previous clone[/cyan]\n"
+                f"[cyan]ℹ️  Found {total_existing} existing repositories from previous clone[/cyan]\n"  # noqa: RUF001
             )
 
         return manifest
@@ -762,21 +770,18 @@ def clone_repositories(config: Config) -> BatchResult:
     progress_tracker = create_progress_tracker(config)
 
     # Use status manager context for Rich status integration
-    from gerrit_clone.rich_status import create_status_manager
 
     with create_status_manager(progress_tracker):
         try:
             # Fetch projects from configured source
             if config.source_type == SourceType.GITHUB:
                 logger.debug("Connecting to GitHub: %s", config.host)
-                from gerrit_clone.rich_status import print_status_message
-                from rich.console import Console
                 console = Console(stderr=True)
                 print_status_message(f"🌐 Connecting to GitHub: {config.host}", console)
             else:
                 # Port is guaranteed to be set for Gerrit sources (defaults to 29418)
                 # Validated in Config.__post_init__ - use cast for type narrowing
-                port = cast(int, config.port)
+                port = cast("int", config.port)
                 logger.debug("Connecting to Gerrit server %s:%s", config.host, port)
                 connecting_to_server(config.host, port)
 
@@ -891,7 +896,6 @@ def clone_repositories(config: Config) -> BatchResult:
 
                             # Get local HEAD SHA
                             try:
-                                from gerrit_clone.git_utils import get_current_commit_sha
                                 local_sha = get_current_commit_sha(target_path)
                                 # Metadata is guaranteed to exist by the check above (continue on line 873)
                                 metadata = getattr(project, "metadata", {}) or {}
@@ -954,13 +958,8 @@ def clone_repositories(config: Config) -> BatchResult:
 
                         # Show progress message
                         if not config.quiet:
-                            from rich.console import Console
                             console = Console(stderr=True)
                             console.print(f"🔄 Refreshing {len(repos_needing_refresh)} repositories...")
-
-                        # Refresh existing repositories using RefreshWorker
-                        from gerrit_clone.refresh_worker import RefreshWorker
-                        from gerrit_clone.models import RefreshStatus, RetryPolicy
 
                         # Create a RefreshWorker instance
                         # RefreshWorker handles both Gerrit and GitHub repositories:
@@ -989,9 +988,6 @@ def clone_repositories(config: Config) -> BatchResult:
                         )
 
                         # Refresh each repository with progress display
-                        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-                        from rich.console import Console
-
                         with Progress(
                             SpinnerColumn(),
                             TextColumn("[progress.description]{task.description}"),
@@ -1003,7 +999,7 @@ def clone_repositories(config: Config) -> BatchResult:
                             transient=False,
                         ) as progress:
                             task = progress.add_task(
-                                f"Refreshing repositories...",
+                                "Refreshing repositories...",
                                 total=len(repos_needing_refresh)
                             )
 
@@ -1116,8 +1112,6 @@ def clone_repositories(config: Config) -> BatchResult:
                     )
 
                 # Create a modified config with fewer threads using dataclass replace
-                from dataclasses import replace
-
                 retry_config = replace(config, threads=retry_threads)
 
                 # Reuse the existing manager and progress tracker for retries
@@ -1138,8 +1132,6 @@ def clone_repositories(config: Config) -> BatchResult:
                         f"Retry successful: {retry_succeeded}/{len(failed_results)} "
                         f"previously failed clone(s) now succeeded"
                     )
-                    from rich.console import Console
-
                     console = Console(stderr=True)
                     if retry_still_failed == 0:
                         console.print(
@@ -1151,8 +1143,6 @@ def clone_repositories(config: Config) -> BatchResult:
                         )
                 else:
                     logger.warning(f"All {len(failed_results)} retry attempts failed")
-                    from rich.console import Console
-
                     console = Console(stderr=True)
                     console.print(
                         f"[red]✗ All {len(failed_results)} retry attempts failed[/red]"

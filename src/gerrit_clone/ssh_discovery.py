@@ -168,7 +168,7 @@ class GerritSSHClient:
                 "SSH client not found. Please ensure 'ssh' is installed and in PATH."
             ) from e
         except Exception as e:
-            if isinstance(e, (SSHConnectionError, SSHCommandError, SSHParseError)):
+            if isinstance(e, SSHConnectionError | SSHCommandError | SSHParseError):
                 raise
             raise SSHCommandError(f"Unexpected error executing SSH command: {e}") from e
 

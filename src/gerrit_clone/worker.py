@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import os
+import random
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
-from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +23,8 @@ if sys.platform == "win32":
 else:
     pass
 
+from typing import TYPE_CHECKING
+
 from gerrit_clone.clone_utils import build_base_clone_command
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project
@@ -28,6 +33,9 @@ from gerrit_clone.pathing import (
     get_project_path,
     move_conflicting_path,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 logger = get_logger(__name__)
 
@@ -68,7 +76,7 @@ def _file_lock(
         while True:
             try:
                 # Try to create lock file exclusively (atomic operation)
-                with open(lock_file_path, "x") as lock_file:
+                with lock_file_path.open("x") as lock_file:
                     # Write process info for debugging
                     lock_file.write(f"pid:{os.getpid()}\ntime:{time.time()}\n")
                     lock_file.flush()
@@ -101,10 +109,8 @@ def _file_lock(
     finally:
         # Clean up lock file if we acquired it
         if acquired and lock_file_path.exists():
-            try:
+            with suppress(OSError):
                 lock_file_path.unlink()
-            except OSError:
-                pass  # Cleanup can fail, don't break the operation
 
 
 class CloneWorker:
@@ -248,8 +254,6 @@ class CloneWorker:
                             f"🧹 Cleaning up incomplete clone for {project.name}"
                         )
                     try:
-                        import shutil
-
                         shutil.rmtree(target_path)
                         logger.debug(
                             f"✓ Cleaned up incomplete clone directory: {target_path}"
@@ -603,8 +607,6 @@ class CloneWorker:
         delay = min(delay, max_delay)
 
         # Add random jitter to prevent thundering herd (proportional to delay)
-        import random
-
         jitter_factor = 0.2  # 20% jitter
         jitter = random.uniform(-jitter_factor * delay, jitter_factor * delay)
         return max(0.1, delay + jitter)  # Ensure minimum 100ms delay
@@ -851,9 +853,6 @@ class CloneWorker:
             repo_path: Path to the cloned repository
             env: Isolated git environment to use
         """
-        import random
-        import time
-
         ssh_url = self._build_ssh_url(project)
         max_attempts = 3
 
@@ -950,9 +949,6 @@ class CloneWorker:
             env["GIT_SSH_COMMAND"] = self.config.git_ssh_command
 
         # Create thread-specific git configuration directory
-        import tempfile
-        import threading
-
         thread_id = threading.get_ident()
         git_config_dir = Path(tempfile.mkdtemp(prefix=f"git_config_{thread_id}_"))
 

@@ -10,7 +10,8 @@ from concurrent.futures import as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rich.text import Text
+from rich.console import Console, Group
+from rich.live import Live
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -20,10 +21,19 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.text import Text
 
 from gerrit_clone.concurrent_utils import interruptible_executor
 from gerrit_clone.logging import get_logger
-from gerrit_clone.models import Config, RefreshBatchResult, RefreshResult, RefreshStatus, RetryPolicy
+from gerrit_clone.models import (
+    Config,
+    RefreshBatchResult,
+    RefreshResult,
+    RefreshStatus,
+    RetryPolicy,
+    match_project_pattern,
+    normalize_project_list,
+)
 from gerrit_clone.refresh_worker import RefreshWorker
 
 logger = get_logger(__name__)
@@ -125,7 +135,7 @@ class RefreshManager:
         visited_repos: set[Path] = set()
 
         # Walk directory tree
-        for root, dirs, files in os.walk(base_path):
+        for root, dirs, _files in os.walk(base_path):
             root_path = Path(root)
 
             # Check if current directory is a Git repository
@@ -172,10 +182,16 @@ class RefreshManager:
         # from base_path as project names (matching Gerrit's hierarchical
         # naming convention, e.g. "testsuite/pythonsdk-tests").
         if self.include_projects or self.exclude_projects:
-            from gerrit_clone.models import match_project_pattern, normalize_project_list
-
-            include_pats = normalize_project_list(self.include_projects) if self.include_projects else []
-            exclude_pats = normalize_project_list(self.exclude_projects) if self.exclude_projects else []
+            include_pats = (
+                normalize_project_list(self.include_projects)
+                if self.include_projects
+                else []
+            )
+            exclude_pats = (
+                normalize_project_list(self.exclude_projects)
+                if self.exclude_projects
+                else []
+            )
 
             before_count = len(sorted_repos)
             filtered: list[Path] = []
@@ -186,7 +202,7 @@ class RefreshManager:
                 # matching Gerrit's hierarchical naming convention.
                 try:
                     rel = repo_path.relative_to(base_resolved)
-                    if rel == Path("."):
+                    if rel == Path():  # noqa: SIM108
                         # repo is exactly at base_path; use directory
                         # name so filters can match it.
                         project_name = repo_path.name
@@ -197,14 +213,16 @@ class RefreshManager:
                     project_name = repo_path.name
 
                 # Apply include filter (if specified, only keep matches)
-                if include_pats:
-                    if not any(match_project_pattern(project_name, p) for p in include_pats):
-                        continue
+                if include_pats and not any(
+                    match_project_pattern(project_name, p) for p in include_pats
+                ):
+                    continue
 
                 # Apply exclude filter
-                if exclude_pats:
-                    if any(match_project_pattern(project_name, p) for p in exclude_pats):
-                        continue
+                if exclude_pats and any(
+                    match_project_pattern(project_name, p) for p in exclude_pats
+                ):
+                    continue
 
                 filtered.append(repo_path)
 
@@ -250,7 +268,9 @@ class RefreshManager:
                 completed_at=datetime.now(UTC),
             )
 
-        logger.debug(f"🔄 Refreshing {len(repo_paths)} repositories with {self.threads} threads")
+        logger.debug(
+            f"🔄 Refreshing {len(repo_paths)} repositories with {self.threads} threads"
+        )
 
         if self.dry_run:
             logger.debug("🔍 DRY RUN MODE - no changes will be made")
@@ -299,9 +319,6 @@ class RefreshManager:
         # Create progress display with two-line layout
         # Line 1: Current repository being processed
         # Line 2: Progress bar + count + time
-        from rich.console import Console, Group
-        from rich.live import Live
-
         current_repo = Text("", style="bold blue")
 
         progress_bar = Progress(
@@ -318,63 +335,66 @@ class RefreshManager:
         # Combine current repo and progress bar into a two-line display
         display_group = Group(current_repo, progress_bar)
 
-        with Live(display_group, console=Console(), refresh_per_second=4, transient=False):
-            # Create thread pool with graceful interrupt handling
-            with interruptible_executor(
+        with (
+            Live(
+                display_group, console=Console(), refresh_per_second=4, transient=False
+            ),
+            interruptible_executor(
                 max_workers=self.threads,
                 thread_name_prefix="refresh",
-            ) as executor:
-                # Submit all tasks
-                future_to_repo = {
-                    executor.submit(worker.refresh_repository, repo): repo
-                    for repo in repo_paths
-                }
+            ) as executor,
+        ):
+            # Submit all tasks
+            future_to_repo = {
+                executor.submit(worker.refresh_repository, repo): repo
+                for repo in repo_paths
+            }
 
-                # Process results as they complete
-                for future in as_completed(future_to_repo):
-                    repo = future_to_repo[future]
+            # Process results as they complete
+            for future in as_completed(future_to_repo):
+                repo = future_to_repo[future]
 
-                    try:
-                        result = future.result()
-                        results.append(result)
+                try:
+                    result = future.result()
+                    results.append(result)
 
-                        # Update progress with status
-                        self._update_progress(progress_bar, task, result, current_repo)
+                    # Update progress with status
+                    self._update_progress(progress_bar, task, result, current_repo)
 
-                        # Check for exit-on-error
-                        if self.exit_on_error and result.failed:
-                            logger.error(
-                                f"❌ Exiting due to error in {result.project_name}"
-                            )
-                            # Cancel remaining tasks (only those not yet completed)
-                            for f in future_to_repo.keys():
-                                if not f.done():
-                                    f.cancel()
-                            break
-
-                    except Exception as e:
-                        # This shouldn't happen as worker catches all exceptions
-                        # But just in case...
-                        logger.error(f"❌ Unexpected error processing {repo.name}: {e}")
-                        # Create failure result
-                        failure_result = RefreshResult(
-                            path=repo,
-                            project_name=repo.name,
-                            status=RefreshStatus.FAILED,
-                            error_message=f"Unexpected error: {e}",
-                            started_at=datetime.now(UTC),
-                            completed_at=datetime.now(UTC),
+                    # Check for exit-on-error
+                    if self.exit_on_error and result.failed:
+                        logger.error(
+                            f"❌ Exiting due to error in {result.project_name}"
                         )
-                        results.append(failure_result)
-                        progress_bar.update(task, advance=1)
+                        # Cancel remaining tasks (only those not yet completed)
+                        for f in future_to_repo:
+                            if not f.done():
+                                f.cancel()
+                        break
 
-                        if self.exit_on_error:
-                            logger.error("❌ Exiting due to unexpected error")
-                            # Cancel remaining tasks (only those not yet completed)
-                            for f in future_to_repo.keys():
-                                if not f.done():
-                                    f.cancel()
-                            break
+                except Exception as e:
+                    # This shouldn't happen as worker catches all exceptions
+                    # But just in case...
+                    logger.error(f"❌ Unexpected error processing {repo.name}: {e}")
+                    # Create failure result
+                    failure_result = RefreshResult(
+                        path=repo,
+                        project_name=repo.name,
+                        status=RefreshStatus.FAILED,
+                        error_message=f"Unexpected error: {e}",
+                        started_at=datetime.now(UTC),
+                        completed_at=datetime.now(UTC),
+                    )
+                    results.append(failure_result)
+                    progress_bar.update(task, advance=1)
+
+                    if self.exit_on_error:
+                        logger.error("❌ Exiting due to unexpected error")
+                        # Cancel remaining tasks (only those not yet completed)
+                        for f in future_to_repo:
+                            if not f.done():
+                                f.cancel()
+                        break
 
         return results
 
@@ -430,9 +450,11 @@ class RefreshManager:
                 result.remote_url = remote_url
 
                 # Check if Gerrit
-                if self.filter_gerrit_only and not worker._is_gerrit_repository(remote_url):
+                if self.filter_gerrit_only and not worker._is_gerrit_repository(
+                    remote_url
+                ):
                     result.status = RefreshStatus.NOT_GERRIT_REPO
-                    result.error_message = f"Not a Gerrit repository"
+                    result.error_message = "Not a Gerrit repository"
                 else:
                     # Get repository state
                     state = worker._check_repository_state(repo_path)
@@ -459,7 +481,11 @@ class RefreshManager:
         return results
 
     def _update_progress(
-        self, progress: Progress, task: TaskID, result: RefreshResult, current_repo: Text
+        self,
+        progress: Progress,
+        task: TaskID,
+        result: RefreshResult,
+        current_repo: Text,
     ) -> None:
         """Update progress display based on result.
 

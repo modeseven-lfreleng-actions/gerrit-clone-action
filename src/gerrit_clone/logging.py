@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # Minimal theme (can be expanded later if reused elsewhere)
 GERRIT_THEME = Theme(
@@ -151,7 +153,7 @@ class _SuppressConsoleFilter(logging.Filter):
     It's designed to be added/removed from handlers in a thread-safe manner.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: ARG002
         """Block all records when this filter is active."""
         return False
 

@@ -16,11 +16,11 @@ __email__ = "mwatkins@linuxfoundation.org"
 from gerrit_clone.models import CloneResult, Config, Project, RetryPolicy
 
 __all__ = [
-    "__version__",
-    "__author__",
-    "__email__",
     "CloneResult",
     "Config",
     "Project",
     "RetryPolicy",
+    "__author__",
+    "__email__",
+    "__version__",
 ]

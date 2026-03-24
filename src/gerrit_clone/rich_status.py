@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 import threading
-from typing import Optional, Any, Self
+import traceback
+from typing import Any, Self
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 # Global reference to the active progress tracker for status integration
-_current_progress_tracker: Optional[Any] = None
+_current_progress_tracker: Any | None = None
 _status_lock = threading.Lock()
 
 
@@ -23,14 +24,14 @@ def set_progress_tracker(tracker: Any) -> None:
     Args:
         tracker: ProgressTracker instance with status update methods
     """
-    global _current_progress_tracker
+    global _current_progress_tracker  # noqa: PLW0603
     with _status_lock:
         _current_progress_tracker = tracker
 
 
 def clear_progress_tracker() -> None:
     """Clear the current progress tracker reference."""
-    global _current_progress_tracker
+    global _current_progress_tracker  # noqa: PLW0603
     with _status_lock:
         _current_progress_tracker = None
 
@@ -67,7 +68,7 @@ def clear_status() -> None:
             _current_progress_tracker.clear_status()
 
 
-def print_status_message(message: str, console: Optional[Console] = None) -> None:
+def print_status_message(message: str, console: Console | None = None) -> None:
     """Print a standalone status message to the console.
 
     Args:
@@ -80,7 +81,7 @@ def print_status_message(message: str, console: Optional[Console] = None) -> Non
 
 
 def connecting_to_server(
-    host: str, port: int, console: Optional[Console] = None
+    host: str, port: int, console: Console | None = None
 ) -> None:
     """Show connecting to server status."""
     # Try to send to progress tracker first
@@ -90,7 +91,7 @@ def connecting_to_server(
 
 
 def discovering_projects(
-    host: str, method: str = "", console: Optional[Console] = None
+    host: str, method: str = "", console: Console | None = None
 ) -> None:
     """Show discovering projects status.
 
@@ -107,7 +108,7 @@ def discovering_projects(
 
 
 def projects_found(
-    count: int, method: str = "", console: Optional[Console] = None
+    count: int, method: str = "", console: Console | None = None  # noqa: ARG001
 ) -> None:
     """Show projects found status.
 
@@ -126,7 +127,7 @@ def starting_clone(
     filtered_count: int,
     threads: int,
     skipped_count: int = 0,
-    console: Optional[Console] = None,
+    console: Console | None = None,
     item_name: str = "projects",
 ) -> None:
     """Show starting clone operation status."""
@@ -142,7 +143,7 @@ def starting_clone(
 
 
 def retrying_failed_clones(
-    failed_count: int, threads: int, console: Optional[Console] = None
+    failed_count: int, threads: int, console: Console | None = None
 ) -> None:
     """Show retrying failed clones status.
 
@@ -222,7 +223,7 @@ def show_error_summary(
 
 
 def show_final_results(
-    console: Console, batch_result: Any, log_file_path: Optional[str] = None
+    console: Console, batch_result: Any, log_file_path: str | None = None
 ) -> None:
     """Show final results summary in a Rich panel.
 
@@ -278,7 +279,7 @@ def show_final_results(
 
 
 def handle_crash_display(
-    console: Console, exception: Exception, log_file_path: Optional[str] = None
+    console: Console, exception: Exception, log_file_path: str | None = None
 ) -> None:
     """Display crash information in a tidy Rich panel.
 
@@ -287,8 +288,6 @@ def handle_crash_display(
         exception: Exception that caused the crash
         log_file_path: Path to log file, if available
     """
-    import traceback
-
     # Get crash context
     tb = traceback.extract_tb(exception.__traceback__)
     crash_context = "unknown location"
@@ -302,7 +301,7 @@ def handle_crash_display(
     content_lines = [
         f"[bold red]Exception:[/bold red] {type(exception).__name__}",
         f"[bold red]Location:[/bold red] {crash_context}",
-        f"[bold red]Message:[/bold red] {str(exception)}",
+        f"[bold red]Message:[/bold red] {exception!s}",
     ]
 
     if log_file_path:
@@ -335,7 +334,7 @@ class RichStatusManager:
 
     def __enter__(self) -> Self:
         """Enter context and set progress tracker."""
-        global _current_progress_tracker
+        global _current_progress_tracker  # noqa: PLW0603
         with _status_lock:
             self._previous_tracker = _current_progress_tracker
             _current_progress_tracker = self.progress_tracker
@@ -348,7 +347,7 @@ class RichStatusManager:
         exc_tb: object | None,
     ) -> None:
         """Exit context and restore previous tracker."""
-        global _current_progress_tracker
+        global _current_progress_tracker  # noqa: PLW0603
         with _status_lock:
             _current_progress_tracker = self._previous_tracker
 

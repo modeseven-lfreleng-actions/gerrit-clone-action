@@ -228,7 +228,7 @@ def _apply_filters(projects: list[Project], config: Config) -> list[Project]:
     include_pats = getattr(config, "include_projects", None)
     exclude_pats = getattr(config, "exclude_projects", None)
     if include_pats or exclude_pats:
-        from gerrit_clone.models import filter_projects
+        from gerrit_clone.models import filter_projects  # noqa: PLC0415
 
         before_count = len(filtered)
         filtered = filter_projects(

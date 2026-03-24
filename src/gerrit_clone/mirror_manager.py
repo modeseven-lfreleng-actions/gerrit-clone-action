@@ -13,8 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from gerrit_clone.clone_manager import CloneManager
@@ -30,9 +29,13 @@ from gerrit_clone.github_api import (
     transform_gerrit_name_to_github,
 )
 from gerrit_clone.logging import get_logger
-from gerrit_clone.models import CloneStatus, Config, Project
-from gerrit_clone.progress import ProgressTracker
+from gerrit_clone.models import CloneStatus, Config, Project, filter_projects
 from gerrit_clone.rate_limit import TokenBucketLimiter
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from gerrit_clone.progress import ProgressTracker
 
 logger = get_logger(__name__)
 
@@ -889,7 +892,7 @@ class MirrorManager:
             # Check for Gerrit parent project
             if is_gerrit_parent_project(local_path):
                 logger.info(
-                    "ℹ️  %s/%s is a Gerrit parent project "
+                    "ℹ️  %s/%s is a Gerrit parent project "  # noqa: RUF001
                     "(HEAD → refs/meta/config, no branches) — "
                     "no default branch to set",
                     self.github_org,
@@ -902,7 +905,7 @@ class MirrorManager:
             branches = list_local_branches(local_path)
             if not branches:
                 logger.info(
-                    "ℹ️  %s/%s has no branches under refs/heads/; "
+                    "ℹ️  %s/%s has no branches under refs/heads/; "  # noqa: RUF001
                     "cannot set a default branch",
                     self.github_org,
                     github_name,
@@ -970,7 +973,7 @@ class MirrorManager:
     def _push_to_github_from_clone_result_optimized(
         self,
         clone_result: Any,
-        existing_repos: dict[str, dict[str, Any]],
+        existing_repos: dict[str, dict[str, Any]],  # noqa: ARG002
         repos_lookup: dict[str, GitHubRepo],
     ) -> MirrorResult:
         """Convert a CloneResult to MirrorResult by pushing to GitHub.
@@ -1008,27 +1011,26 @@ class MirrorManager:
             )
 
         # If clone was skipped, mark as skipped
-        if clone_result.status == CloneStatus.ALREADY_EXISTS:
-            if not self.recreate:
-                logger.info(
-                    f"Repository already exists: {clone_result.project.name}, "
-                    f"skipping GitHub push (use --recreate to update)"
-                )
-                completed_at = datetime.now(UTC)
-                duration = (completed_at - started_at).total_seconds()
-                github_url = (
-                    f"https://github.com/{self.github_org}/{github_name}"
-                )
-                return MirrorResult(
-                    project=clone_result.project,
-                    github_name=github_name,
-                    github_url=github_url,
-                    status=MirrorStatus.SKIPPED,
-                    local_path=local_path,
-                    duration_seconds=duration,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                )
+        if clone_result.status == CloneStatus.ALREADY_EXISTS and not self.recreate:
+            logger.info(
+                f"Repository already exists: {clone_result.project.name}, "
+                f"skipping GitHub push (use --recreate to update)"
+            )
+            completed_at = datetime.now(UTC)
+            duration = (completed_at - started_at).total_seconds()
+            github_url = (
+                f"https://github.com/{self.github_org}/{github_name}"
+            )
+            return MirrorResult(
+                project=clone_result.project,
+                github_name=github_name,
+                github_url=github_url,
+                status=MirrorStatus.SKIPPED,
+                local_path=local_path,
+                duration_seconds=duration,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
 
         try:
             # Get GitHub repo from lookup (was created/reused in batch)
@@ -1179,15 +1181,13 @@ def filter_projects_by_hierarchy(
     Returns:
         Filtered list of projects.
     """
-    from gerrit_clone.models import filter_projects as _filter_projects
-
     include = filter_names if filter_names else None
     exclude = exclude_patterns if exclude_patterns else None
 
     if not include and not exclude:
         return projects
 
-    filtered = _filter_projects(
+    filtered = filter_projects(
         projects,
         include_patterns=include,
         exclude_patterns=exclude,

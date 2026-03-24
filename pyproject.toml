@@ -193,6 +193,7 @@ ignore = [
     "E501",   # line too long, handled by formatter
     "PLR0913", # too many arguments
     "PLR0912", # too many branches
+    "PLR0915", # too many statements — CLI commands and managers are complex by design
     "PLR2004", # magic value used in comparison
 ]
 
@@ -203,6 +204,7 @@ ignore = [
 "src/gerrit_clone/pathing.py" = ["PLR0911", "TCH003"]  # Complex path checking logic and Path import needed at runtime
 "src/gerrit_clone/retry.py" = ["TCH003", "TCH001", "SIM103"]  # Type checking imports and condition simplification
 "src/gerrit_clone/worker.py" = ["PLR0911", "SIM103", "B904"]  # Complex error handling logic
+"src/gerrit_clone/refresh_worker.py" = ["PLR0911"]  # Complex refresh logic with many early returns
 "src/gerrit_clone/output_utils.py" = ["TCH001", "TCH002", "TCH003"]  # logging and Rich imports needed at runtime
 
 [tool.ruff.format]

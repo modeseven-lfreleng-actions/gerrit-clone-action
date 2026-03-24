@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -39,6 +40,8 @@ try:
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
+
+import contextlib
 
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project
@@ -103,8 +106,6 @@ class ProgressTracker:
                 self._progress = None
                 self._live = None
             else:
-                from rich.console import Console
-
                 self.console = console or Console(
                     stderr=True,  # Use stderr to avoid interfering with piped output
                     force_terminal=self._mode == ProgressMode.RICH_PERIODIC,
@@ -168,14 +169,6 @@ class ProgressTracker:
             return
 
         # Create progress bar
-        from rich.progress import (
-            BarColumn,
-            MofNCompleteColumn,
-            Progress,
-            SpinnerColumn,
-            TextColumn,
-        )
-
         columns = [
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -239,8 +232,6 @@ class ProgressTracker:
             )
 
             # Initialize Live display for fixed progress area
-            from rich.live import Live
-
             display_content = self._create_display()
             self._live = Live(
                 display_content,
@@ -257,10 +248,8 @@ class ProgressTracker:
             logger.warning(f"Error starting Rich periodic display: {e}")
             # Ensure Live display is properly stopped if it was partially started
             if self._live:
-                try:
+                with contextlib.suppress(Exception):
                     self._live.stop()
-                except Exception:
-                    pass
                 self._live = None
             # Fall back to simple mode
             self._mode = ProgressMode.RICH_SIMPLE
@@ -473,10 +462,8 @@ class ProgressTracker:
             except Exception as e:
                 logger.debug(f"Error updating live display: {e}")
                 # If Live display fails, fall back to simple mode to prevent further issues
-                try:
+                with contextlib.suppress(Exception):
                     self._live.stop()
-                except Exception:
-                    pass
                 self._live = None
                 self._mode = ProgressMode.RICH_SIMPLE
         elif (
@@ -535,14 +522,12 @@ class ProgressTracker:
             except Exception as e:
                 logger.debug(f"Error updating live display: {e}")
                 # If Live display fails, fall back to simple mode
-                try:
+                with contextlib.suppress(Exception):
                     self._live.stop()
-                except Exception:
-                    pass
                 self._live = None
                 self._mode = ProgressMode.RICH_SIMPLE
 
-    def set_status(self, message: str, temp: bool = False) -> None:
+    def set_status(self, message: str, temp: bool = False) -> None:  # noqa: ARG002
         """Set a status message that integrates with the progress display.
 
         Args:
@@ -550,8 +535,6 @@ class ProgressTracker:
             temp: If True, message is temporary and will be replaced by next update
         """
         # Strip ANSI codes and emojis that might interfere with Rich formatting
-        import re
-
         clean_message = re.sub(r"\x1b\[[0-9;]*m", "", message)
         clean_message = re.sub(r"[🌐🔍✅🚀🎉❌⚠️]", "", clean_message).strip()
 
@@ -707,13 +690,6 @@ class ProgressTracker:
         if self._progress:
             # Create fresh progress bar with current values
             summary = self._get_summary_unsafe()
-            from rich.progress import (
-                Progress,
-                BarColumn,
-                TextColumn,
-                MofNCompleteColumn,
-                SpinnerColumn,
-            )
 
             # Calculate manual elapsed time to avoid reset
             if self._start_time:
@@ -735,7 +711,7 @@ class ProgressTracker:
                 TextColumn("[progress.elapsed]{task.fields[elapsed]}"),
                 expand=True,
             )
-            task = fresh_progress.add_task(
+            fresh_progress.add_task(
                 "Cloning repositories",
                 completed=summary["completed"],
                 total=summary["total"],
@@ -755,17 +731,12 @@ class ProgressTracker:
         if len(content_parts) == 1:
             main_content = content_parts[0]
         else:
-            from rich.console import Group
-
             main_content = Group(*content_parts)
 
         # Add log message line
-        from rich.console import Group
-        from rich.text import Text
-
         log_message = self.get_current_log_message()
         log_line = Text.from_markup(
-            f"[dim]ℹ️  {log_message}[/dim]" if log_message else "[dim]Ready...[/dim]",
+            f"[dim]ℹ️  {log_message}[/dim]" if log_message else "[dim]Ready...[/dim]",  # noqa: RUF001
             overflow="fold",
         )
 
@@ -776,8 +747,6 @@ class ProgressTracker:
             display_content = Group(main_content, "", log_line)
 
         # Create panel with status
-        from rich.panel import Panel
-
         return Panel(
             display_content,
             title="Repository Clone Progress",
@@ -789,8 +758,6 @@ class ProgressTracker:
         """Create table showing project status."""
         if not RICH_AVAILABLE:
             return ""
-
-        from rich.table import Table
 
         table = Table(show_header=True, header_style="bold blue", show_lines=False)
         table.add_column("Project", style="cyan", no_wrap=True)
@@ -852,8 +819,6 @@ class ProgressTracker:
         }
 
         icon, style = status_map.get(status, ("?", "white"))
-        from rich.text import Text
-
         return Text(icon, style=style)
 
     def _format_duration(self, duration: timedelta) -> str:
@@ -908,9 +873,6 @@ def create_simple_progress_display(
         return None
 
     try:
-        from rich.console import Console
-        from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
-
         console = Console(stderr=True)
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),

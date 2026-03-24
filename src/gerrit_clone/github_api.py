@@ -751,7 +751,7 @@ class GitHubAPI:
             )
         return False, error
 
-    async def _create_repo_async_with_client(
+    async def _create_repo_async_with_client(  # noqa: PLR0911
         self,
         client: httpx.AsyncClient,
         name: str,

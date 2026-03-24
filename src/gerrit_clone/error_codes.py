@@ -12,6 +12,7 @@ similar to github2gerrit-action for better automation and debugging.
 from __future__ import annotations
 
 import sys
+import urllib.error
 from enum import IntEnum
 from typing import NoReturn
 
@@ -261,19 +262,19 @@ def is_network_error(exception: Exception) -> bool:
     Returns:
         True if exception indicates network connectivity issues
     """
-    import urllib.error
-
     # Try to import requests exceptions if available (optional dependency)
     try:
-        from requests.exceptions import (
+        from requests.exceptions import (  # noqa: PLC0415
             ConnectionError as RequestsConnectionError,
+        )
+        from requests.exceptions import (  # noqa: PLC0415
             Timeout as RequestsTimeout,
         )
 
         # Check for common network-related exceptions
         if isinstance(
             exception,
-            (RequestsConnectionError, RequestsTimeout, urllib.error.URLError),
+            RequestsConnectionError | RequestsTimeout | urllib.error.URLError,
         ):
             return True
     except ImportError:

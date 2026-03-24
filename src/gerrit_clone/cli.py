@@ -9,8 +9,10 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
+from shutil import rmtree
 from typing import Any
 
 import typer
@@ -534,7 +536,7 @@ def clone(
 
     try:
         # Auto-detect source type if not specified
-        from gerrit_clone.github_discovery import detect_github_source, parse_github_url
+        from gerrit_clone.github_discovery import detect_github_source, parse_github_url  # noqa: PLC0415, I001
 
         detected_source_type = SourceType.GERRIT
         detected_github_org = github_org
@@ -547,7 +549,7 @@ def clone(
                 console.print(
                     f"[red]Error:[/red] Invalid source type '{source_type}'. Must be 'gerrit' or 'github'"
                 )
-                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from None
         elif detect_github_source(host):
             # Auto-detect GitHub from host
             detected_source_type = SourceType.GITHUB
@@ -556,17 +558,16 @@ def clone(
             if org:
                 detected_github_org = org
             console.print(
-                f"[cyan]ℹ[/cyan] Auto-detected GitHub source from host: {host}"
+                f"[cyan]ℹ[/cyan] Auto-detected GitHub source from host: {host}"  # noqa: RUF001
             )
 
         # Validate GitHub-specific requirements
-        if detected_source_type == SourceType.GITHUB:
-            if not detected_github_org:
-                console.print(
-                    "[red]Error:[/red] GitHub organization/user not specified. "
-                    "Use --github-org or include in --host (e.g., github.com/ORG)"
-                )
-                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+        if detected_source_type == SourceType.GITHUB and not detected_github_org:
+            console.print(
+                "[red]Error:[/red] GitHub organization/user not specified. "
+                "Use --github-org or include in --host (e.g., github.com/ORG)"
+            )
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
 
         # Validate mutually exclusive options
         if verbose and quiet:
@@ -638,7 +639,7 @@ def clone(
         )
 
         # Set log_file_path for error handling compatibility
-        from gerrit_clone.file_logging import get_default_log_path
+        from gerrit_clone.file_logging import get_default_log_path  # noqa: PLC0415
 
         log_file_path = log_file if log_file else get_default_log_path(host, Path(output_path) if output_path else None)
 
@@ -680,10 +681,10 @@ def clone(
                     console.print(
                         "[red]Error:[/red] No .netrc file found and --netrc-required set"
                     )
-                    raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+                    raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from None
             except NetrcParseError as e:
                 console.print(f"[red]Error:[/red] Failed to parse .netrc file: {e}")
-                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
 
         # Log version to file in GitHub Actions environment (file only, no console)
         if _is_github_actions_context():
@@ -707,16 +708,15 @@ def clone(
                     border_style="red",
                 )
             )
-            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from None
 
         # Auto-adjust discovery method for GitHub
-        if detected_source_type == SourceType.GITHUB:
-            if discovery_method_enum not in [DiscoveryMethod.GITHUB_API, DiscoveryMethod.HTTP]:
-                discovery_method_enum = DiscoveryMethod.GITHUB_API
-                if not quiet:
-                    console.print(
-                        "[cyan]ℹ[/cyan] Using GitHub API discovery for GitHub source"
-                    )
+        if detected_source_type == SourceType.GITHUB and discovery_method_enum not in [DiscoveryMethod.GITHUB_API, DiscoveryMethod.HTTP]:
+            discovery_method_enum = DiscoveryMethod.GITHUB_API
+            if not quiet:
+                console.print(
+                    "[cyan]ℹ[/cyan] Using GitHub API discovery for GitHub source"  # noqa: RUF001
+                )
 
         # Load and validate configuration
         try:
@@ -774,7 +774,7 @@ def clone(
                     border_style="red",
                 )
             )
-            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
 
         # Show startup banner if not quiet
         if not quiet:
@@ -795,7 +795,7 @@ def clone(
                     border_style="red",
                 )
             )
-            raise typer.Exit(ExitCode.DISCOVERY_ERROR)
+            raise typer.Exit(ExitCode.DISCOVERY_ERROR) from e
 
         # Show final results summary using Rich
         if not quiet:
@@ -827,8 +827,6 @@ def clone(
 
         # Optional cleanup
         if cleanup:
-            from shutil import rmtree
-
             try:
                 if file_logger:
                     file_logger.debug(
@@ -871,8 +869,6 @@ def clone(
             error_collector.write_summary_to_file(log_file_path)
         raise
     except Exception as e:
-        import traceback
-
         # Get the crash context from the traceback
         tb = traceback.extract_tb(e.__traceback__)
         crash_context = "unknown"
@@ -1169,7 +1165,7 @@ def refresh(
     # Initialize logging
     cli_args = cli_args_to_dict(**locals())
 
-    from gerrit_clone.file_logging import get_default_log_path
+    from gerrit_clone.file_logging import get_default_log_path  # noqa: PLC0415
 
     log_file_path = get_default_log_path("refresh", output_path)
 
@@ -1262,16 +1258,15 @@ def refresh(
         # Flush console to ensure message is displayed before exit
         if hasattr(console.file, "flush"):
             console.file.flush()
-        raise typer.Exit(ExitCode.INTERRUPT.value)
+        raise typer.Exit(ExitCode.INTERRUPT.value) from None
     except typer.Exit:
         # Re-raise typer.Exit without catching it
         raise
     except Exception as e:
         console.print(f"[red]❌ Refresh failed: {e}[/red]")
         if verbose:
-            import traceback
             console.print(traceback.format_exc())
-        raise typer.Exit(ExitCode.GENERAL_ERROR.value)
+        raise typer.Exit(ExitCode.GENERAL_ERROR.value) from e
 
 
 def _show_refresh_results(console: Console, result: RefreshBatchResult, dry_run: bool) -> None:
@@ -1657,10 +1652,10 @@ def mirror(
                     console.print(
                         "[red]Error:[/red] No .netrc file found and --netrc-required set"
                     )
-                    raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+                    raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from None
             except NetrcParseError as e:
                 console.print(f"[red]Error:[/red] Failed to parse .netrc file: {e}")
-                raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
 
         # Show startup banner
         if not quiet:
@@ -1671,7 +1666,7 @@ def mirror(
         # messages from downstream modules (github_api, mirror_manager)
         # reach the console.  Without this, only WARNING+ would be
         # visible via Python's lastResort handler.
-        from gerrit_clone.file_logging import get_default_log_path
+        from gerrit_clone.file_logging import get_default_log_path  # noqa: PLC0415
 
         log_file_path = get_default_log_path(server, output_path)
         file_logger, error_collector = init_logging(
@@ -1709,13 +1704,13 @@ def mirror(
             github_api = GitHubAPI(token=github_token)
         except GitHubAuthError as e:
             console.print(f"[red]Error:[/red] {e}")
-            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
 
         # Determine target org/user
         if org is None:
             if not quiet:
                 console.print(
-                    "ℹ️ No organization specified, "
+                    "ℹ\uFE0F No organization specified, "  # noqa: RUF001
                     "using default from GitHub token..."
                 )
             org, is_org = get_default_org_or_user(github_api)
@@ -1748,7 +1743,7 @@ def mirror(
             )
 
         # Build Gerrit configuration
-        from gerrit_clone.models import Config
+        from gerrit_clone.models import Config  # noqa: PLC0415
 
         # Validate discovery method
         try:
@@ -1764,7 +1759,7 @@ def mirror(
                     border_style="red",
                 )
             )
-            raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+            raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from None
 
         config = Config(
             host=server,
@@ -1849,7 +1844,7 @@ def mirror(
         # Write manifest
         manifest_path = output_path / manifest_filename
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(manifest_path, "w") as f:
+        with manifest_path.open("w") as f:
             json.dump(batch_result.to_dict(), f, indent=2)
 
         if not quiet:
@@ -1917,7 +1912,7 @@ def mirror(
             error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
-        raise typer.Exit(ExitCode.GENERAL_ERROR)
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from e
     except DiscoveryError as e:
         console.print(f"[red]Discovery Error:[/red] {e}")
         if file_logger:
@@ -1926,7 +1921,7 @@ def mirror(
             error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
-        raise typer.Exit(ExitCode.DISCOVERY_ERROR)
+        raise typer.Exit(ExitCode.DISCOVERY_ERROR) from e
     except ConfigurationError as e:
         console.print(f"[red]Configuration Error:[/red] {e}")
         if file_logger:
@@ -1935,7 +1930,7 @@ def mirror(
             error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
-        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     except KeyboardInterrupt:
         console.print("\n[yellow]Mirror operation cancelled by user[/yellow]")
         if file_logger:
@@ -1945,7 +1940,7 @@ def mirror(
         # Flush console to ensure message is displayed before exit
         if hasattr(console.file, "flush"):
             console.file.flush()
-        raise typer.Exit(ExitCode.INTERRUPT)
+        raise typer.Exit(ExitCode.INTERRUPT) from None
     except typer.Exit:
         # Re-raise typer.Exit without catching it
         if error_collector and log_file_path:
@@ -1967,7 +1962,7 @@ def mirror(
             error_collector.write_summary_to_file(log_file_path)
         if verbose:
             console.print_exception()
-        raise typer.Exit(ExitCode.GENERAL_ERROR)
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from e
 
 
 @app.command()
@@ -1979,7 +1974,7 @@ def reset(
         envvar="GITHUB_ORG",
     ),
     path: Path = typer.Option(
-        Path("."),
+        Path(),
         "--path",
         help="Local Gerrit clone folder hierarchy (default: current directory)",
         envvar="GERRIT_CLONE_PATH",
@@ -2083,7 +2078,7 @@ def reset(
 
         # Initialize unified logging (file + console), consistent with
         # clone/refresh/mirror subcommands.
-        from gerrit_clone.file_logging import get_default_log_path
+        from gerrit_clone.file_logging import get_default_log_path  # noqa: PLC0415
 
         log_file_path = get_default_log_path(f"reset-{org}", path)
         file_logger, error_collector = init_logging(
@@ -2183,21 +2178,21 @@ def reset(
             file_logger.error("GitHub authentication error: %s", str(e))
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
-        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     except GitHubAPIError as e:
         console.print(f"[red]❌ GitHub API error:[/red] {e}")
         if file_logger:
             file_logger.error("GitHub API error: %s", str(e))
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
-        raise typer.Exit(ExitCode.GENERAL_ERROR)
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from e
     except KeyboardInterrupt:
         console.print("\n❌ Reset cancelled by user")
         if file_logger:
             file_logger.warning("Reset cancelled by user (KeyboardInterrupt)")
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except typer.Exit:
         # Re-raise typer.Exit exceptions without catching them as generic exceptions
         if error_collector and log_file_path:
@@ -2218,9 +2213,8 @@ def reset(
         if error_collector and log_file_path:
             error_collector.write_summary_to_file(log_file_path)
         if verbose:
-            import traceback
             console.print(traceback.format_exc())
-        raise typer.Exit(ExitCode.GENERAL_ERROR)
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from e
 
 
 @app.command(name="config")
@@ -2307,13 +2301,13 @@ def show_config(
                 border_style="red",
             )
         )
-        raise typer.Exit(ExitCode.CONFIGURATION_ERROR)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     except typer.Exit:
         # Re-raise typer.Exit without catching it
         raise
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(ExitCode.GENERAL_ERROR) from None
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from e
 
 
 if __name__ == "__main__":

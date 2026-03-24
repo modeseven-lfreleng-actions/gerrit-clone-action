@@ -382,10 +382,10 @@ class ConfigManager:
             if isinstance(dm, str):
                 try:
                     config_dict["discovery_method"] = DiscoveryMethod(dm.lower())
-                except ValueError:
+                except ValueError as err:
                     raise ConfigurationError(
                         f"Invalid discovery_method '{dm}'. Must be one of: ssh, http, both"
-                    )
+                    ) from err
 
         # Handle source_type conversion
         if "source_type" in config_dict:
@@ -393,10 +393,10 @@ class ConfigManager:
             if isinstance(st, str):
                 try:
                     config_dict["source_type"] = SourceType(st.lower())
-                except ValueError:
+                except ValueError as err:
                     raise ConfigurationError(
                         f"Invalid source_type '{st}'. Must be one of: gerrit, github"
-                    )
+                    ) from err
 
         # Smart port defaulting based on protocol and source type
         source_type = config_dict.get("source_type", SourceType.GERRIT)

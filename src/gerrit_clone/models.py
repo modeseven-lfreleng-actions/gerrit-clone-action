@@ -307,10 +307,9 @@ class Config:
             raise ValueError("host is required")
 
         # Set default port based on source type if not explicitly provided
-        if self.port is None:
-            if self.source_type == SourceType.GERRIT:
-                # Default Gerrit SSH port
-                self.port = 29418
+        if self.port is None and self.source_type == SourceType.GERRIT:
+            # Default Gerrit SSH port
+            self.port = 29418
             # For GitHub, leave port as None (not used)
 
         # Validate port range for Gerrit sources
@@ -374,7 +373,9 @@ class Config:
         # Generate base_url if not provided
         if self.base_url is None:
             if self.source_type == SourceType.GERRIT:
-                from gerrit_clone.discovery import discover_gerrit_base_url
+                from gerrit_clone.discovery import (  # noqa: PLC0415
+                    discover_gerrit_base_url,
+                )
 
                 try:
                     self.base_url = discover_gerrit_base_url(self.host)
