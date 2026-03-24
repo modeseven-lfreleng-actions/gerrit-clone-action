@@ -180,7 +180,7 @@ def success_rate(rate: float, failed_count: int) -> None:
 def show_error_summary(
     console: Console, errors: list[str], warnings: list[str] | None = None
 ) -> None:
-    """Show error summary in a Rich panel at the end of execution.
+    """Show error/warning summary in plain text matching Mirror Summary style.
 
     Args:
         console: Rich console instance
@@ -190,36 +190,29 @@ def show_error_summary(
     if not errors and not warnings:
         return
 
-    # Build summary content
-    content_lines = []
-
     if errors:
-        content_lines.append(f"[red]Errors ({len(errors)}):[/red]")
-        for i, error in enumerate(errors[:5], 1):  # Show max 5 errors
-            content_lines.append(f"  {i}. {error}")
+        console.print(
+            f"[bold red]Issues Summary ({len(errors)} "
+            f"error{'s' if len(errors) != 1 else ''})[/bold red]"
+        )
+        for i, error in enumerate(errors[:5], 1):
+            console.print(f"  [red]{i}. {error}[/red]")
         if len(errors) > 5:
-            content_lines.append(f"  ... and {len(errors) - 5} more errors")
-        content_lines.append("")
+            console.print(
+                f"  [red]... and {len(errors) - 5} more[/red]"
+            )
 
     if warnings:
-        content_lines.append(f"[yellow]Warnings ({len(warnings)}):[/yellow]")
-        for i, warning in enumerate(warnings[:3], 1):  # Show max 3 warnings
-            content_lines.append(f"  {i}. {warning}")
-        if len(warnings) > 3:
-            content_lines.append(f"  ... and {len(warnings) - 3} more warnings")
-
-    if content_lines:
-        summary_text = Text.from_markup("\n".join(content_lines))
-        panel = Panel(
-            summary_text,
-            title="[bold red]Issues Summary[/bold red]"
-            if errors
-            else "[bold yellow]Warnings Summary[/bold yellow]",
-            border_style="red" if errors else "yellow",
-            padding=(1, 2),
+        console.print(
+            f"[bold yellow]Warnings Summary ({len(warnings)} "
+            f"warning{'s' if len(warnings) != 1 else ''})[/bold yellow]"
         )
-        console.print("\n")
-        console.print(panel)
+        for i, warning in enumerate(warnings[:5], 1):
+            console.print(f"  [yellow]{i}. {warning}[/yellow]")
+        if len(warnings) > 5:
+            console.print(
+                f"  [yellow]... and {len(warnings) - 5} more[/yellow]"
+            )
 
 
 def show_final_results(

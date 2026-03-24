@@ -1660,7 +1660,6 @@ def mirror(
         # Show startup banner
         if not quiet:
             console.print(_format_version_string(command="mirror"))
-            console.print()
 
         # Initialize logging so that logger.info / logger.warning
         # messages from downstream modules (github_api, mirror_manager)
@@ -1809,7 +1808,6 @@ def mirror(
                 f"📦 Found [cyan]{len(projects_to_mirror)}[/cyan] "
                 f"projects to mirror"
             )
-            console.print()
 
         # Create mirror manager
         mirror_manager = MirrorManager(
@@ -1848,14 +1846,12 @@ def mirror(
             json.dump(batch_result.to_dict(), f, indent=2)
 
         if not quiet:
-            console.print()
             console.print(
                 f"✓ Manifest written to: [cyan]{manifest_path}[/cyan]"
             )
 
         # Show summary
         if not quiet:
-            console.print()
             console.print("[bold]Mirror Summary[/bold]")
             console.print(f"  Discovery Method: [cyan]{discovery_enum.value.upper()}[/cyan]")
             console.print(f"  Clone Protocol: [cyan]{'HTTPS' if use_https else 'SSH'}[/cyan]")
@@ -1864,12 +1860,13 @@ def mirror(
             console.print(
                 f"  [green]Succeeded: {batch_result.success_count}[/green]"
             )
-            console.print(
-                f"  [red]Failed: {batch_result.failed_count}[/red]"
-            )
-            console.print(
-                f"  [yellow]Skipped: {batch_result.skipped_count}[/yellow]"
-            )
+            if batch_result.total_count != batch_result.success_count:
+                console.print(
+                    f"  [red]Failed: {batch_result.failed_count}[/red]"
+                )
+                console.print(
+                    f"  [yellow]Skipped: {batch_result.skipped_count}[/yellow]"
+                )
             console.print(
                 f"  Duration: {batch_result.duration_seconds:.1f}s"
             )
