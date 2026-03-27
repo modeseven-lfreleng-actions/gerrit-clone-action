@@ -8,6 +8,12 @@ name: 'Python Build/Test'
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: 'Clear all Python dependency caches'
+        type: boolean
+        default: false
+        required: false
   pull_request:
     types: [opened, reopened, edited, synchronize]
     branches:
@@ -26,6 +32,35 @@ concurrency:
 permissions: {}
 
 jobs:
+  repository-metadata:
+    name: "Repository Metadata"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: "Gather repository metadata"
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@ceabcd987d13d7bfefd2372e01eebb0ddac45956  # v0.2.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_summary: 'true'
+          gerrit_summary: 'false'
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
   python-build:
     name: 'Python Build'
     runs-on: 'ubuntu-latest'
@@ -35,23 +70,26 @@ jobs:
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
     permissions:
       contents: read
+      actions: write  # Required for cache deletion when clear_cache is true
     timeout-minutes: 12
     env:
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
         with:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: 'Build Python project'
         id: python-build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-build-action@7ff456c72f1dd50ef212ea7222efc12693221af3 # v1.0.4
+        uses: lfreleng-actions/python-build-action@7ff456c72f1dd50ef212ea7222efc12693221af3  # v1.0.4
+        with:
+          clear_cache: ${{ github.event.inputs.clear_cache || 'false' }}
 
   python-tests:
     name: 'Python Tests'
@@ -67,16 +105,16 @@ jobs:
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
         with:
           egress-policy: audit
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: "Python tests [pytest] ${{ matrix.python-version }}"
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-test-action@92d4110d44ebc18fa4575c6b00203ff67d01a1cb # v1.0.1
+        uses: lfreleng-actions/python-test-action@92d4110d44ebc18fa4575c6b00203ff67d01a1cb  # v1.0.1
         with:
           python_version: ${{ matrix.python-version }}
 
@@ -94,19 +132,19 @@ jobs:
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
         with:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: "Audit dependencies ${{ matrix.python-version }}"
-        continue-on-error: true
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-audit-action@1776538e768c52c55c3c96495f6e25f0762ad28f # v0.2.6
+        uses: lfreleng-actions/python-audit-action@1776538e768c52c55c3c96495f6e25f0762ad28f  # v0.2.6
         with:
           python_version: "${{ matrix.python-version }}"
+          permit_fail: "${{ vars.NO_BLOCK_AUDIT_FAIL == 'true' }}"
 
   sbom:
     name: 'Generate SBOM'
@@ -137,14 +175,71 @@ jobs:
             sbom-cyclonedx.xml
           retention-days: 45
 
-      - name: "Security scan with Grype"
+      - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        id: grype-sarif
+        # The first Grype scan should not abort the job on failure so that
+        # subsequent steps can collect artefacts and display human-readable
+        # results; the final check step will fail the job if needed
+        continue-on-error: true
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "sarif"
+          output-file: "grype-results.sarif"
+          fail-build: "true"
 
-      - name: "Summary step"
+      - name: "Security scan with Grype (Text/Table)"
+        # yamllint disable-line rule:line-length
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        id: grype-table
+        if: always()
+        with:
+          sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "table"
+          output-file: "grype-results.txt"
+          fail-build: "false"
+
+      - name: "Upload Grype scan results"
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        if: always()
+        with:
+          name: grype-scan-results
+          path: |
+            grype-results.sarif
+            grype-results.txt
+          retention-days: 90
+
+      - name: "Grype summary"
+        if: always()
         run: |
-            # Summary step
-            echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
-            echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+            # Grype summary
+            {
+              echo "## SBOM Summary"
+              echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
+              echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+              echo ""
+              echo "## Grype Vulnerability Scan"
+              if [ -f grype-results.txt ]; then
+                cat grype-results.txt
+              else
+                echo "No scan results available"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -f grype-results.txt ]; then
+              echo "--- Grype scan results ---"
+              cat grype-results.txt
+            fi
+
+      - name: "Check Grype scan results"
+        if: >-
+          steps.grype-sarif.outcome == 'failure'
+          && vars.NO_BLOCK_AUDIT_FAIL != 'true'
+        run: |
+            # Check Grype scan results
+            echo "::error::Grype found vulnerabilities" \
+              "at or above severity threshold"
+            echo "Review the Grype Summary above or download the" \
+              "grype-scan-results artifact for details"
+            exit 1
