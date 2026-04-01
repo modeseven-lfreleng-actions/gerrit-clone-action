@@ -170,7 +170,7 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -266,7 +266,7 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -317,14 +317,13 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
 
             with patch("gerrit_clone.clone_manager.discover_projects") as mock_discover:
                 mock_discover.return_value = ([github_project], {})
-
                 clone_repositories(github_config)
 
                 # Verify merge strategy is used
@@ -349,7 +348,7 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -385,7 +384,7 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -483,7 +482,7 @@ class TestGitHubRefreshInCloneManager:
             duration_seconds=0.1,
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -520,7 +519,7 @@ class TestGitHubRefreshInCloneManager:
             error_message="git fetch failed: unable to connect",
         )
 
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.return_value = mock_refresh_result
             MockRefreshWorker.return_value = mock_worker
@@ -553,7 +552,7 @@ class TestGitHubRefreshInCloneManager:
     ) -> None:
         """Test that refresh exceptions include the project name in the error message."""
         # Mock a refresh exception
-        with patch("gerrit_clone.refresh_worker.RefreshWorker") as MockRefreshWorker:
+        with patch("gerrit_clone.clone_manager.RefreshWorker") as MockRefreshWorker:
             mock_worker = Mock()
             mock_worker.refresh_repository.side_effect = RuntimeError(
                 "Unexpected error"
@@ -616,7 +615,7 @@ class TestGitHubRefreshInCloneManager:
         # Don't create any commits - this simulates an empty repository
 
         # Mock get_current_commit_sha to return None (empty local repo)
-        with patch("gerrit_clone.git_utils.get_current_commit_sha") as mock_get_sha:
+        with patch("gerrit_clone.clone_manager.get_current_commit_sha") as mock_get_sha:
             mock_get_sha.return_value = None  # No commits locally
 
             with patch("gerrit_clone.clone_manager.discover_projects") as mock_discover:

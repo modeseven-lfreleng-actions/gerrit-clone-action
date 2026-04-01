@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -235,7 +236,7 @@ def _clone_with_gh_cli(
         )
 
 
-def _clone_with_git(  # noqa: PLR0915
+def _clone_with_git(
     project: Project,
     config: Config,
     target_path: Path,
@@ -430,8 +431,6 @@ def _build_git_env(config: Config) -> dict[str, str]:
     Returns:
         Environment dictionary with git-specific variables
     """
-    import os
-
     env = os.environ.copy()
 
     # Add SSH key if provided
@@ -501,7 +500,6 @@ def _remove_token_from_remote_url(
     except subprocess.CalledProcessError as e:
         # CRITICAL: Token removal failed - this is a security issue
         # Delete the repository to prevent credential leakage
-        import shutil
         try:
             shutil.rmtree(repo_path)
             logger.warning(f"Deleted repository {repo_path} due to token removal failure")
@@ -517,7 +515,6 @@ def _remove_token_from_remote_url(
     except Exception as e:
         # CRITICAL: Unexpected error during token removal
         # Delete the repository to prevent credential leakage
-        import shutil
         try:
             shutil.rmtree(repo_path)
             logger.warning(f"Deleted repository {repo_path} due to token removal failure")

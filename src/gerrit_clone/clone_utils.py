@@ -9,6 +9,7 @@ reducing duplication and ensuring consistent behavior.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -143,7 +144,7 @@ def is_retryable_git_error(error_output: str) -> bool:
     return False
 
 
-def analyze_git_clone_error(error_output: str, project_name: str, host: str | None = None) -> str:  # noqa: PLR0911, PLR0915
+def analyze_git_clone_error(error_output: str, project_name: str, host: str | None = None) -> str:  # noqa: PLR0911
     """Analyze git clone error and provide helpful diagnostic message.
 
     Args:
@@ -186,7 +187,6 @@ def analyze_git_clone_error(error_output: str, project_name: str, host: str | No
         port_match = None
         if "port" in error_lower:
             # Try to extract port number
-            import re
             match = re.search(r"port (\d+)", error_lower)
             if match:
                 port_match = match.group(1)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -225,7 +226,7 @@ def check_path_conflicts(target_path: Path, is_nested_repo: bool = False) -> str
 
     if target_path.is_dir():
         # Check if it's already a git repository (regular or bare)
-        from gerrit_clone.git_utils import is_git_repository
+        from gerrit_clone.git_utils import is_git_repository  # noqa: PLC0415
 
         if is_git_repository(target_path):
             return "already_cloned"  # Special case - not an error
@@ -466,8 +467,6 @@ class AtomicClonePath:
         # This prevents premature cleanup while Git might still be accessing the directory
         if exc_type is not None and not self._finalized:
             # Exception occurred - cleanup temp, but with a delay to ensure Git has finished
-            import time
-
             time.sleep(0.2)  # Brief delay to let Git processes finish
             cleanup_temp_path(self.temp_path)
         # If success case but not finalized, leave temp directory - caller should finalize

@@ -130,7 +130,9 @@ class UnifiedDiscovery:
         """
         logger.debug("Discovering GitHub repositories via API")
         try:
-            from gerrit_clone.github_discovery import discover_github_repositories
+            from gerrit_clone.github_discovery import (  # noqa: PLC0415
+                discover_github_repositories,
+            )
 
             projects, stats = discover_github_repositories(self.config)
             stats["warnings"] = []

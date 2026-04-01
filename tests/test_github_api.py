@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import time as _time
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -17,11 +19,11 @@ from gerrit_clone.github_api import (
     GitHubNotFoundError,
     GitHubRateLimitError,
     GitHubRepo,
-    _AsyncRateLimiter,
     get_default_org_or_user,
     sanitize_description,
     transform_gerrit_name_to_github,
 )
+from gerrit_clone.rate_limit import TokenBucketLimiter
 
 
 class TestSanitizeDescription:
@@ -128,6 +130,7 @@ class TestGitHubRepo:
             "ssh_url": "git@github.com:org/test-repo.git",
             "private": False,
             "description": "Test repository",
+            "default_branch": "main",
         }
 
         repo = GitHubRepo.from_api_response(api_data)
@@ -139,6 +142,7 @@ class TestGitHubRepo:
         assert repo.ssh_url == "git@github.com:org/test-repo.git"
         assert repo.private is False
         assert repo.description == "Test repository"
+        assert repo.default_branch == "main"
 
     def test_from_api_response_no_description(self) -> None:
         """Test creating GitHubRepo without description."""
@@ -156,6 +160,36 @@ class TestGitHubRepo:
         assert repo.name == "test-repo"
         assert repo.description is None
         assert repo.private is True
+        assert repo.default_branch is None
+
+    def test_from_api_response_with_default_branch(self) -> None:
+        """Test that default_branch is captured from API response."""
+        api_data = {
+            "name": "test-repo",
+            "full_name": "org/test-repo",
+            "html_url": "https://github.com/org/test-repo",
+            "clone_url": "https://github.com/org/test-repo.git",
+            "ssh_url": "git@github.com:org/test-repo.git",
+            "private": False,
+            "default_branch": "develop",
+        }
+
+        repo = GitHubRepo.from_api_response(api_data)
+
+        assert repo.default_branch == "develop"
+
+    def test_default_branch_field_defaults_to_none(self) -> None:
+        """Test that GitHubRepo.default_branch defaults to None."""
+        repo = GitHubRepo(
+            name="test-repo",
+            full_name="org/test-repo",
+            html_url="https://github.com/org/test-repo",
+            clone_url="https://github.com/org/test-repo.git",
+            ssh_url="git@github.com:org/test-repo.git",
+            private=False,
+        )
+
+        assert repo.default_branch is None
 
 
 class TestGitHubAPI:
@@ -348,9 +382,14 @@ class TestBatchDeleteRepos:
         """Test successful batch deletion of repositories."""
         api = GitHubAPI(token="test-token")
 
-        # Mock httpx.AsyncClient to return successful responses
-        mock_response = AsyncMock()
+        # Mock httpx.AsyncClient to return successful responses.
+        # Use Mock (not AsyncMock) for the response so that
+        # response.headers.get() returns a plain Mock instead of
+        # an unawaited coroutine — avoids RuntimeWarning from
+        # budget.update_from_headers().
+        mock_response = Mock()
         mock_response.status_code = 204
+        mock_response.headers = {}
 
         mock_client = AsyncMock()
         mock_client.delete = AsyncMock(return_value=mock_response)
@@ -387,13 +426,13 @@ class TestBatchDeleteRepos:
         # (plain "Permission denied" without "rate limit" in the text)
         call_count = [0]
 
-        async def mock_delete_side_effect(*args, **kwargs):
+        async def mock_delete_side_effect(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
+            response.headers = {}
             if "repo2" in args[0]:
                 response.status_code = 403
                 response.text = "Permission denied"
-                response.headers = {}
             else:
                 response.status_code = 204
             return response
@@ -434,7 +473,7 @@ class TestBatchDeleteRepos:
         in_flight = 0
         peak_in_flight = 0
 
-        async def mock_delete_with_delay(*args, **kwargs):
+        async def mock_delete_with_delay(*args: Any, **kwargs: Any):
             nonlocal in_flight, peak_in_flight
             in_flight += 1
             peak_in_flight = max(peak_in_flight, in_flight)
@@ -492,11 +531,12 @@ class TestBatchDeleteRepos:
         """
         api = GitHubAPI(token="test-token")
 
-        async def mock_delete_with_exception(*args, **kwargs):
+        async def mock_delete_with_exception(*args: Any, **kwargs: Any):
             if "repo2" in args[0]:
                 raise Exception("Network error")
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 204
+            response.headers = {}
             return response
 
         mock_client = AsyncMock()
@@ -541,10 +581,11 @@ class TestBatchCreateRepos:
         # Mock httpx.AsyncClient to return successful responses
         call_count = [0]
 
-        async def mock_post(*args, **kwargs):
+        async def mock_post(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             json_data = kwargs.get("json", {})
             name = json_data.get("name", f"repo{call_count[0]}")
             response.json = Mock(
@@ -598,10 +639,11 @@ class TestBatchCreateRepos:
         """Test batch creation with some failures."""
         api = GitHubAPI(token="test-token")
 
-        async def mock_post_with_failure(*args, **kwargs):
+        async def mock_post_with_failure(*args: Any, **kwargs: Any):
             json_data = kwargs.get("json", {})
             name = json_data.get("name", "")
             response = Mock()  # Use Mock, not AsyncMock for response
+            response.headers = {}
 
             if name == "repo2":
                 response.status_code = 422
@@ -620,9 +662,18 @@ class TestBatchCreateRepos:
                 )
             return response
 
+        # For the 422 follow-up GET, return a 404 so the creation is
+        # still recorded as a failure.  Use Mock (not AsyncMock) with
+        # headers={} so budget.update_from_headers() doesn't receive
+        # an AsyncMock (which would produce unawaited-coroutine
+        # RuntimeWarnings from .headers.get()).
+        mock_get_response = Mock()
+        mock_get_response.status_code = 404
+        mock_get_response.headers = {}
+
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=mock_post_with_failure)
-        mock_client.get = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_get_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
@@ -663,10 +714,11 @@ class TestBatchCreateRepos:
 
         call_count = [0]
 
-        async def mock_post_with_delay(*args, **kwargs):
+        async def mock_post_with_delay(*args: Any, **kwargs: Any):
             call_count[0] += 1
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             json_data = kwargs.get("json", {})
             name = json_data.get("name", f"repo{call_count[0]}")
             response.json = Mock(
@@ -720,7 +772,7 @@ class TestBatchCreateRepos:
         """
         api = GitHubAPI(token="test-token")
 
-        async def mock_post_with_exception(*args, **kwargs):
+        async def mock_post_with_exception(*args: Any, **kwargs: Any):
             json_data = kwargs.get("json", {})
             name = json_data.get("name", "")
 
@@ -729,6 +781,7 @@ class TestBatchCreateRepos:
 
             response = Mock()  # Use Mock, not AsyncMock for response
             response.status_code = 201
+            response.headers = {}
             response.json = Mock(
                 return_value={
                     "name": name,
@@ -1469,111 +1522,114 @@ class TestSetDefaultBranch:
                 )
 
 
-class TestAsyncRateLimiterRecovery:
-    """Test _AsyncRateLimiter adaptive recovery via record_success()."""
+class TestTokenBucketLimiterFromGitHubAPI:
+    """Test TokenBucketLimiter rate reduction and recovery.
+
+    These tests replace the old _AsyncRateLimiter tests and verify the
+    new token-bucket behaviour: rate halving on 403, time-based
+    recovery, cascading rate reductions, and min-rate clamping.
+    """
 
     @pytest.mark.asyncio
-    async def test_record_success_reduces_interval_after_threshold(self) -> None:
-        """After N consecutive successes the interval should halve."""
-        limiter = _AsyncRateLimiter(min_interval=1.0)
+    async def test_rate_limit_halves_rate(self) -> None:
+        """Recording a rate limit should halve the refill rate."""
+        limiter = TokenBucketLimiter(rate=1.0, burst=10, min_rate=0.01)
+        assert limiter.rate == 1.0
 
-        # Simulate a rate-limit escalation: 1.0 → 2.0
-        await limiter.increase_interval(factor=2.0)
-        assert limiter.interval == 2.0
-
-        # 4 successes — not yet at the default threshold of 5
-        for _ in range(4):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 2.0  # unchanged
-
-        # 5th success triggers recovery: 2.0 → 1.0 (halved, clamped to original)
-        await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 1.0
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.5
 
     @pytest.mark.asyncio
-    async def test_record_success_never_goes_below_original(self) -> None:
-        """Interval must never drop below the original baseline."""
-        limiter = _AsyncRateLimiter(min_interval=2.0)
+    async def test_rate_never_below_min(self) -> None:
+        """Rate must never drop below min_rate."""
+        limiter = TokenBucketLimiter(rate=1.0, burst=10, min_rate=0.5)
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.5  # Halved to exactly min
 
-        # Escalate: 2.0 → 4.0
-        await limiter.increase_interval(factor=2.0)
-        assert limiter.interval == 4.0
-
-        # 5 successes → halve: 4.0 → 2.0 (original)
-        for _ in range(5):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 2.0
-
-        # Another 5 successes — already at baseline, should stay put
-        for _ in range(5):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 2.0
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.5  # Clamped at min
 
     @pytest.mark.asyncio
-    async def test_increase_resets_success_streak(self) -> None:
-        """A rate-limit hit should reset the consecutive-success counter."""
-        limiter = _AsyncRateLimiter(min_interval=1.0)
+    async def test_cascading_rate_reductions(self) -> None:
+        """Multiple rate-limit hits should keep halving the rate."""
+        limiter = TokenBucketLimiter(rate=2.0, burst=10, min_rate=0.1)
 
-        # Escalate to 2.0
-        await limiter.increase_interval(factor=2.0)
+        await limiter.record_rate_limit()
+        assert limiter.rate == 1.0
 
-        # 4 successes — one short of recovery
-        for _ in range(4):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 2.0
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.5
 
-        # Another rate-limit hit resets the streak and escalates
-        await limiter.increase_interval(factor=2.0)
-        assert limiter.interval == 4.0
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.25
 
-        # Now we need a full 5 successes again
-        for _ in range(4):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 4.0  # still elevated
+        await limiter.record_rate_limit()
+        assert limiter.rate == 0.125
 
-        await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 2.0  # halved from 4.0
+        # Next halving would be 0.0625, but min_rate is 0.1
+        await limiter.record_rate_limit()
+        assert limiter.rate >= 0.1
 
     @pytest.mark.asyncio
-    async def test_gradual_recovery_from_ceiling(self) -> None:
-        """Interval should step down gradually from the 30s ceiling."""
-        limiter = _AsyncRateLimiter(min_interval=2.0)
+    async def test_rate_limit_drains_bucket(self) -> None:
+        """Recording a rate limit should empty the token bucket."""
+        limiter = TokenBucketLimiter(rate=1.0, burst=10)
+        assert limiter.tokens == 10.0
 
-        # Escalate all the way to 30s ceiling
-        for _ in range(5):
-            await limiter.increase_interval(factor=2.0, max_interval=30.0)
-        assert limiter.interval == 30.0
-
-        # Each batch of 5 successes should halve:
-        # 30.0 → 15.0 → 7.5 → 3.75 → 2.0 (clamped to original)
-        expected = [15.0, 7.5, 3.75, 2.0]
-        for exp in expected:
-            for _ in range(5):
-                await limiter.record_success(recovery_threshold=5)
-            assert limiter.interval == exp
+        await limiter.record_rate_limit()
+        assert limiter.tokens == 0.0
 
     @pytest.mark.asyncio
-    async def test_no_recovery_when_already_at_baseline(self) -> None:
-        """record_success should be a no-op when interval is at baseline."""
-        limiter = _AsyncRateLimiter(min_interval=1.0)
-        assert limiter.interval == 1.0
+    async def test_time_based_recovery_full(self) -> None:
+        """Rate should fully recover after recovery_seconds elapse."""
+        limiter = TokenBucketLimiter(
+            rate=1.0, burst=5, min_rate=0.1, recovery_seconds=0.2
+        )
+        await limiter.record_rate_limit()
+        assert limiter.rate < 1.0
 
-        # Many successes — interval should stay at 1.0
+        # Simulate time passing beyond recovery_seconds
+        async with limiter._lock:
+            limiter._last_rate_limit_time = _time.monotonic() - 0.3
+            limiter._tokens = 5.0  # Refill manually for acquire
+
+        # Trigger _refill which checks recovery
+        await limiter.acquire(tokens=1.0)
+        assert limiter.rate == 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_recovery_before_threshold(self) -> None:
+        """Rate should not recover before 50% of recovery_seconds."""
+        limiter = TokenBucketLimiter(
+            rate=1.0, burst=5, min_rate=0.1, recovery_seconds=10.0
+        )
+        await limiter.record_rate_limit()
+        reduced = limiter.rate
+
+        # Simulate only 30% of recovery elapsed — no recovery yet
+        async with limiter._lock:
+            limiter._last_rate_limit_time = _time.monotonic() - 3.0
+            limiter._tokens = 5.0
+
+        await limiter.acquire(tokens=1.0)
+        assert limiter.rate == reduced
+
+    @pytest.mark.asyncio
+    async def test_record_success_is_noop(self) -> None:
+        """record_success should not change the rate (recovery is time-based)."""
+        limiter = TokenBucketLimiter(rate=1.0, burst=5)
+        original = limiter.rate
+
         for _ in range(20):
-            await limiter.record_success(recovery_threshold=5)
-        assert limiter.interval == 1.0
+            await limiter.record_success()
+        assert limiter.rate == original
 
     @pytest.mark.asyncio
-    async def test_custom_recovery_threshold(self) -> None:
-        """Recovery should respect a custom threshold value."""
-        limiter = _AsyncRateLimiter(min_interval=1.0)
-        await limiter.increase_interval(factor=2.0)
-        assert limiter.interval == 2.0
+    async def test_retry_after_sets_global_pause(self) -> None:
+        """Retry-After should set a global pause for all tasks."""
+        limiter = TokenBucketLimiter(rate=10.0, burst=10)
+        await limiter.record_rate_limit(retry_after=30.0)
 
-        # With threshold=3, recovery should happen after 3 successes
-        for _ in range(2):
-            await limiter.record_success(recovery_threshold=3)
-        assert limiter.interval == 2.0  # not yet
-
-        await limiter.record_success(recovery_threshold=3)
-        assert limiter.interval == 1.0  # recovered
+        # The global retry deadline should be set
+        assert limiter._global_retry_until > 0
+        assert limiter.tokens == 0.0

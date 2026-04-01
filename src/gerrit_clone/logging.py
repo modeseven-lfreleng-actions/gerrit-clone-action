@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 Matthew Watkins <mwatkins@linuxfoundation.org>
 
-"""Logging helpers.
+"""Logging helpers with dual-channel architecture.
 
-Phase 1 (Minimal Cleanup):
-- Restored minimal GerritRichHandler and setup_logging ONLY to satisfy existing tests.
-- Removed unused progress-aware and styled helper functions from earlier design.
-- File-based logging continues to live in file_logging.py.
+The root logger is held at WARNING so third-party libraries stay quiet
+by default.  Application output is routed through the ``gerrit_clone``
+logger hierarchy, whose level is unlocked independently by --verbose
+or --quiet.  File-based logging continues to live in file_logging.py.
 """
 
 from __future__ import annotations
@@ -14,12 +14,14 @@ from __future__ import annotations
 import inspect
 import logging
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # Minimal theme (can be expanded later if reused elsewhere)
 GERRIT_THEME = Theme(
@@ -49,26 +51,32 @@ def setup_logging(
     verbose: bool = False,
     console: Console | None = None,
 ) -> logging.Logger:
-    """Minimal logging setup compatible with existing tests.
+    """Set up console logging with dual-channel architecture.
+
+    The root logger is kept at WARNING so third-party libraries stay
+    quiet by default.  ``--verbose`` only enables DEBUG for the
+    ``gerrit_clone`` logger hierarchy, avoiding the need for an
+    ever-growing suppression list.
+
+    In normal mode, application messages should use ``console.print``
+    (or ``log_and_print``) for user-facing output.  The logging
+    subsystem captures everything for file logging and structured
+    diagnostics.
 
     Args:
-        level: Base log level (ignored if quiet/verbose override it)
+        level: Base log level — in normal mode, the console handler
+            is set to ``max(WARNING, level)`` so only WARNING and
+            above reach the terminal.  User-facing output should
+            use ``console.print`` or ``log_and_print`` instead.
+            Defaults to ``"INFO"``.
         quiet: If True, only errors and above
-        verbose: If True, debug logging enabled
+        verbose: If True, debug logging enabled for gerrit_clone
         console: Optional Rich Console to direct output to
     """
-    if quiet:
-        effective_level = logging.ERROR
-    elif verbose:
-        effective_level = logging.DEBUG
-    else:
-        effective_level = getattr(logging, level.upper(), logging.INFO)
-
     if console is None:
         console = Console(theme=GERRIT_THEME, stderr=True)
 
     root = logging.getLogger()
-    root.setLevel(effective_level)
 
     # Clear existing handlers to avoid duplicates in tests
     for h in root.handlers[:]:
@@ -76,27 +84,66 @@ def setup_logging(
 
     handler = GerritRichHandler(
         console=console,
-        show_time=False,  # Keep output compact for tests
+        show_time=verbose,  # Show timestamps in verbose mode
         show_level=True,
-        show_path=False,
+        show_path=verbose,  # Show module path in verbose mode
         markup=True,
         rich_tracebacks=verbose,
         tracebacks_show_locals=verbose,
     )
-    handler.setLevel(effective_level)
     handler.setFormatter(logging.Formatter("%(message)s"))
+
+    # Resolve the caller-supplied level string to a numeric constant
+    # so it can serve as a floor for the handler in normal mode.
+    base_level = getattr(logging, level.upper(), logging.INFO)
+
+    if quiet:
+        # Quiet: only errors reach the console
+        root.setLevel(logging.WARNING)
+        handler.setLevel(logging.ERROR)
+    elif verbose:
+        # Verbose: root stays at WARNING, app logger goes to DEBUG
+        root.setLevel(logging.WARNING)
+        handler.setLevel(logging.DEBUG)
+    else:
+        # Normal: root at WARNING, handler at the higher of WARNING
+        # and the caller-supplied *level*.  User-facing output goes
+        # through console.print / log_and_print.
+        root.setLevel(logging.WARNING)
+        handler.setLevel(max(logging.WARNING, base_level))
 
     root.addHandler(handler)
 
-    # Always suppress noisy third-party HTTP transport modules.
-    # Even in --verbose mode the user wants *application* debug output,
-    # not low-level TCP/TLS/HTTP frame noise from httpx/httpcore.
+    # Unlock the gerrit_clone logger hierarchy based on mode
+    app_logger = logging.getLogger("gerrit_clone")
+    if verbose:
+        desired_app_level = logging.DEBUG
+    elif quiet:
+        desired_app_level = logging.ERROR
+    else:
+        # In normal mode, honour the caller-supplied base level and
+        # avoid overriding a more-verbose configuration that may have
+        # been set up by file_logging.
+        desired_app_level = base_level
+
+    current_level = app_logger.level
+    # Only *lower* (make more verbose) the logger level — never
+    # raise it.  This preserves a DEBUG/INFO level that file_logging
+    # may have already configured, so file output keeps capturing
+    # everything.  --quiet suppresses the *console* via the handler
+    # level (ERROR) set above; it intentionally does NOT touch the
+    # logger level when file logging is active, because the logger
+    # gate must remain open for records to reach the file handler.
+    if current_level == logging.NOTSET or current_level > desired_app_level:
+        app_logger.setLevel(desired_app_level)
+
+    # Suppress noisy third-party HTTP transport modules
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
 
-    return logging.getLogger("gerrit_clone")
+    return app_logger
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
@@ -122,7 +169,7 @@ class _SuppressConsoleFilter(logging.Filter):
     It's designed to be added/removed from handlers in a thread-safe manner.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: ARG002
         """Block all records when this filter is active."""
         return False
 

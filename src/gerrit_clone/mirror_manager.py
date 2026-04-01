@@ -10,13 +10,11 @@ import base64
 import os
 import shutil
 import subprocess
-import time
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from gerrit_clone.clone_manager import CloneManager
 from gerrit_clone.git_utils import (
@@ -31,8 +29,13 @@ from gerrit_clone.github_api import (
     transform_gerrit_name_to_github,
 )
 from gerrit_clone.logging import get_logger
-from gerrit_clone.models import CloneStatus, Config, Project
-from gerrit_clone.progress import ProgressTracker
+from gerrit_clone.models import CloneStatus, Config, Project, filter_projects
+from gerrit_clone.rate_limit import TokenBucketLimiter
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from gerrit_clone.progress import ProgressTracker
 
 logger = get_logger(__name__)
 
@@ -450,8 +453,93 @@ class MirrorManager:
                 return
 
         # --- Step 3: apply the default branch on GitHub -------------------
+        # Skip the API call when GitHub already has the correct default
+        # branch.  On a routine resync every repo would otherwise incur
+        # a redundant PATCH request, wasting REST API rate-limit budget.
+        if github_repo.default_branch == branch:
+            logger.debug(
+                "Default branch for %s already set to '%s'; "
+                "skipping redundant API call",
+                github_repo.full_name,
+                branch,
+            )
+            return
+
         owner = github_repo.full_name.split("/")[0]
         self.github_api.set_default_branch(owner, github_repo.name, branch)
+
+    def _validate_graphql_results(
+        self,
+        existing_repos: dict[str, dict[str, Any]],
+        successful_clones: int,
+    ) -> dict[str, dict[str, Any]]:
+        """Validate GraphQL results and fall back to REST if suspect.
+
+        If the GraphQL query returned zero repos for an org that
+        should have repos (based on the number of successful clones
+        and the recreate flag), something went wrong — typically a
+        transient 502.  Rather than proceeding to mass-create repos
+        that already exist (burning secondary rate-limit budget), we
+        fall back to the paginated REST API.
+
+        Args:
+            existing_repos: Result from ``list_all_repos_graphql``.
+            successful_clones: Number of successfully cloned projects.
+
+        Returns:
+            Validated (possibly re-fetched) repo map.
+        """
+        if existing_repos:
+            return existing_repos
+
+        # GraphQL returned nothing but we have cloned projects; this is
+        # suspicious regardless of recreate mode and warrants a REST
+        # fallback to avoid unnecessary repo creation attempts.
+        if successful_clones > 0:
+            logger.warning(
+                "⚠️  GraphQL returned 0 existing repos but we have "
+                "%d successful clones.  Falling back to REST API "
+                "to avoid unnecessary repo creation attempts.",
+                successful_clones,
+            )
+            try:
+                rest_repos = self.github_api.list_repos(
+                    org=self.github_org
+                )
+                fallback: dict[str, dict[str, Any]] = {}
+                for repo in rest_repos:
+                    fallback[repo.name] = {
+                        "name": repo.name,
+                        "full_name": repo.full_name,
+                        "html_url": repo.html_url,
+                        "clone_url": repo.clone_url,
+                        "ssh_url": repo.ssh_url,
+                        "private": repo.private,
+                        "description": repo.description,
+                        "default_branch": repo.default_branch,
+                        "latest_commit_sha": None,
+                        "last_commit_date": None,
+                    }
+                logger.info(
+                    "REST API fallback found %d existing repos",
+                    len(fallback),
+                )
+                return fallback
+            except Exception as exc:
+                logger.error(
+                    "REST API fallback also failed: %s", exc
+                )
+                # Both GraphQL and REST failed — proceeding with an
+                # empty existence set would recreate the original
+                # cascade failure (mass POST → 422 → rate-limit
+                # exhaustion).  Raise so the caller can abort.
+                raise RuntimeError(
+                    "Cannot determine existing GitHub repos: "
+                    "both GraphQL and REST API failed.  Aborting "
+                    "mirror to avoid mass-creation of duplicates."
+                ) from exc
+
+        return existing_repos
 
     def mirror_projects(self, projects: list[Project]) -> list[MirrorResult]:
         """Mirror projects from Gerrit to GitHub.
@@ -462,6 +550,10 @@ class MirrorManager:
 
         Optimizations:
         - Uses GraphQL to fetch all existing GitHub repos in one query
+        - Validates GraphQL results and falls back to REST on failure
+        - Shares a single TokenBucketLimiter across delete and create
+          phases so rate-limit state is preserved
+        - Pre-flight rate-limit budget check before batch operations
         - Batch deletes repos in parallel (if recreate=True)
         - Batch creates repos in parallel
         - Push operations happen in parallel via CloneManager
@@ -483,15 +575,30 @@ class MirrorManager:
             logger.info("🧹 Overwrite enabled - cleaning existing directories...")
             self._cleanup_existing_repos(projects)
 
+        # Step 0b: Pre-flight rate-limit budget check (synchronous)
+        logger.info("📊 Checking rate-limit budget before batch operations...")
+        self.github_api.budget.preflight_check_sync(
+            self.github_api.client
+        )
+
         # Step 1: Clone from Gerrit using existing CloneManager
         # This handles all the dependency ordering and safe parallel operations
         logger.info("📥 Cloning repositories from Gerrit...")
         clone_results = self.clone_manager.clone_projects(projects)
 
-        # Step 2: Batch fetch existing GitHub repos (GraphQL - one query!)
+        successful_clones = sum(
+            1 for cr in clone_results if cr.success
+        )
+
+        # Step 2: Batch fetch existing GitHub repos (GraphQL with retry)
         logger.info("🔍 Fetching existing GitHub repositories (GraphQL)...")
         existing_repos = self.github_api.list_all_repos_graphql(
             self.github_org
+        )
+
+        # Validate: if GraphQL returned nothing suspicious, try REST
+        existing_repos = self._validate_graphql_results(
+            existing_repos, successful_clones
         )
         logger.info(f"Found {len(existing_repos)} existing GitHub repositories")
 
@@ -536,6 +643,7 @@ class MirrorManager:
                     ssh_url=repo_data["ssh_url"],
                     private=repo_data["private"],
                     description=repo_data.get("description"),
+                    default_branch=repo_data.get("default_branch"),
                 )
 
         logger.info(
@@ -545,11 +653,32 @@ class MirrorManager:
         )
 
         # Step 4: Execute batch operations
+        # Create a shared TokenBucketLimiter so rate-limit state
+        # (including reduced rate from 403 responses) persists
+        # across the delete → create transition.
+        total_mutations = len(repos_to_delete) + len(repos_to_create)
+        if total_mutations > 200:
+            base_rate = 0.25  # 0.25 tokens/s ~ 1 mutation req per 8s (2 tokens each)
+        elif total_mutations > 100:
+            base_rate = 0.33  # 0.33 tokens/s ~ 1 mutation req per 6s
+        else:
+            base_rate = 0.5  # 0.5 tokens/s ~ 1 mutation req per 4s
+
+        shared_limiter = TokenBucketLimiter(
+            rate=base_rate,
+            burst=max(2, min(5, total_mutations // 30)),
+            min_rate=0.02,
+            recovery_seconds=120.0,
+        )
+
         if repos_to_delete:
             logger.info(f"🗑️  Batch deleting {len(repos_to_delete)} repositories...")
             delete_results = asyncio.run(
                 self.github_api.batch_delete_repos(
-                    self.github_org, repos_to_delete, max_concurrent=5
+                    self.github_org,
+                    repos_to_delete,
+                    max_concurrent=5,
+                    shared_limiter=shared_limiter,
                 )
             )
             failed_deletes = [
@@ -573,26 +702,20 @@ class MirrorManager:
             else:
                 logger.info(f"✓ All {len(repos_to_delete)} repos deleted successfully")
 
-            # Cool down proportionally to the number of mutations just
-            # performed.  GitHub's secondary rate limit tracks content-
-            # mutation "points" over a rolling window; the more deletes
-            # we just did, the longer we need to wait before the create
-            # phase starts so that the budget has time to recover.
-            successful_deletes = len(repos_to_delete) - len(failed_deletes)
-            if successful_deletes > 0:
-                cooldown = max(5, successful_deletes * 0.5)
-                logger.info(
-                    f"⏳ Cooling down {cooldown:.0f}s after "
-                    f"{successful_deletes} deletes "
-                    "(secondary rate-limit recovery)..."
-                )
-                time.sleep(cooldown)
+            # The shared_limiter already carries reduced rate from
+            # any 403s encountered during deletes.  Its time-based
+            # recovery will gradually restore throughput during the
+            # create phase.  No fixed cooldown needed — the token
+            # bucket handles pacing automatically.
 
         if repos_to_create:
             logger.info(f"🏗️  Batch creating {len(repos_to_create)} repositories...")
             create_results = asyncio.run(
                 self.github_api.batch_create_repos(
-                    self.github_org, repos_to_create, max_concurrent=3
+                    self.github_org,
+                    repos_to_create,
+                    max_concurrent=3,
+                    shared_limiter=shared_limiter,
                 )
             )
             for name, (repo, error) in create_results.items():
@@ -782,7 +905,7 @@ class MirrorManager:
             # Check for Gerrit parent project
             if is_gerrit_parent_project(local_path):
                 logger.info(
-                    "ℹ️  %s/%s is a Gerrit parent project "
+                    "ℹ️  %s/%s is a Gerrit parent project "  # noqa: RUF001
                     "(HEAD → refs/meta/config, no branches) — "
                     "no default branch to set",
                     self.github_org,
@@ -795,7 +918,7 @@ class MirrorManager:
             branches = list_local_branches(local_path)
             if not branches:
                 logger.info(
-                    "ℹ️  %s/%s has no branches under refs/heads/; "
+                    "ℹ️  %s/%s has no branches under refs/heads/; "  # noqa: RUF001
                     "cannot set a default branch",
                     self.github_org,
                     github_name,
@@ -863,7 +986,7 @@ class MirrorManager:
     def _push_to_github_from_clone_result_optimized(
         self,
         clone_result: Any,
-        existing_repos: dict[str, dict[str, Any]],
+        existing_repos: dict[str, dict[str, Any]],  # noqa: ARG002
         repos_lookup: dict[str, GitHubRepo],
     ) -> MirrorResult:
         """Convert a CloneResult to MirrorResult by pushing to GitHub.
@@ -901,27 +1024,26 @@ class MirrorManager:
             )
 
         # If clone was skipped, mark as skipped
-        if clone_result.status == CloneStatus.ALREADY_EXISTS:
-            if not self.recreate:
-                logger.info(
-                    f"Repository already exists: {clone_result.project.name}, "
-                    f"skipping GitHub push (use --recreate to update)"
-                )
-                completed_at = datetime.now(UTC)
-                duration = (completed_at - started_at).total_seconds()
-                github_url = (
-                    f"https://github.com/{self.github_org}/{github_name}"
-                )
-                return MirrorResult(
-                    project=clone_result.project,
-                    github_name=github_name,
-                    github_url=github_url,
-                    status=MirrorStatus.SKIPPED,
-                    local_path=local_path,
-                    duration_seconds=duration,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                )
+        if clone_result.status == CloneStatus.ALREADY_EXISTS and not self.recreate:
+            logger.info(
+                f"Repository already exists: {clone_result.project.name}, "
+                f"skipping GitHub push (use --recreate to update)"
+            )
+            completed_at = datetime.now(UTC)
+            duration = (completed_at - started_at).total_seconds()
+            github_url = (
+                f"https://github.com/{self.github_org}/{github_name}"
+            )
+            return MirrorResult(
+                project=clone_result.project,
+                github_name=github_name,
+                github_url=github_url,
+                status=MirrorStatus.SKIPPED,
+                local_path=local_path,
+                duration_seconds=duration,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
 
         try:
             # Get GitHub repo from lookup (was created/reused in batch)
@@ -1048,38 +1170,49 @@ class MirrorManager:
 
 
 def filter_projects_by_hierarchy(
-    projects: list[Project], filter_names: list[str]
+    projects: list[Project],
+    filter_names: list[str],
+    exclude_patterns: list[str] | None = None,
 ) -> list[Project]:
-    """Filter projects based on hierarchical names.
+    """Filter projects using include/exclude patterns with wildcard support.
 
-    If a filter name like 'ccsdk' is provided, it matches:
-    - Exact: 'ccsdk'
-    - Children: 'ccsdk/apps', 'ccsdk/features', etc.
+    Include patterns use hierarchical matching — a plain name like ``ccsdk``
+    matches both the exact project ``ccsdk`` *and* any child such as
+    ``ccsdk/apps``.  Shell-style wildcards (``*``, ``?``, ``[seq]``) are
+    also supported (e.g. ``*sdk*`` matches ``ccsdk`` and ``pythonsdk-tests``).
+
+    Exclude patterns are applied **after** inclusion and use the same
+    matching rules.  A project that matches any exclude pattern is removed
+    regardless of whether it matched an include pattern.
 
     Args:
-        projects: List of all projects
-        filter_names: List of project name prefixes to include
+        projects: List of all projects.
+        filter_names: List of project name patterns to include.
+            An empty list means "include everything".
+        exclude_patterns: Optional list of project name patterns to exclude.
 
     Returns:
-        Filtered list of projects
+        Filtered list of projects.
     """
-    if not filter_names:
+    include = filter_names if filter_names else None
+    exclude = exclude_patterns if exclude_patterns else None
+
+    if not include and not exclude:
         return projects
 
-    filtered: list[Project] = []
-    for project in projects:
-        for filter_name in filter_names:
-            # Exact match
-            if project.name == filter_name:
-                filtered.append(project)
-                break
-            # Hierarchical match (must start with filter_name/)
-            elif project.name.startswith(f"{filter_name}/"):
-                filtered.append(project)
-                break
+    filtered = filter_projects(
+        projects,
+        include_patterns=include,
+        exclude_patterns=exclude,
+    )
 
+    parts: list[str] = []
+    if include:
+        parts.append(f"include={filter_names}")
+    if exclude:
+        parts.append(f"exclude={exclude_patterns}")
     logger.info(
         f"Filtered {len(projects)} projects to {len(filtered)} "
-        f"based on hierarchy filters: {filter_names}"
+        f"({', '.join(parts)})"
     )
     return filtered

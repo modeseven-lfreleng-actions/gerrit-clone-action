@@ -103,7 +103,12 @@ class ConfigManager:
             verbose: Enable verbose logging
             quiet: Suppress non-error output
             config_file: Explicit config file path
-            include_projects: Optional list of project names to clone (filters all projects)
+            include_projects: Optional list of project name patterns to include.
+                Supports shell-style wildcards (*, ?, [seq]) and hierarchical
+                matching. Must be provided as a list of pattern strings.
+            exclude_projects: Optional list of project name patterns to exclude.
+                Applied after include filters. Uses the same pattern syntax as
+                include_projects and must be provided as a list of pattern strings.
             ssh_debug: Enable verbose SSH debugging (-vvv) for authentication issues
             exit_on_error: Exit immediately when the first clone error occurs
             source_type: Source type (gerrit or github)
@@ -377,10 +382,10 @@ class ConfigManager:
             if isinstance(dm, str):
                 try:
                     config_dict["discovery_method"] = DiscoveryMethod(dm.lower())
-                except ValueError:
+                except ValueError as err:
                     raise ConfigurationError(
                         f"Invalid discovery_method '{dm}'. Must be one of: ssh, http, both"
-                    )
+                    ) from err
 
         # Handle source_type conversion
         if "source_type" in config_dict:
@@ -388,10 +393,10 @@ class ConfigManager:
             if isinstance(st, str):
                 try:
                     config_dict["source_type"] = SourceType(st.lower())
-                except ValueError:
+                except ValueError as err:
                     raise ConfigurationError(
                         f"Invalid source_type '{st}'. Must be one of: gerrit, github"
-                    )
+                    ) from err
 
         # Smart port defaulting based on protocol and source type
         source_type = config_dict.get("source_type", SourceType.GERRIT)
@@ -429,6 +434,13 @@ class ConfigManager:
         elif config_dict["port"] == 29418 and use_https:
             # SSH port specified but using HTTPS, switch to HTTPS port
             config_dict["port"] = 443
+
+        # Coerce string include/exclude_projects to single-element lists
+        # so Config.__post_init__ can safely iterate and normalize them.
+        for key in ("include_projects", "exclude_projects"):
+            val = config_dict.get(key)
+            if isinstance(val, str):
+                config_dict[key] = [val]
 
         # Validate required fields
         if "host" not in config_dict:

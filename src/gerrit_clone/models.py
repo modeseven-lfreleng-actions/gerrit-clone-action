@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import platform
 import subprocess
@@ -69,6 +70,106 @@ class RefreshStatus(str, Enum):
 
 
 # Parent/child policy is always "both" - clone all repositories
+
+
+def match_project_pattern(project_name: str, pattern: str) -> bool:
+    """Match a project name against a pattern supporting wildcards.
+
+    Patterns may contain shell-style wildcards (``*``, ``?``, ``[seq]``,
+    ``[!seq]``).  Matching is case-sensitive and performed against the
+    full project name (e.g. ``testsuite/pythonsdk-tests``).
+
+    Additionally, **hierarchical matching** is applied for patterns that
+    do **not** contain wildcard characters: a plain pattern like ``ccsdk``
+    matches both the exact name ``ccsdk`` *and* any child such as
+    ``ccsdk/apps``.
+
+    Args:
+        project_name: Full Gerrit project name (e.g. ``testsuite/pythonsdk-tests``).
+        pattern: Pattern string, optionally containing wildcards.
+
+    Returns:
+        ``True`` if *project_name* matches *pattern*.
+    """
+    # Fast exact match (most common case)
+    if project_name == pattern:
+        return True
+
+    has_wildcards = any(ch in pattern for ch in ("*", "?", "["))
+
+    if has_wildcards:
+        return fnmatch.fnmatchcase(project_name, pattern)
+
+    # Plain pattern → also match hierarchical children
+    return project_name.startswith(f"{pattern}/")
+
+
+def normalize_project_list(raw: list[str]) -> list[str]:
+    """Normalize a list of project patterns.
+
+    Strips whitespace and leading slashes, drops empty entries,
+    splits on commas and spaces, and de-duplicates while
+    preserving insertion order.  Leading-slash stripping ensures
+    that ``/ccsdk`` matches the discovered project name ``ccsdk``
+    (Gerrit projects are stored without a leading ``/``).
+
+    Args:
+        raw: List of raw pattern strings (may contain commas/spaces).
+
+    Returns:
+        Normalized, de-duplicated list of patterns.
+    """
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for entry in raw:
+        # Split on commas first, then whitespace within each segment
+        for comma_part in entry.split(","):
+            for token in comma_part.split():
+                clean = token.strip().lstrip("/")
+                if clean and clean not in seen:
+                    normalized.append(clean)
+                    seen.add(clean)
+    return normalized
+
+
+def filter_projects(
+    projects: list[Project],
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+) -> list[Project]:
+    """Filter a list of projects using include/exclude patterns.
+
+    When *include_patterns* is non-empty, only projects matching at least
+    one include pattern are kept.  Then any project matching an
+    *exclude_patterns* entry is removed.  Both lists support shell-style
+    wildcards (``*``, ``?``, ``[seq]``) as well as plain hierarchical
+    matching (see :func:`match_project_pattern`).
+
+    Args:
+        projects: Source list of projects.
+        include_patterns: If non-empty, only matching projects are kept.
+        exclude_patterns: Matching projects are removed (applied after include).
+
+    Returns:
+        Filtered list of projects (new list; originals are not mutated).
+    """
+    result = list(projects)
+
+    if include_patterns:
+        result = [
+            p
+            for p in result
+            if any(match_project_pattern(p.name, pat) for pat in include_patterns)
+        ]
+
+    if exclude_patterns:
+        result = [
+            p
+            for p in result
+            if not any(match_project_pattern(p.name, pat) for pat in exclude_patterns)
+        ]
+
+    return result
 
 
 @dataclass(frozen=True)
@@ -165,8 +266,12 @@ class Config:
     mirror: bool = True  # Use git clone --mirror by default for complete metadata
     use_https: bool = False
     keep_remote_protocol: bool = False
-    # Optional inclusion filter: if non-empty, only clone listed projects (exact names)
+    # Optional inclusion filter: if non-empty, only clone listed projects
+    # Supports shell-style wildcards (*, ?, [seq]) and hierarchical matching
     include_projects: list[str] = field(default_factory=list)
+    # Optional exclusion filter: matching projects are removed after inclusion
+    # Supports the same pattern syntax as include_projects
+    exclude_projects: list[str] = field(default_factory=list)
     # Enable verbose SSH (-vvv) for debugging single-project auth issues
     ssh_debug: bool = False
     # Exit cloning immediately when the first error occurs (for debugging)
@@ -205,10 +310,9 @@ class Config:
             raise ValueError("host is required")
 
         # Set default port based on source type if not explicitly provided
-        if self.port is None:
-            if self.source_type == SourceType.GERRIT:
-                # Default Gerrit SSH port
-                self.port = 29418
+        if self.port is None and self.source_type == SourceType.GERRIT:
+            # Default Gerrit SSH port
+            self.port = 29418
             # For GitHub, leave port as None (not used)
 
         # Validate port range for Gerrit sources
@@ -255,16 +359,16 @@ class Config:
                 )
                 object.__setattr__(self, "branch", None)
 
-        # Normalize include_projects (strip whitespace, drop empties, de-dup preserve order)
+        # Normalize include/exclude project lists (strip whitespace, split
+        # on commas/spaces, drop empties, de-dup while preserving order)
         if self.include_projects:
-            seen: set[str] = set()
-            normalized: list[str] = []
-            for name in self.include_projects:
-                clean = name.strip()
-                if clean and clean not in seen:
-                    normalized.append(clean)
-                    seen.add(clean)
-            object.__setattr__(self, "include_projects", normalized)
+            object.__setattr__(
+                self, "include_projects", normalize_project_list(self.include_projects)
+            )
+        if self.exclude_projects:
+            object.__setattr__(
+                self, "exclude_projects", normalize_project_list(self.exclude_projects)
+            )
 
         # Ensure path is absolute
         self.path = self.path.resolve()
@@ -272,7 +376,9 @@ class Config:
         # Generate base_url if not provided
         if self.base_url is None:
             if self.source_type == SourceType.GERRIT:
-                from gerrit_clone.discovery import discover_gerrit_base_url
+                from gerrit_clone.discovery import (  # noqa: PLC0415
+                    discover_gerrit_base_url,
+                )
 
                 try:
                     self.base_url = discover_gerrit_base_url(self.host)
