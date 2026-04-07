@@ -395,6 +395,12 @@ runs:
         INPUT_INCLUDE_PROJECTS: ${{ inputs.include-projects }}
         INPUT_EXCLUDE_PROJECTS: ${{ inputs.exclude-projects }}
       run: |
+        # WARNING: Do NOT use literal empty expression syntax (dollar
+        # brace-brace with nothing inside) anywhere in this run block,
+        # including in comments. The GitHub Actions template engine
+        # parses ALL expression patterns in run blocks and rejects
+        # empty ones with "An expression was expected".
+
         # Use action-managed SSH agent socket if it exists; otherwise,
         # fall back to any existing SSH_AUTH_SOCK on the runner so that
         # SSH-based clones using the runner's default agent/keys still work.
@@ -569,8 +575,9 @@ runs:
         fi
 
         # Add include-projects options (supports multiple)
-        # Use env var to avoid shell injection from ${{ }} in
-        # command substitutions; normalize commas to spaces.
+        # Use env var to avoid shell injection from expression
+        # interpolation in command substitutions; normalize
+        # commas to spaces.
         if [ -n "$INPUT_INCLUDE_PROJECTS" ]; then
           read -ra PROJECTS \
             <<< "$(printf '%s' "$INPUT_INCLUDE_PROJECTS" | tr ',' ' ')"
@@ -582,8 +589,9 @@ runs:
         fi
 
         # Add exclude-projects options (supports multiple)
-        # Use env var to avoid shell injection from ${{ }} in
-        # command substitutions; normalize commas to spaces.
+        # Use env var to avoid shell injection from expression
+        # interpolation in command substitutions; normalize
+        # commas to spaces.
         if [ -n "$INPUT_EXCLUDE_PROJECTS" ]; then
           read -ra EXCLUDES \
             <<< "$(printf '%s' "$INPUT_EXCLUDE_PROJECTS" | tr ',' ' ')"

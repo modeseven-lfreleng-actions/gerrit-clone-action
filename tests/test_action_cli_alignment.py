@@ -441,3 +441,74 @@ class TestActionInputToCLIMapping:
         assert "path" not in cli_option_names, (
             "CLI should NOT have standalone '--path' option"
         )
+
+
+class TestNoEmptyExpressions:
+    """Detect empty or malformed GitHub Actions expression patterns.
+
+    The Actions template engine parses ALL ${{ }} patterns in run
+    blocks — including inside shell comments.  An empty expression
+    like ``${{ }}`` causes the runner to reject the manifest with
+    "An expression was expected".
+
+    See: https://github.com/lfreleng-actions/project-reporting-tool/
+         actions/runs/24069756050
+    """
+
+    EXPRESSION_RE: ClassVar[re.Pattern[str]] = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+
+    def _collect_run_blocks(self, action_yaml: dict[str, Any]) -> list[tuple[str, str]]:
+        """Extract all run blocks from the action manifest.
+
+        Returns:
+            List of (step_name, run_content) tuples.
+        """
+        blocks: list[tuple[str, str]] = []
+        steps = action_yaml.get("runs", {}).get("steps", [])
+        for step in steps:
+            if "run" in step:
+                name = step.get("name", step.get("id", "unnamed"))
+                blocks.append((name, step["run"]))
+        return blocks
+
+    def test_no_empty_expressions_in_run_blocks(
+        self, action_yaml: dict[str, Any]
+    ) -> None:
+        """Every ${{ }} expression must have non-empty content."""
+        violations: list[str] = []
+        for step_name, script in self._collect_run_blocks(action_yaml):
+            for match in self.EXPRESSION_RE.finditer(script):
+                body = match.group(1).strip()
+                if not body:
+                    # Show surrounding context for easier debugging
+                    start = max(0, match.start() - 30)
+                    end = min(len(script), match.end() + 30)
+                    context = script[start:end].replace("\n", "\\n")
+                    violations.append(
+                        f"Step '{step_name}': empty expression near: ...{context}..."
+                    )
+        assert not violations, (
+            "Found empty ${{{{ }}}} expression(s) in action.yaml run "
+            "blocks. The GitHub Actions template engine rejects these "
+            "with 'An expression was expected':\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
+    def test_no_unclosed_expressions_in_run_blocks(
+        self, action_yaml: dict[str, Any]
+    ) -> None:
+        """Every ${{ must have a matching }}."""
+        unclosed_re = re.compile(r"\$\{\{(?:(?!\}\}).)*$", re.DOTALL)
+        violations: list[str] = []
+        for step_name, script in self._collect_run_blocks(action_yaml):
+            for match in unclosed_re.finditer(script):
+                start = max(0, match.start() - 20)
+                end = min(len(script), match.end() + 20)
+                context = script[start:end].replace("\n", "\\n")
+                violations.append(
+                    f"Step '{step_name}': unclosed expression near: ...{context}..."
+                )
+        assert not violations, (
+            "Found unclosed ${{{{ expression(s) in action.yaml run "
+            "blocks:\n" + "\n".join(f"  - {v}" for v in violations)
+        )
