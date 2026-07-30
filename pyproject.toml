@@ -192,10 +192,31 @@ select = [
 ignore = [
     "E501",   # line too long, handled by formatter
     "PLR0913", # too many arguments
+    "PLR0917", # too many positional arguments — see note below
     "PLR0912", # too many branches
     "PLR0915", # too many statements — CLI commands and managers are complex by design
     "PLR2004", # magic value used in comparison
 ]
+
+# PLR0917 was stabilised in ruff 0.16.0.  This project already selects
+# the "PL" category, so a routine pre-commit autoupdate crossing that
+# release began failing on code nobody had touched.
+#
+# It is ignored globally rather than only under tests because both
+# call sites are legitimate:
+#
+#   - tests/ stack @patch decorators, and unittest.mock injects each
+#     mock positionally, so a keyword-only signature is impossible
+#     rather than merely inconvenient.
+#   - src/gerrit_clone/refresh_worker.py declares RefreshWorker.__init__
+#     with eleven defaulted parameters.  The closely related PLR0913
+#     (too many arguments) is already ignored directly above for exactly
+#     that constructor.  PLR0917 counts only those arguments that may be
+#     passed positionally, so it is the narrower of the two; ignoring one
+#     while enforcing the other would be inconsistent.
+#
+# Scoping it to tests alone would leave src/ latently failing the moment
+# the ruff hook's `files:` pattern is corrected to include src/.
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*" = ["ARG", "S101", "PLR2004"]
