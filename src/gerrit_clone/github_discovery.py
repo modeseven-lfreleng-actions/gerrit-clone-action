@@ -122,7 +122,7 @@ def discover_github_repositories(
             }
 
             logger.debug(
-                f"Discovered {len(filtered_projects)} repositories " f"in {org_or_user}"
+                f"Discovered {len(filtered_projects)} repositories in {org_or_user}"
             )
 
             return filtered_projects, stats

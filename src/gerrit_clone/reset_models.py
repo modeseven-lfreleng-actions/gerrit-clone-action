@@ -66,10 +66,7 @@ class SyncComparison:
             return False
         if not self.remote_status.last_commit_sha:
             return False
-        return (
-            self.local_status.last_commit_sha
-            != self.remote_status.last_commit_sha
-        )
+        return self.local_status.last_commit_sha != self.remote_status.last_commit_sha
 
 
 @dataclass
