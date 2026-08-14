@@ -1023,7 +1023,7 @@ class TestScanRepoForSecrets:
             return next(calls, 1_000_000.0)
 
         monkeypatch.setattr(
-            "gerrit_clone.content_filter.time.monotonic",
+            "gerrit_clone.content_scan.time.monotonic",
             fake_monotonic,
         )
         with pytest.raises(RuntimeError, match="Secret scan timed out"):
