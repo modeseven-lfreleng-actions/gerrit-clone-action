@@ -80,9 +80,7 @@ def print_status_message(message: str, console: Console | None = None) -> None:
     console.print(message)
 
 
-def connecting_to_server(
-    host: str, port: int, console: Console | None = None
-) -> None:
+def connecting_to_server(host: str, port: int, console: Console | None = None) -> None:
     """Show connecting to server status."""
     # Try to send to progress tracker first
     status(f"Connecting to Gerrit server {host}:{port}")
@@ -108,7 +106,11 @@ def discovering_projects(
 
 
 def projects_found(
-    count: int, method: str = "", console: Console | None = None  # noqa: ARG001
+    count: int,
+    # Accepted for symmetry with discovering_projects() so callers can pass
+    # the same keyword; the found-count message deliberately omits it.
+    method: str = "",  # noqa: ARG001
+    console: Console | None = None,
 ) -> None:
     """Show projects found status.
 
@@ -198,9 +200,7 @@ def show_error_summary(
         for i, error in enumerate(errors[:5], 1):
             console.print(f"  [red]{i}. {error}[/red]")
         if len(errors) > 5:
-            console.print(
-                f"  [red]... and {len(errors) - 5} more[/red]"
-            )
+            console.print(f"  [red]... and {len(errors) - 5} more[/red]")
 
     if warnings:
         console.print(
@@ -210,9 +210,7 @@ def show_error_summary(
         for i, warning in enumerate(warnings[:5], 1):
             console.print(f"  [yellow]{i}. {warning}[/yellow]")
         if len(warnings) > 5:
-            console.print(
-                f"  [yellow]... and {len(warnings) - 5} more[/yellow]"
-            )
+            console.print(f"  [yellow]... and {len(warnings) - 5} more[/yellow]")
 
 
 def show_final_results(
@@ -250,7 +248,9 @@ def show_final_results(
 
     # Success rate (includes both newly cloned and already existing as successful)
     if batch_result.total_count > 0:
-        content_lines.append(f"[bold]Success Rate:[/bold] {batch_result.success_rate:.1f}%")
+        content_lines.append(
+            f"[bold]Success Rate:[/bold] {batch_result.success_rate:.1f}%"
+        )
 
     if log_file_path:
         content_lines.append(f"[dim]Log File:[/dim] {log_file_path}")

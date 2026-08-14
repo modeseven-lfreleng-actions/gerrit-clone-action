@@ -63,7 +63,9 @@ class GerritAPIClient:
         # Check for HTTP credentials from environment variables.
         # Precedence: GERRIT_HTTP_USER/PASSWORD then GERRIT_USERNAME/PASSWORD
         http_user = os.getenv("GERRIT_HTTP_USER") or os.getenv("GERRIT_USERNAME")
-        http_password = os.getenv("GERRIT_HTTP_PASSWORD") or os.getenv("GERRIT_PASSWORD")
+        http_password = os.getenv("GERRIT_HTTP_PASSWORD") or os.getenv(
+            "GERRIT_PASSWORD"
+        )
 
         # Configure authentication if credentials are available
         auth = None

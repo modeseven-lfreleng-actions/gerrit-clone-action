@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 Matthew Watkins <mwatkins@linuxfoundation.org>
 
-"""Path handling utilities for safe filesystem operations."""
+"""Path handling utilities for safe filesystem operations.
+
+Detects and resolves clone destination conflicts, and performs the temporary
+clone plus atomic move dance that avoids leaving partial repositories behind.
+Project name validation and sanitization live in
+:mod:`gerrit_clone.path_naming` and are re-exported here.
+"""
 
 from __future__ import annotations
 
@@ -12,166 +18,37 @@ from pathlib import Path
 from typing import Any
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.path_errors import (
+    PathConflictError,
+    PathError,
+    PathValidationError,
+)
+from gerrit_clone.path_naming import (
+    get_project_path,
+    sanitize_project_name,
+    validate_project_name,
+)
 
 logger = get_logger(__name__)
 
-
-class PathError(Exception):
-    """Base exception for path-related errors."""
-
-
-class PathConflictError(PathError):
-    """Raised when a path conflict prevents operation."""
-
-
-class PathValidationError(PathError):
-    """Raised when a path fails validation."""
-
-
-def validate_project_name(project_name: str) -> None:
-    """Validate that a project name is safe for filesystem use.
-
-    Args:
-        project_name: Project name to validate
-
-    Raises:
-        PathValidationError: If project name is invalid
-    """
-    if not project_name or not project_name.strip():
-        raise PathValidationError("Project name cannot be empty")
-
-    if project_name.startswith("/"):
-        raise PathValidationError("Project name cannot start with '/'")
-
-    dangerous_names = {".", "..", ".git"}
-    if project_name in dangerous_names:
-        raise PathValidationError(f"Project name cannot be '{project_name}'")
-
-    if (
-        project_name.startswith("../")
-        or "/../" in project_name
-        or project_name.endswith("/..")
-    ):
-        raise PathValidationError(
-            "Project name cannot contain path traversal sequences"
-        )
-
-    if (
-        project_name.startswith("./")
-        or "/./" in project_name
-        or project_name.endswith("/.")
-    ):
-        raise PathValidationError(
-            "Project name cannot contain current directory references"
-        )
-
-    # Check for problematic characters (though Gerrit names are usually clean)
-    problematic_chars = set('\0<>:"|?*')
-    if any(char in project_name for char in problematic_chars):
-        raise PathValidationError(
-            f"Project name contains invalid characters: {project_name}"
-        )
-
-
-def sanitize_project_name(project_name: str) -> str:
-    """Sanitize project name for filesystem use.
-
-    Args:
-        project_name: Raw project name
-
-    Returns:
-        Sanitized project name safe for filesystem
-
-    Raises:
-        PathValidationError: If project name cannot be sanitized
-    """
-    if not project_name or not project_name.strip():
-        raise PathValidationError("Project name cannot be empty")
-
-    sanitized = project_name.strip()
-
-    reserved_names = {
-        "CON",
-        "PRN",
-        "AUX",
-        "NUL",
-        "COM1",
-        "COM2",
-        "COM3",
-        "COM4",
-        "COM5",
-        "COM6",
-        "COM7",
-        "COM8",
-        "COM9",
-        "LPT1",
-        "LPT2",
-        "LPT3",
-        "LPT4",
-        "LPT5",
-        "LPT6",
-        "LPT7",
-        "LPT8",
-        "LPT9",
-    }
-    if sanitized.upper() in reserved_names:
-        sanitized = f"{sanitized}_project"
-
-    # Replace problematic characters with safe alternatives
-    char_replacements = {
-        "<": "_lt_",
-        ">": "_gt_",
-        ":": "_colon_",
-        '"': "_quote_",
-        "|": "_pipe_",
-        "?": "_q_",
-        "*": "_star_",
-        "\0": "_null_",
-        "\\": "/",  # Convert backslashes to forward slashes
-    }
-
-    for bad_char, replacement in char_replacements.items():
-        sanitized = sanitized.replace(bad_char, replacement)
-
-    # Remove leading/trailing slashes; preserve a legitimate leading dot unless it's a dangerous name
-    # (We already explicitly reject ".", "..", and ".git" earlier)
-    leading_dot = sanitized.startswith(".") and not sanitized.startswith("..")
-    sanitized = sanitized.strip("/\\")
-    if not leading_dot:
-        # Only strip leading dot if it wasn't a legitimate project like ".github"
-        sanitized = sanitized.lstrip(".")
-    sanitized = sanitized.rstrip(".")
-
-    if sanitized in {".", "..", ".git"}:
-        sanitized = f"_{sanitized}_safe"
-
-    # Replace path traversal sequences
-    sanitized = sanitized.replace("../", "_dotdot_")
-    sanitized = sanitized.replace("/..", "_dotdot_")
-    sanitized = sanitized.replace("./", "_dot_")
-    sanitized = sanitized.replace("/.", "_dot_")
-
-    if not sanitized:
-        raise PathValidationError("Project name becomes empty after sanitization")
-
-    return sanitized
-
-
-def get_project_path(project_name: str, base_path: Path) -> Path:
-    """Get the full filesystem path for a project.
-
-    Args:
-        project_name: Project name from Gerrit
-        base_path: Base directory for all clones
-
-    Returns:
-        Full path where project should be cloned
-
-    Raises:
-        PathValidationError: If project name is invalid
-    """
-    sanitized_name = sanitize_project_name(project_name)
-    return base_path / sanitized_name
+__all__ = [
+    "AtomicClonePath",
+    "PathConflictError",
+    "PathError",
+    "PathValidationError",
+    "atomic_move",
+    "check_path_conflicts",
+    "cleanup_temp_path",
+    "create_parent_directories",
+    "ensure_directory_writable",
+    "format_path_for_display",
+    "get_project_path",
+    "get_relative_path",
+    "get_temp_clone_path",
+    "move_conflicting_path",
+    "sanitize_project_name",
+    "validate_project_name",
+]
 
 
 def create_parent_directories(path: Path, mode: int = 0o755) -> None:
@@ -232,12 +109,30 @@ def check_path_conflicts(target_path: Path, is_nested_repo: bool = False) -> str
             if contents:
                 # Check if this looks like an incomplete git clone (regular or bare)
                 # Regular repo artifacts
-                regular_git_files = ['.git', '.gitignore', 'README.md', 'pom.xml', 'Makefile']
-                has_regular_artifacts = any(item.name in regular_git_files for item in contents)
+                regular_git_files = [
+                    ".git",
+                    ".gitignore",
+                    "README.md",
+                    "pom.xml",
+                    "Makefile",
+                ]
+                has_regular_artifacts = any(
+                    item.name in regular_git_files for item in contents
+                )
 
                 # Bare repo artifacts (partial bare clone that failed)
-                bare_git_files = ['HEAD', 'objects', 'refs', 'config', 'hooks', 'info', 'description']
-                has_bare_artifacts = any(item.name in bare_git_files for item in contents)
+                bare_git_files = [
+                    "HEAD",
+                    "objects",
+                    "refs",
+                    "config",
+                    "hooks",
+                    "info",
+                    "description",
+                ]
+                has_bare_artifacts = any(
+                    item.name in bare_git_files for item in contents
+                )
 
                 # If it has git artifacts but is_git_repository returned False,
                 # it's likely an incomplete clone that should be cleaned up
@@ -274,7 +169,9 @@ def move_conflicting_path(target_path: Path, _is_nested_repo: bool = False) -> b
     # If backup already exists, try numbered variants
     counter = 1
     while parent_backup_path.exists():
-        parent_backup_path = target_path.with_name(f"{target_path.name}.parent.{counter}")
+        parent_backup_path = target_path.with_name(
+            f"{target_path.name}.parent.{counter}"
+        )
         counter += 1
         if counter > 100:  # Prevent infinite loop
             raise PathError(f"Cannot generate unique backup name for {target_path}")
@@ -285,16 +182,22 @@ def move_conflicting_path(target_path: Path, _is_nested_repo: bool = False) -> b
 
         # Perform the move
         target_path.rename(parent_backup_path)
-        logger.info(f"Moved conflicting {'file' if is_file else 'directory'} "
-                   f"[path]{target_path.name}[/path] to [path]{parent_backup_path.name}[/path]")
+        logger.info(
+            f"Moved conflicting {'file' if is_file else 'directory'} "
+            f"[path]{target_path.name}[/path] to [path]{parent_backup_path.name}[/path]"
+        )
         return True
     except OSError as e:
         # Check if the path still exists after the attempted move
         if target_path.exists():
-            raise PathError(f"Failed to move conflicting path {target_path} to {parent_backup_path}: {e}") from e
+            raise PathError(
+                f"Failed to move conflicting path {target_path} to {parent_backup_path}: {e}"
+            ) from e
         else:
             # Move succeeded even though we got an exception (race condition?)
-            logger.debug(f"Move succeeded despite exception: {target_path} -> {parent_backup_path}")
+            logger.debug(
+                f"Move succeeded despite exception: {target_path} -> {parent_backup_path}"
+            )
             return True
 
 

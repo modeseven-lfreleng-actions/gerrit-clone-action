@@ -17,174 +17,77 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from gerrit_clone.error_collection import (
+    CollectingHandler,
+    ErrorCollector,
+    ErrorRecord,
+)
 from gerrit_clone.logging import setup_logging
 
+if TYPE_CHECKING:
+    from typing import TextIO
 
-class ErrorRecord:
-    """Individual error/warning record for aggregation."""
-
-    def __init__(
-        self,
-        timestamp: datetime,
-        message: str,
-        level: int,
-        context: str = "",
-        exception: Exception | None = None,
-    ):
-        self.timestamp = timestamp
-        self.message = message
-        self.level = level
-        self.context = context
-        self.exception = exception
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "message": self.message,
-            "level": logging.getLevelName(self.level),
-            "context": self.context,
-            "exception": str(self.exception) if self.exception else None,
-        }
+__all__ = [
+    "CollectingHandler",
+    "ErrorCollector",
+    "ErrorRecord",
+    "FileLogger",
+    "cli_args_to_dict",
+    "get_default_log_path",
+    "init_logging",
+    "setup_file_logging",
+]
 
 
-class ErrorCollector:
-    """Collects errors and warnings for end-of-run summary."""
+def _format_cli_command(cli_args: dict[str, Any], command: str) -> str:
+    """Reconstruct the invoked command line from parsed CLI arguments.
 
-    def __init__(self) -> None:
-        self.errors: list[ErrorRecord] = []
-        self.warnings: list[ErrorRecord] = []
-        self.critical_errors: list[ErrorRecord] = []
+    Args:
+        cli_args: Mapping of option name to value.
+        command: Subcommand the run was invoked with (e.g. ``"mirror"``).
 
-    def add_error(self, message: str, context: str = "", exception: Exception | None = None) -> None:
-        """Add an error message."""
-        record = ErrorRecord(
-            timestamp=datetime.now(UTC),
-            message=message,
-            level=logging.ERROR,
-            context=context,
-            exception=exception,
-        )
-        self.errors.append(record)
-
-    def add_warning(self, message: str, context: str = "", exception: Exception | None = None) -> None:
-        """Add a warning message."""
-        record = ErrorRecord(
-            timestamp=datetime.now(UTC),
-            message=message,
-            level=logging.WARNING,
-            context=context,
-            exception=exception,
-        )
-        self.warnings.append(record)
-
-    def add_critical_error(self, message: str, context: str = "", exception: Exception | None = None) -> None:
-        """Add a critical error message."""
-        record = ErrorRecord(
-            timestamp=datetime.now(UTC),
-            message=message,
-            level=logging.CRITICAL,
-            context=context,
-            exception=exception,
-        )
-        self.critical_errors.append(record)
-
-    def has_errors(self) -> bool:
-        """Check if any errors have been collected."""
-        return bool(self.errors or self.critical_errors)
-
-    def has_warnings(self) -> bool:
-        """Check if any warnings have been collected."""
-        return bool(self.warnings)
-
-    def get_total_count(self) -> int:
-        """Get total number of issues collected."""
-        return len(self.errors) + len(self.warnings) + len(self.critical_errors)
-
-    def get_summary(self) -> dict[str, Any]:
-        """Get summary of collected issues."""
-        return {
-            "critical_errors": len(self.critical_errors),
-            "errors": len(self.errors),
-            "warnings": len(self.warnings),
-            "total": self.get_total_count(),
-        }
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert all collected issues to dictionary."""
-        return {
-            "summary": self.get_summary(),
-            "critical_errors": [record.to_dict() for record in self.critical_errors],
-            "errors": [record.to_dict() for record in self.errors],
-            "warnings": [record.to_dict() for record in self.warnings],
-        }
-
-    def write_summary_to_file(self, log_file_path: Path) -> None:
-        """Append summary of issues to log file."""
-        if not self.get_total_count():
-            return
-
-        try:
-            with log_file_path.open("a", encoding="utf-8") as f:
-                f.write("\n" + "=" * 50 + "\n")
-                f.write("ERROR AND WARNING SUMMARY\n")
-                f.write("=" * 50 + "\n")
-
-                summary = self.get_summary()
-                f.write(f"Total Issues: {summary['total']}\n")
-                f.write(f"Critical Errors: {summary['critical_errors']}\n")
-                f.write(f"Errors: {summary['errors']}\n")
-                f.write(f"Warnings: {summary['warnings']}\n\n")
-
-                for category, records in [
-                    ("CRITICAL ERRORS", self.critical_errors),
-                    ("ERRORS", self.errors),
-                    ("WARNINGS", self.warnings),
-                ]:
-                    if records:
-                        f.write(f"{category}:\n")
-                        f.write("-" * 20 + "\n")
-                        for record in records:
-                            f.write(f"[{record.timestamp.strftime('%H:%M:%S')}] {record.message}\n")
-                            if record.context:
-                                f.write(f"  Context: {record.context}\n")
-                            if record.exception:
-                                f.write(f"  Exception: {record.exception}\n")
-                        f.write("\n")
-        except Exception:
-            # If we can't write to the log file, fall back to the standard
-            # logging subsystem, which records context and routes to stderr.
-            logging.getLogger(__name__).warning(
-                "Failed to write error summary to log file", exc_info=True
-            )
+    Returns:
+        The reconstructed command line.
+    """
+    cmd_parts = ["gerrit-clone", command]
+    for key, value in cli_args.items():
+        if value is None or value is False:
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if value is True:
+            cmd_parts.append(flag)
+        else:
+            cmd_parts.extend([flag, str(value)])
+    return " ".join(cmd_parts)
 
 
-class CollectingHandler(logging.Handler):
-    """Handler that collects errors/warnings for summary reporting."""
+def _write_log_header(
+    stream: TextIO, cli_args: dict[str, Any] | None, command: str
+) -> None:
+    """Write the execution-log preamble.
 
-    def __init__(self, collector: ErrorCollector) -> None:
-        super().__init__()
-        self.collector = collector
+    Args:
+        stream: Open, writable log file.
+        cli_args: Parsed CLI arguments to record, if any.
+        command: Subcommand the run was invoked with.
+    """
+    stream.write("=" * 60 + "\n")
+    stream.write("GERRIT CLONE EXECUTION LOG\n")
+    stream.write("=" * 60 + "\n")
+    stream.write(f"Date: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
 
-    def emit(self, record: logging.LogRecord) -> None:
-        """Collect error/warning messages."""
-        try:
-            message = self.format(record)
-            context = getattr(record, 'context', '')
-            exception = getattr(record, 'exc_info', None)
+    if cli_args:
+        stream.write(f"Command: {_format_cli_command(cli_args, command)}\n")
+        stream.write("\nCLI Arguments:\n")
 
-            if record.levelno >= logging.CRITICAL:
-                self.collector.add_critical_error(message, context, exception)
-            elif record.levelno >= logging.ERROR:
-                self.collector.add_error(message, context, exception)
-            elif record.levelno >= logging.WARNING:
-                self.collector.add_warning(message, context, exception)
-        except Exception:
-            # Route handler failures through the standard logging machinery
-            # instead of silently dropping them.
-            self.handleError(record)
+        for key, value in sorted(cli_args.items()):
+            stream.write(f"  {key}: {value}\n")
+
+    stream.write("\n" + "=" * 60 + "\n")
+    stream.write("LOG STREAM\n")
+    stream.write("=" * 60 + "\n")
 
 
 class FileLogger:
@@ -203,7 +106,9 @@ class FileLogger:
         self._file_handler: logging.FileHandler | None = None
         self._collector_handler: CollectingHandler | None = None
 
-    def create_log_file(self, cli_args: dict[str, Any] | None = None) -> Path:
+    def create_log_file(
+        self, cli_args: dict[str, Any] | None = None, command: str = "clone"
+    ) -> Path:
         """Create log file with header containing CLI arguments."""
         if not self.enabled:
             return self.log_file_path
@@ -213,31 +118,7 @@ class FileLogger:
             self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
             with self.log_file_path.open("w", encoding="utf-8") as f:
-                f.write("=" * 60 + "\n")
-                f.write("GERRIT CLONE EXECUTION LOG\n")
-                f.write("=" * 60 + "\n")
-                f.write(f"Date: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
-
-                if cli_args:
-                    # Reconstruct command line from args
-                    cmd_parts = ["gerrit-clone", "clone"]
-                    for key, value in cli_args.items():
-                        if value is not None and value is not False:
-                            flag = f"--{key.replace('_', '-')}"
-                            if value is True:
-                                cmd_parts.append(flag)
-                            else:
-                                cmd_parts.extend([flag, str(value)])
-
-                    f.write(f"Command: {' '.join(cmd_parts)}\n")
-                    f.write("\nCLI Arguments:\n")
-
-                    for key, value in sorted(cli_args.items()):
-                        f.write(f"  {key}: {value}\n")
-
-                f.write("\n" + "=" * 60 + "\n")
-                f.write("LOG STREAM\n")
-                f.write("=" * 60 + "\n")
+                _write_log_header(f, cli_args, command)
 
             return self.log_file_path
 
@@ -263,7 +144,9 @@ class FileLogger:
             datefmt="%H:%M:%S",
         )
         self._collector_handler.setFormatter(collector_formatter)
-        self._collector_handler.setLevel(logging.WARNING)  # Only collect warnings and above
+        self._collector_handler.setLevel(
+            logging.WARNING
+        )  # Only collect warnings and above
         logger.addHandler(self._collector_handler)
 
         # Add file handler if logging is enabled
@@ -283,7 +166,9 @@ class FileLogger:
                 self._file_handler.setLevel(self.log_level)
 
                 logger.addHandler(self._file_handler)
-                logger.setLevel(min(self.log_level, logging.WARNING))  # Ensure we capture warnings for collector
+                logger.setLevel(
+                    min(self.log_level, logging.WARNING)
+                )  # Ensure we capture warnings for collector
 
             except Exception:
                 logging.getLogger(__name__).warning(
@@ -328,6 +213,7 @@ def setup_file_logging(
     enabled: bool = True,
     log_level: str = "DEBUG",
     cli_args: dict[str, Any] | None = None,
+    command: str = "clone",
 ) -> tuple[logging.Logger, ErrorCollector]:
     """
     Setup file-based logging system.
@@ -337,6 +223,8 @@ def setup_file_logging(
         enabled: Whether to enable file logging
         log_level: Logging level for file output
         cli_args: CLI arguments to include in log header
+        command: Subcommand the run was invoked with, recorded in the
+            log header
 
     Returns:
         Tuple of (logger, error_collector)
@@ -347,7 +235,7 @@ def setup_file_logging(
         log_level=log_level,
     )
 
-    actual_log_path = file_logger.create_log_file(cli_args)
+    actual_log_path = file_logger.create_log_file(cli_args, command)
 
     logger = file_logger.setup_file_handlers()
 
@@ -381,13 +269,13 @@ def get_default_log_path(host: str | None = None, path: Path | None = None) -> P
         #   "github.example.com/myorg" -> "github.example.com.myorg"
 
         # 1. Remove port number (everything after first colon)
-        clean_host = host.split(':')[0]
+        clean_host = host.split(":")[0]
 
         # 2. Replace path separators with dots to preserve org/user structure
-        clean_host = clean_host.replace('/', '.').replace('\\', '.')
+        clean_host = clean_host.replace("/", ".").replace("\\", ".")
 
         # 3. Replace any remaining problematic characters
-        clean_host = clean_host.replace(':', '_')
+        clean_host = clean_host.replace(":", "_")
 
         # 4. Strip whitespace and ensure we have something left
         clean_host = clean_host.strip()
@@ -409,6 +297,7 @@ def init_logging(
     cli_args: dict[str, Any] | None = None,
     host: str | None = None,
     path: Path | None = None,
+    command: str = "clone",
 ) -> tuple[logging.Logger, ErrorCollector]:
     """Initialize both file and console logging in one place.
 
@@ -425,6 +314,9 @@ def init_logging(
         cli_args: CLI arguments to include in log header
         host: Gerrit server hostname for dynamic log file naming
         path: Base directory for log file (defaults to current working directory)
+        command: Subcommand the run was invoked with. Recorded in the log
+            header, which several subcommands share, so it must name the
+            command actually running rather than assume "clone".
 
     Returns:
         Tuple of (file_logger, error_collector)
@@ -436,6 +328,7 @@ def init_logging(
         enabled=not disable_file,
         log_level=log_level,
         cli_args=cli_args,
+        command=command,
     )
 
     # Set up console logging (unchanged behavior)
@@ -452,22 +345,22 @@ def cli_args_to_dict(**kwargs: Any) -> dict[str, Any]:
     """Convert CLI arguments to dictionary for logging."""
     # Filter out None values and internal parameters
     filtered_args = {}
-    skip_keys = {'console', 'logger', 'config_file_content'}
+    skip_keys = {"console", "logger", "config_file_content"}
     # Keys whose values may carry credentials must never be written
     # verbatim to the log file (e.g. git_filter can embed real
     # tokens when supplied via GERRIT_GIT_FILTER).
-    sensitive_keys = {'git_filter', 'github_token'}
+    sensitive_keys = {"git_filter", "github_token"}
 
     for key, value in kwargs.items():
         if key not in skip_keys and value is not None:
             if key in sensitive_keys:
-                filtered_args[key] = '<redacted>'
+                filtered_args[key] = "<redacted>"
             # Convert Path objects to strings
             elif isinstance(value, Path):
                 filtered_args[key] = str(value)
             # Convert lists to comma-separated strings for readability
             elif isinstance(value, list):
-                filtered_args[key] = ', '.join(str(item) for item in value)
+                filtered_args[key] = ", ".join(str(item) for item in value)
             else:
                 filtered_args[key] = value
 

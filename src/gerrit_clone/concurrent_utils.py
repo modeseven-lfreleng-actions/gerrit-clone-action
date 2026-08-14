@@ -154,6 +154,7 @@ def handle_sigint_gracefully() -> None:
 
     Call this at the start of CLI commands that use threading.
     """
+
     def signal_handler(signum: int, frame: object) -> None:  # noqa: ARG001
         raise KeyboardInterrupt()
 

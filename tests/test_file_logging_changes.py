@@ -234,3 +234,39 @@ class TestDynamicLogFileNaming:
 
             finally:
                 os.chdir(original_cwd)
+
+
+class TestLogHeaderCommand:
+    """The log header must name the subcommand that actually ran.
+
+    init_logging() is shared by clone, refresh, mirror and reset, so a
+    hardcoded "clone" would misreport every other subcommand.
+    """
+
+    def _header_for(self, command: str) -> str:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "run.log"
+            init_logging(
+                log_file=log_path,
+                disable_file=False,
+                quiet=True,
+                cli_args={"host": "gerrit.example.org"},
+                command=command,
+            )
+            return log_path.read_text()
+
+    def test_header_records_the_invoked_subcommand(self) -> None:
+        for command in ("clone", "refresh", "mirror", "reset"):
+            header = self._header_for(command)
+            assert f"Command: gerrit-clone {command} --host" in header
+
+    def test_header_defaults_to_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "run.log"
+            init_logging(
+                log_file=log_path,
+                disable_file=False,
+                quiet=True,
+                cli_args={"host": "gerrit.example.org"},
+            )
+            assert "Command: gerrit-clone clone --host" in log_path.read_text()

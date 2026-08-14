@@ -184,14 +184,11 @@ class TestNetrcRequiredOption:
             env={"HOME": str(empty_netrc_dir)},
         )
 
-        # Should fail because --netrc-required and no .netrc found
-        # Note: The exact behavior depends on implementation
-        # Either exit code != 0 or error message about netrc
-        if result.exit_code != 0:
-            assert True  # Expected failure
-        else:
-            # If it succeeded, it should not have used netrc
-            pass
+        # --netrc-required must fail the run rather than fall through to
+        # an unauthenticated clone: the whole point of the flag is that
+        # missing credentials are an error, not a silent downgrade.
+        assert result.exit_code == ExitCode.CONFIGURATION_ERROR
+        assert "--netrc-required" in result.output
 
     @patch("gerrit_clone.cli.discover_projects")
     @patch("gerrit_clone.cli.clone_repositories")
