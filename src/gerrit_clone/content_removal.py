@@ -1,0 +1,203 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+"""File removal from bare git repositories via ``git filter-repo``.
+
+Provides the availability probe for ``git filter-repo``, the preferred
+history-rewriting removal path, and the ``git ls-tree`` helper used by
+the worktree fallback in :mod:`gerrit_clone.content_worktree`.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from typing import TYPE_CHECKING
+
+from gerrit_clone.logging import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+logger = get_logger(__name__)
+
+
+def _check_git_filter_repo() -> bool:
+    """Check if git-filter-repo is available.
+
+    Returns:
+        ``True`` if ``git filter-repo`` is available on PATH.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "filter-repo", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _build_filter_repo_command(
+    repo_path: Path, patterns: list[str]
+) -> tuple[
+    list[str],
+    list[str],
+]:
+    """Build the ``git filter-repo`` command line for *patterns*.
+
+    Returns:
+        Tuple of ``(command, applied_patterns)``.  Patterns that would
+        be unsafe or meaningless are skipped and excluded from
+        ``applied_patterns``.
+    """
+    cmd: list[str] = [
+        "git",
+        "-C",
+        str(repo_path),
+        "filter-repo",
+        "--force",
+    ]
+
+    applied: list[str] = []
+    for pattern in patterns:
+        if pattern.startswith("regex:"):
+            # Use --path-regex with --invert-paths
+            regex = pattern[len("regex:") :]
+            if not regex:
+                # A bare ``regex:`` is an empty regex, which matches
+                # every path. Combined with ``--invert-paths`` that
+                # would wipe the entire repository history. Reject it
+                # explicitly, mirroring ``match_file_pattern``.
+                logger.warning("Empty regex pattern (bare 'regex:') ignored")
+                continue
+            cmd.extend(["--path-regex", regex, "--invert-paths"])
+            applied.append(pattern)
+        elif any(c in pattern for c in ("*", "?", "[", "]")):
+            cmd.extend(["--path-glob", pattern, "--invert-paths"])
+            applied.append(pattern)
+        elif not pattern:
+            # An empty exact path is meaningless; skip it rather than
+            # passing an empty ``--path`` to git filter-repo.
+            logger.warning("Empty file pattern ignored")
+            continue
+        else:
+            # Exact path — use --path with --invert-paths
+            cmd.extend(["--path", pattern, "--invert-paths"])
+            applied.append(pattern)
+
+    return cmd, applied
+
+
+def _remove_files_filter_repo(
+    repo_path: Path,
+    patterns: list[str],
+    *,
+    timeout: int = 300,
+) -> list[str]:
+    """Remove files using git filter-repo (all history).
+
+    Args:
+        repo_path: Path to the bare git repository.
+        patterns: File path patterns to remove.
+        timeout: Timeout for the operation.
+
+    Returns:
+        List of pattern arguments that were applied.
+    """
+    cmd, applied = _build_filter_repo_command(repo_path, patterns)
+
+    if not applied:
+        return []
+
+    logger.info(
+        "Removing files from %s using git filter-repo: %s",
+        repo_path.name,
+        applied,
+    )
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            msg = (
+                f"git filter-repo failed for {repo_path.name}: {result.stderr.strip()}"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        logger.info(
+            "Successfully filtered files from %s",
+            repo_path.name,
+        )
+        return applied
+    except subprocess.TimeoutExpired:
+        msg = f"git filter-repo timed out for {repo_path.name} after {timeout}s"
+        logger.error(msg)
+        raise RuntimeError(msg) from None
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        msg = f"git filter-repo error for {repo_path.name}: {exc}"
+        logger.error(msg)
+        raise RuntimeError(msg) from exc
+
+
+def _list_tree_files(
+    repo_path: Path,
+    ref: str,
+    *,
+    timeout: int = 300,
+) -> list[str]:
+    """List all files in a bare repo at a given ref.
+
+    Args:
+        repo_path: Path to the bare git repository.
+        ref: Git ref to list files from.
+        timeout: Timeout in seconds for the ls-tree operation.
+
+    Returns:
+        List of file paths relative to the repo root.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                ref,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return []
+        return [line for line in result.stdout.strip().splitlines() if line]
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "git ls-tree timed out for %s (ref %s) after %ds",
+            repo_path.name,
+            ref,
+            timeout,
+        )
+        return []
+    except OSError as exc:
+        logger.warning(
+            "git ls-tree failed for %s (ref %s): %s",
+            repo_path.name,
+            ref,
+            exc,
+        )
+        return []

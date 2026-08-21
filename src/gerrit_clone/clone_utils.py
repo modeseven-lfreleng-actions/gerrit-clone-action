@@ -10,9 +10,11 @@ reducing duplication and ensuring consistent behavior.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from gerrit_clone.models import Config
@@ -144,7 +146,128 @@ def is_retryable_git_error(error_output: str) -> bool:
     return False
 
 
-def analyze_git_clone_error(error_output: str, project_name: str, host: str | None = None) -> str:  # noqa: PLR0911
+@dataclass(frozen=True)
+class _CloneError:
+    """Parsed git clone failure handed to the diagnostic builders."""
+
+    output: str
+    lowered: str
+    project_name: str
+    host: str | None
+
+
+def _ssh_auth_diagnostic(err: _CloneError) -> str:
+    msg = f"SSH authentication failed for {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 SSH key not added to ssh-agent (run: ssh-add <key-path>)\n"
+    msg += "  \u2022 SSH key not authorized on the server\n"
+    msg += "  \u2022 Wrong SSH user (try setting ssh_user in config)\n"
+    if err.host:
+        msg += f"\nTest SSH access: ssh -T {err.host}"
+    return msg
+
+
+def _host_key_diagnostic(err: _CloneError) -> str:
+    msg = f"SSH host key verification failed for {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 Host not in known_hosts file\n"
+    msg += "  \u2022 Host key has changed (security risk!)\n"
+    if err.host:
+        msg += f"\nAdd host key: ssh-keyscan {err.host} >> ~/.ssh/known_hosts\n"
+        msg += (
+            "Or disable strict checking (less secure): "
+            f"ssh -o StrictHostKeyChecking=no {err.host}"
+        )
+    return msg
+
+
+def _connection_refused_diagnostic(err: _CloneError) -> str:
+    port_match = None
+    if "port" in err.lowered:
+        # Try to extract port number
+        match = re.search(r"port (\d+)", err.lowered)
+        if match:
+            port_match = match.group(1)
+
+    msg = f"Connection refused for {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 SSH service is not running on the server\n"
+    if port_match:
+        msg += f"  \u2022 Wrong port (currently using {port_match})\n"
+    if err.host:
+        msg += f"  \u2022 Firewall blocking access to {err.host}\n"
+        msg += f"\nVerify SSH port: nmap -p 22,29418 {err.host}"
+    return msg
+
+
+def _dns_diagnostic(err: _CloneError) -> str:
+    msg = f"DNS resolution failed for {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 Hostname is incorrect\n"
+    msg += "  \u2022 DNS server is unavailable\n"
+    msg += "  \u2022 Network connectivity issue\n"
+    if err.host:
+        msg += f"\nTest DNS: nslookup {err.host}"
+    return msg
+
+
+def _repository_missing_diagnostic(err: _CloneError) -> str:
+    msg = f"Repository not found: {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 Repository name is incorrect\n"
+    msg += "  \u2022 Repository has been deleted or moved\n"
+    msg += "  \u2022 You don't have permission to access this repository"
+    return msg
+
+
+def _timeout_diagnostic(err: _CloneError) -> str:
+    msg = f"Connection timeout for {err.project_name}\n"
+    msg += "Possible causes:\n"
+    msg += "  \u2022 Network is slow or unstable\n"
+    msg += "  \u2022 Server is overloaded\n"
+    msg += "  \u2022 Repository is very large\n"
+    msg += "\nConsider increasing clone_timeout in config"
+    return msg
+
+
+def _network_diagnostic(err: _CloneError) -> str:
+    return f"Network error cloning {err.project_name}: {err.output.strip()}"
+
+
+def _all_of(*needles: str) -> Callable[[_CloneError], bool]:
+    """Build a matcher that requires every *needle* in the lowered output."""
+    return lambda err: all(needle in err.lowered for needle in needles)
+
+
+def _any_of(*needles: str) -> Callable[[_CloneError], bool]:
+    """Build a matcher that requires any *needle* in the lowered output."""
+    return lambda err: any(needle in err.lowered for needle in needles)
+
+
+# Ordered most-specific first: the first matching entry wins, so the broad
+# network catch-all has to stay last or it would shadow the entries above it.
+_CLONE_ERROR_DIAGNOSTICS: tuple[
+    tuple[Callable[[_CloneError], bool], Callable[[_CloneError], str]], ...
+] = (
+    (_all_of("permission denied", "publickey"), _ssh_auth_diagnostic),
+    (_any_of("host key verification failed"), _host_key_diagnostic),
+    (_any_of("connection refused"), _connection_refused_diagnostic),
+    (
+        _any_of("could not resolve hostname", "name or service not known"),
+        _dns_diagnostic,
+    ),
+    (
+        _any_of("repository not found", "does not exist"),
+        _repository_missing_diagnostic,
+    ),
+    (_any_of("timeout", "timed out"), _timeout_diagnostic),
+    (_any_of("network", "connection", "eof", "hung up"), _network_diagnostic),
+)
+
+
+def analyze_git_clone_error(
+    error_output: str, project_name: str, host: str | None = None
+) -> str:
     """Analyze git clone error and provide helpful diagnostic message.
 
     Args:
@@ -158,82 +281,15 @@ def analyze_git_clone_error(error_output: str, project_name: str, host: str | No
     if not error_output:
         return "Clone failed with no error output"
 
-    error_lower = error_output.lower()
-
-    # SSH authentication issues
-    if "permission denied" in error_lower and "publickey" in error_lower:
-        msg = f"SSH authentication failed for {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • SSH key not added to ssh-agent (run: ssh-add <key-path>)\n"
-        msg += "  • SSH key not authorized on the server\n"
-        msg += "  • Wrong SSH user (try setting ssh_user in config)\n"
-        if host:
-            msg += f"\nTest SSH access: ssh -T {host}"
-        return msg
-
-    # Host key verification
-    if "host key verification failed" in error_lower:
-        msg = f"SSH host key verification failed for {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • Host not in known_hosts file\n"
-        msg += "  • Host key has changed (security risk!)\n"
-        if host:
-            msg += f"\nAdd host key: ssh-keyscan {host} >> ~/.ssh/known_hosts\n"
-            msg += f"Or disable strict checking (less secure): ssh -o StrictHostKeyChecking=no {host}"
-        return msg
-
-    # Connection refused
-    if "connection refused" in error_lower:
-        port_match = None
-        if "port" in error_lower:
-            # Try to extract port number
-            match = re.search(r"port (\d+)", error_lower)
-            if match:
-                port_match = match.group(1)
-
-        msg = f"Connection refused for {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • SSH service is not running on the server\n"
-        if port_match:
-            msg += f"  • Wrong port (currently using {port_match})\n"
-        if host:
-            msg += f"  • Firewall blocking access to {host}\n"
-            msg += f"\nVerify SSH port: nmap -p 22,29418 {host}"
-        return msg
-
-    # DNS resolution failures
-    if "could not resolve hostname" in error_lower or "name or service not known" in error_lower:
-        msg = f"DNS resolution failed for {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • Hostname is incorrect\n"
-        msg += "  • DNS server is unavailable\n"
-        msg += "  • Network connectivity issue\n"
-        if host:
-            msg += f"\nTest DNS: nslookup {host}"
-        return msg
-
-    # Repository not found
-    if "repository not found" in error_lower or "does not exist" in error_lower:
-        msg = f"Repository not found: {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • Repository name is incorrect\n"
-        msg += "  • Repository has been deleted or moved\n"
-        msg += "  • You don't have permission to access this repository"
-        return msg
-
-    # Timeout errors
-    if "timeout" in error_lower or "timed out" in error_lower:
-        msg = f"Connection timeout for {project_name}\n"
-        msg += "Possible causes:\n"
-        msg += "  • Network is slow or unstable\n"
-        msg += "  • Server is overloaded\n"
-        msg += "  • Repository is very large\n"
-        msg += "\nConsider increasing clone_timeout in config"
-        return msg
-
-    # Generic network errors
-    if any(pattern in error_lower for pattern in ["network", "connection", "eof", "hung up"]):
-        return f"Network error cloning {project_name}: {error_output.strip()}"
+    err = _CloneError(
+        output=error_output,
+        lowered=error_output.lower(),
+        project_name=project_name,
+        host=host,
+    )
+    for matches, build in _CLONE_ERROR_DIAGNOSTICS:
+        if matches(err):
+            return build(err)
 
     # Default: return original error
     return error_output.strip()
