@@ -122,9 +122,7 @@ def format_rate_limit_table(
     reset_epoch = rate_info.get("X-RateLimit-Reset")
     if reset_epoch is not None:
         try:
-            reset_dt = datetime.fromtimestamp(
-                int(reset_epoch), tz=UTC
-            )
+            reset_dt = datetime.fromtimestamp(int(reset_epoch), tz=UTC)
             table.add_row(
                 "Reset Time",
                 reset_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -157,9 +155,7 @@ def format_rate_limit_table(
     # -- Response body (truncated) --
     if response_body is not None:
         body_display = (
-            response_body[:200] + "…"
-            if len(response_body) > 200
-            else response_body
+            response_body[:200] + "…" if len(response_body) > 200 else response_body
         )
         table.add_row("Response Body", body_display)
 

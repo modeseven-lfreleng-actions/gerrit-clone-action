@@ -257,7 +257,7 @@ def get_head_ref(repo_path: Path) -> str | None:
 
         content = head_file.read_text().strip()
         if content.startswith("ref: "):
-            return content[len("ref: "):]
+            return content[len("ref: ") :]
         # Detached HEAD (raw SHA) — no symbolic ref
         return None
     except Exception:
@@ -281,7 +281,9 @@ def list_local_branches(repo_path: Path) -> list[str]:
     try:
         result = subprocess.run(
             [
-                "git", "-C", str(repo_path),
+                "git",
+                "-C",
+                str(repo_path),
                 "for-each-ref",
                 "--format=%(refname:short)",
                 "refs/heads/",
@@ -291,11 +293,7 @@ def list_local_branches(repo_path: Path) -> list[str]:
             check=True,
             timeout=10,
         )
-        branches = [
-            line.strip()
-            for line in result.stdout.splitlines()
-            if line.strip()
-        ]
+        branches = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         return sorted(branches)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception):
         return []
