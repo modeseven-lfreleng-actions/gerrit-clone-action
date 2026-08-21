@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 Matthew Watkins <mwatkins@linuxfoundation.org>
 
-"""Improved progress tracking with environment detection and fallbacks."""
+"""Improved progress tracking with environment detection and fallbacks.
+
+Owns :class:`ProgressTracker`, the thread-safe store of per-project clone
+state, and selects the display mode for the current environment. Rendering,
+Rich component lifecycle, summary statistics and result bookkeeping live in
+the sibling ``progress_*`` modules and are re-exported here where they form
+part of this module's public surface.
+"""
 
 from __future__ import annotations
 
@@ -9,56 +16,53 @@ import os
 import re
 import sys
 import threading
-from datetime import UTC, datetime, timedelta
-from enum import Enum
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from rich.console import Console, Group
-    from rich.live import Live
-    from rich.panel import Panel
-    from rich.progress import Progress, TaskID
-    from rich.table import Table
-    from rich.text import Text
-
-try:
-    from rich.console import Console, Group
-    from rich.live import Live
-    from rich.panel import Panel
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TaskID,
-        TextColumn,
-    )
-    from rich.table import Table
-    from rich.text import Text
-
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-
-import contextlib
+    from rich.console import Console
 
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project
+from gerrit_clone.progress_display import (
+    MAX_PROJECTS_FOR_TABLE,
+    MIN_CONSOLE_WIDTH_FOR_TABLE,
+    create_display,
+    create_simple_progress_display,
+)
+from gerrit_clone.progress_live import (
+    fall_back_to_simple,
+    initialize_rich_components,
+    start_rich_periodic,
+    start_rich_simple,
+    start_text_mode,
+    stop_display,
+    update_display,
+    update_progress_count,
+)
+from gerrit_clone.progress_modes import ProgressMode
+from gerrit_clone.progress_results import (
+    apply_status_timestamps,
+    build_retry_result,
+    create_initial_results,
+)
+from gerrit_clone.progress_summary import (
+    compute_summary,
+    log_final_summary,
+    log_periodic_summary,
+)
+from gerrit_clone.rich_optional import RICH_AVAILABLE, Console
 
 logger = get_logger(__name__)
 
-# Display configuration constants
-MAX_PROJECTS_FOR_TABLE = 30
-MIN_CONSOLE_WIDTH_FOR_TABLE = 100
-
-
-class ProgressMode(Enum):
-    """Progress display modes."""
-
-    RICH_PERIODIC = "rich_periodic"  # Rich UI with periodic updates (no Live)
-    RICH_SIMPLE = "rich_simple"  # Simple Rich progress without Live
-    TEXT_ONLY = "text_only"  # Plain text logging only
-    DISABLED = "disabled"  # No progress display
+__all__ = [
+    "MAX_PROJECTS_FOR_TABLE",
+    "MIN_CONSOLE_WIDTH_FOR_TABLE",
+    "ProgressMode",
+    "ProgressTracker",
+    "create_progress_tracker",
+    "create_simple_progress_display",
+]
 
 
 class ProgressTracker:
@@ -91,6 +95,9 @@ class ProgressTracker:
         self._progress: Any | None = None
         self._live: Any | None = None
         self._main_task: Any | None = None
+        # Display refresh pacing; reset when Rich components are initialized
+        self._last_update_time = datetime.now(UTC)
+        self._update_interval = 0.5
 
         # Determine progress mode
         self._mode = force_mode or self._detect_progress_mode()
@@ -109,7 +116,7 @@ class ProgressTracker:
                     force_terminal=self._mode == ProgressMode.RICH_PERIODIC,
                     force_interactive=self._mode == ProgressMode.RICH_PERIODIC,
                 )
-                self._initialize_rich_components()
+                initialize_rich_components(self)
         else:
             self.console = None
             self._progress = None
@@ -158,29 +165,6 @@ class ProgressTracker:
         # Default to periodic Rich mode with Live display
         return ProgressMode.RICH_PERIODIC
 
-    def _initialize_rich_components(self) -> None:
-        """Initialize Rich components based on mode."""
-        if not RICH_AVAILABLE or not self.console:
-            return
-
-        columns = [
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TextColumn("[progress.elapsed]{task.fields[elapsed]}"),
-        ]
-
-        self._progress = Progress(
-            *columns,
-            console=self.console,
-            transient=self._mode == ProgressMode.RICH_SIMPLE,
-        )
-
-        self._live = None
-        self._last_update_time = datetime.now(UTC)
-        self._update_interval = 0.5  # Update every 0.5 seconds for responsiveness
-
     def start(self, projects: list[Project]) -> None:
         """Start progress tracking for projects.
 
@@ -190,82 +174,15 @@ class ProgressTracker:
         with self._lock:
             self._start_time = datetime.now(UTC)
             self._projects = {p.name: p for p in projects}
-            self._results = {}
-
-            for project in projects:
-                target_path = self.config.path / project.name
-                self._results[project.name] = CloneResult(
-                    project=project,
-                    status=CloneStatus.PENDING,
-                    path=target_path,
-                    started_at=None,
-                    completed_at=None,
-                    error_message=None,
-                )
+            self._results = create_initial_results(projects, self.config.path)
 
         if self._mode == ProgressMode.RICH_PERIODIC:
-            self._start_rich_periodic(projects)
+            start_rich_periodic(self, projects)
         elif self._mode == ProgressMode.RICH_SIMPLE:
-            self._start_rich_simple(projects)
+            start_rich_simple(self, projects)
         elif self._mode == ProgressMode.TEXT_ONLY:
-            self._start_text_mode(projects)
+            start_text_mode(projects)
         # DISABLED mode does nothing
-
-    def _start_rich_periodic(self, projects: list[Project]) -> None:
-        """Start Rich display with periodic updates (no Live interference)."""
-        if not self._progress or not self.console:
-            return
-
-        try:
-            self._main_task = self._progress.add_task(
-                "Cloning repositories", total=len(projects), elapsed="0:00"
-            )
-
-            display_content = self._create_display()
-            self._live = Live(
-                display_content,
-                console=self.console,
-                refresh_per_second=2,
-                vertical_overflow="visible",
-            )
-            self._live.start()
-
-            # Set initial log message
-            self.update_log_message("Starting repository clone operations...")
-
-        except Exception as e:
-            logger.warning(f"Error starting Rich periodic display: {e}")
-            # Ensure Live display is properly stopped if it was partially started
-            if self._live:
-                with contextlib.suppress(Exception):
-                    self._live.stop()
-                self._live = None
-            # Fall back to simple mode
-            self._mode = ProgressMode.RICH_SIMPLE
-            self._start_rich_simple(projects)
-
-    def _start_rich_simple(self, projects: list[Project]) -> None:
-        """Start simple Rich progress bar."""
-        if not self._progress:
-            return
-
-        try:
-            self._main_task = self._progress.add_task(
-                "Cloning repositories", total=len(projects), elapsed="0:00"
-            )
-
-            if RICH_AVAILABLE:
-                self._progress.start()
-
-        except Exception as e:
-            logger.warning(f"Failed to start Rich simple display: {e}")
-            # Fall back to text mode
-            self._mode = ProgressMode.TEXT_ONLY
-            self._start_text_mode(projects)
-
-    def _start_text_mode(self, projects: list[Project]) -> None:
-        """Start text-only progress logging."""
-        logger.info(f"Starting clone of {len(projects)} repositories")
 
     def update_for_retry(self, retry_projects: list[Project]) -> None:
         """Update progress tracker for retry operations without resetting display.
@@ -277,23 +194,8 @@ class ProgressTracker:
             # Reset only the retry projects' status to pending, keep existing results
             for project in retry_projects:
                 if project.name in self._results:
-                    # Update existing result to pending status for retry
-                    # Preserve attempts count and nested_under info for accurate retry tracking
-                    existing_result = self._results[project.name]
-                    self._results[project.name] = CloneResult(
-                        project=project,
-                        status=CloneStatus.PENDING,
-                        path=existing_result.path,
-                        started_at=None,
-                        completed_at=None,
-                        error_message=None,
-                        attempts=existing_result.attempts,  # Preserve attempt count for accurate retry metrics
-                        nested_under=existing_result.nested_under,  # Preserve nested dependency information
-                        first_started_at=existing_result.first_started_at
-                        or existing_result.started_at,  # Preserve original start time
-                        retry_count=existing_result.retry_count
-                        + 1,  # Increment retry counter
-                        last_attempt_duration=existing_result.last_attempt_duration,  # Preserve last attempt duration
+                    self._results[project.name] = build_retry_result(
+                        project, self._results[project.name]
                     )
 
             # Don't reset progress bar - keep existing total and continue from current state
@@ -316,21 +218,11 @@ class ProgressTracker:
             except Exception as e:
                 logger.warning(f"Error stopping progress display: {e}")
 
-        # Always call _stop_display for proper cleanup
-        self._stop_display()
+        # Always call stop_display for proper cleanup
+        stop_display(self)
 
         if self._mode == ProgressMode.TEXT_ONLY:
             self._show_final_summary()
-
-    def _stop_display(self) -> None:
-        """Stop and cleanup display components."""
-        if self._live and RICH_AVAILABLE:
-            try:
-                self._live.stop()
-            except Exception as e:
-                logger.debug(f"Error stopping live display: {e}")
-            finally:
-                self._live = None
 
     def update_project_status(
         self, project_name: str, status: CloneStatus, error: str | None = None
@@ -354,34 +246,7 @@ class ProgressTracker:
                 result.error_message = error
 
             # Set timestamps
-            now = datetime.now(UTC)
-            if status == CloneStatus.CLONING and not result.started_at:
-                result.started_at = now
-                # Set first_started_at if this is the very first attempt
-                if not result.first_started_at:
-                    result.first_started_at = now
-            elif status in (
-                CloneStatus.SUCCESS,
-                CloneStatus.FAILED,
-                CloneStatus.SKIPPED,
-                CloneStatus.ALREADY_EXISTS,
-            ):
-                if not result.completed_at:
-                    result.completed_at = now
-                    if result.started_at:
-                        # Calculate duration from first attempt to completion
-                        if result.first_started_at:
-                            result.duration_seconds = (
-                                result.completed_at - result.first_started_at
-                            ).total_seconds()
-                        else:
-                            result.duration_seconds = (
-                                result.completed_at - result.started_at
-                            ).total_seconds()
-                        # Track duration of just this final attempt
-                        result.last_attempt_duration = (
-                            result.completed_at - result.started_at
-                        ).total_seconds()
+            apply_status_timestamps(result, status, datetime.now(UTC))
 
             if self._main_task and self._progress:
                 if old_status == CloneStatus.PENDING and status in (
@@ -390,9 +255,9 @@ class ProgressTracker:
                     CloneStatus.SKIPPED,
                     CloneStatus.ALREADY_EXISTS,
                 ):
-                    self._update_progress_count()
+                    update_progress_count(self)
 
-        self._update_display()
+        update_display(self)
 
         if self._mode == ProgressMode.TEXT_ONLY:
             self._log_project_status(project_name, status, error)
@@ -406,71 +271,9 @@ class ProgressTracker:
         with self._lock:
             if result.project.name in self._results:
                 self._results[result.project.name] = result
-                self._update_progress_count()
+                update_progress_count(self)
 
-        self._update_display()
-
-    def _update_progress_count(self) -> None:
-        """Update the progress bar with current completion count and elapsed time."""
-        if self._main_task and self._progress and RICH_AVAILABLE:
-            if hasattr(self._progress, "update"):
-                summary = self._get_summary_unsafe()
-
-                # Calculate elapsed time
-                if self._start_time:
-                    elapsed_seconds = (
-                        datetime.now(UTC) - self._start_time
-                    ).total_seconds()
-                    elapsed_minutes, secs = divmod(int(elapsed_seconds), 60)
-                    elapsed_hours, mins = divmod(elapsed_minutes, 60)
-                    if elapsed_hours > 0:
-                        elapsed_str = f"{elapsed_hours}:{mins:02d}:{secs:02d}"
-                    else:
-                        elapsed_str = f"{mins}:{secs:02d}"
-                else:
-                    elapsed_str = "0:00"
-
-                self._progress.update(
-                    self._main_task, completed=summary["completed"], elapsed=elapsed_str
-                )
-
-    def _update_display(self) -> None:
-        """Update the display based on current mode."""
-        if self._mode == ProgressMode.RICH_PERIODIC and self._live and RICH_AVAILABLE:
-            # Use Live display for real-time updates
-            try:
-                self._live.update(self._create_display())
-                self._last_update_time = datetime.now(UTC)
-            except Exception as e:
-                logger.debug(f"Error updating live display: {e}")
-                # If Live display fails, fall back to simple mode to prevent further issues
-                with contextlib.suppress(Exception):
-                    self._live.stop()
-                self._live = None
-                self._mode = ProgressMode.RICH_SIMPLE
-        elif (
-            self._mode == ProgressMode.RICH_PERIODIC and self.console and RICH_AVAILABLE
-        ):
-            # Fallback to periodic console updates for RICH_PERIODIC without Live
-            now = datetime.now(UTC)
-            if (now - self._last_update_time).total_seconds() >= self._update_interval:
-                try:
-                    self.console.print(self._create_display())
-                    self._last_update_time = now
-                except Exception as e:
-                    logger.warning(f"Error updating periodic display: {e}")
-        elif (
-            self._mode == ProgressMode.RICH_SIMPLE and self._progress and RICH_AVAILABLE
-        ):
-            # Handle RICH_SIMPLE mode - just update the progress bar, no custom display
-            if self._main_task:
-                summary = self._get_summary_unsafe()
-                try:
-                    self._progress.update(
-                        self._main_task, completed=summary["completed"]
-                    )
-                except Exception as e:
-                    logger.debug(f"Error updating simple progress: {e}")
+        update_display(self)
 
     def _log_project_status(
         self, project_name: str, status: CloneStatus, error: str | None = None
@@ -485,7 +288,7 @@ class ProgressTracker:
         # Periodic summary
         now = datetime.now(UTC)
         if (now - self._last_log_time).total_seconds() >= self._log_interval:
-            self._log_periodic_summary()
+            log_periodic_summary(self._get_summary_unsafe())
             self._last_log_time = now
 
     def update_log_message(self, message: str) -> None:
@@ -500,14 +303,11 @@ class ProgressTracker:
         # Refresh display if using Live mode
         if self._mode == ProgressMode.RICH_PERIODIC and self._live and RICH_AVAILABLE:
             try:
-                self._live.update(self._create_display())
+                self._live.update(create_display(self))
             except Exception as e:
                 logger.debug(f"Error updating live display: {e}")
                 # If Live display fails, fall back to simple mode
-                with contextlib.suppress(Exception):
-                    self._live.stop()
-                self._live = None
-                self._mode = ProgressMode.RICH_SIMPLE
+                fall_back_to_simple(self)
 
     def set_status(self, message: str, temp: bool = False) -> None:  # noqa: ARG002
         """Set a status message that integrates with the progress display.
@@ -545,39 +345,9 @@ class ProgressTracker:
         with self._log_message_lock:
             return self._current_log_message
 
-    def _log_periodic_summary(self) -> None:
-        """Log periodic summary in text mode."""
-        summary = self._get_summary_unsafe()
-        total = summary["total"]
-        completed = (
-            summary["success"]
-            + summary["failed"]
-            + summary["skipped"]
-            + summary["already_exists"]
-        )
-        logger.debug(
-            f"Progress: {completed}/{total} completed ({summary['cloning']} active, {summary['pending']} pending)"
-        )
-
     def _show_final_summary(self) -> None:
         """Log final summary."""
-        summary = self.get_summary()
-        duration = self._format_duration(summary["duration"])
-
-        logger.debug("=== Clone Summary ===")
-        logger.debug(f"Duration: {duration}")
-        logger.debug(f"Total: {summary['total']}")
-        logger.debug(f"Success: {summary['success']}")
-        logger.debug(f"Failed: {summary['failed']}")
-        logger.debug(f"Skipped: {summary['skipped']}")
-        logger.debug(f"Already exists: {summary['already_exists']}")
-
-        if summary["failed"] > 0:
-            logger.debug("Failed projects:")
-            for result in self._results.values():
-                if result.status == CloneStatus.FAILED:
-                    error_msg = result.error_message or "Unknown error"
-                    logger.debug(f"  - {result.project.name}: {error_msg}")
+        log_final_summary(self.get_summary(), self._results)
 
     def get_results(self) -> list[CloneResult]:
         """Get all project results.
@@ -599,226 +369,7 @@ class ProgressTracker:
 
     def _get_summary_unsafe(self) -> dict[str, Any]:
         """Get summary without locking (internal use only)."""
-        success = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.SUCCESS
-        )
-        failed = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.FAILED
-        )
-        skipped = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.SKIPPED
-        )
-        already_exists = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.ALREADY_EXISTS
-        )
-        cloning = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.CLONING
-        )
-        pending = sum(
-            1 for r in self._results.values() if r.status == CloneStatus.PENDING
-        )
-
-        total = len(self._results)
-        completed = success + failed + skipped + already_exists
-
-        # Calculate duration
-        if self._start_time and self._end_time:
-            duration = self._end_time - self._start_time
-        elif self._start_time:
-            duration = datetime.now(UTC) - self._start_time
-        else:
-            duration = timedelta(0)
-
-        return {
-            "total": total,
-            "completed": completed,
-            "success": success,
-            "failed": failed,
-            "skipped": skipped,
-            "already_exists": already_exists,
-            "cloning": cloning,
-            "pending": pending,
-            "duration": duration,
-        }
-
-    def _create_display(self) -> Any:
-        """Create Rich display content."""
-        if not RICH_AVAILABLE or not self.console:
-            return ""
-
-        summary = self._get_summary_unsafe()
-
-        status_parts = []
-        if summary["success"] > 0:
-            status_parts.append(f"[green]✓ {summary['success']}[/green]")
-        if summary["failed"] > 0:
-            status_parts.append(f"[red]✗ {summary['failed']}[/red]")
-        if summary["already_exists"] > 0:
-            status_parts.append(f"[yellow]≈ {summary['already_exists']}[/yellow]")
-        if summary["skipped"] > 0:
-            status_parts.append(f"[dim]⊘ {summary['skipped']}[/dim]")
-        if summary["cloning"] > 0:
-            status_parts.append(f"[blue]⬇ {summary['cloning']}[/blue]")
-        if summary["pending"] > 0:
-            status_parts.append(f"[dim]⏳ {summary['pending']}[/dim]")
-
-        status_text = (
-            " | ".join(status_parts) if status_parts else "[dim]No activity[/dim]"
-        )
-
-        content_parts: list[Any] = []
-        if self._progress:
-            summary = self._get_summary_unsafe()
-
-            # Calculate manual elapsed time to avoid reset
-            if self._start_time:
-                elapsed_seconds = (datetime.now(UTC) - self._start_time).total_seconds()
-                elapsed_minutes, secs = divmod(int(elapsed_seconds), 60)
-                elapsed_hours, mins = divmod(elapsed_minutes, 60)
-                if elapsed_hours > 0:
-                    elapsed_str = f"{elapsed_hours}:{mins:02d}:{secs:02d}"
-                else:
-                    elapsed_str = f"{mins}:{secs:02d}"
-            else:
-                elapsed_str = "0:00"
-
-            fresh_progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TextColumn("[progress.elapsed]{task.fields[elapsed]}"),
-                expand=True,
-            )
-            fresh_progress.add_task(
-                "Cloning repositories",
-                completed=summary["completed"],
-                total=summary["total"],
-                elapsed=elapsed_str,
-            )
-            content_parts.append(fresh_progress)
-
-        # Add project table if reasonable number of projects and terminal is wide enough
-        if (
-            len(self._results) <= MAX_PROJECTS_FOR_TABLE
-            and self.console
-            and self.console.size.width > MIN_CONSOLE_WIDTH_FOR_TABLE
-        ):
-            content_parts.append(self._create_project_table())
-
-        # Combine content
-        if len(content_parts) == 1:
-            main_content = content_parts[0]
-        else:
-            main_content = Group(*content_parts)
-
-        # Add log message line
-        log_message = self.get_current_log_message()
-        log_line = Text.from_markup(
-            f"[dim]ℹ️  {log_message}[/dim]" if log_message else "[dim]Ready...[/dim]",  # noqa: RUF001
-            overflow="fold",
-        )
-
-        # Combine progress and log message
-        if isinstance(main_content, Group):
-            display_content = Group(main_content, "", log_line)
-        else:
-            display_content = Group(main_content, "", log_line)
-
-        return Panel(
-            display_content,
-            title="Repository Clone Progress",
-            subtitle=status_text,
-            border_style="blue",
-        )
-
-    def _create_project_table(self) -> Any:
-        """Create table showing project status."""
-        if not RICH_AVAILABLE:
-            return ""
-
-        table = Table(show_header=True, header_style="bold blue", show_lines=False)
-        table.add_column("Project", style="cyan", no_wrap=True)
-        table.add_column("Status", justify="center", width=8)
-        table.add_column("Duration", justify="right", width=10)
-
-        # Sort projects by status (active first, then completed, then pending)
-        status_order = {
-            CloneStatus.CLONING: 0,
-            CloneStatus.SUCCESS: 1,
-            CloneStatus.FAILED: 2,
-            CloneStatus.ALREADY_EXISTS: 3,
-            CloneStatus.SKIPPED: 4,
-            CloneStatus.PENDING: 5,
-        }
-
-        sorted_results = sorted(
-            self._results.values(),
-            key=lambda r: (status_order.get(r.status, 99), r.project.name),
-        )
-
-        # Show up to 20 most relevant projects
-        for result in sorted_results[:20]:
-            status_display = self._format_status_display(result.status)
-
-            # Format duration
-            if result.completed_at and result.started_at:
-                duration = result.completed_at - result.started_at
-                duration_str = self._format_duration(duration)
-            elif result.started_at:
-                current_duration = datetime.now(UTC) - result.started_at
-                duration_str = f"~{self._format_duration(current_duration)}"
-            else:
-                duration_str = ""
-
-            table.add_row(result.project.name, status_display, duration_str)
-
-        return table
-
-    def _format_status_display(self, status: CloneStatus) -> str | Any:
-        """Format status with icon and color for display.
-
-        Args:
-            status: Clone status
-
-        Returns:
-            Formatted Rich Text or string if Rich not available
-        """
-        if not RICH_AVAILABLE:
-            return str(status.value)
-
-        status_map = {
-            CloneStatus.PENDING: ("⏳", "dim"),
-            CloneStatus.CLONING: ("⬇", "blue"),
-            CloneStatus.SUCCESS: ("✓", "green"),
-            CloneStatus.FAILED: ("✗", "red"),
-            CloneStatus.SKIPPED: ("⊘", "dim"),
-            CloneStatus.ALREADY_EXISTS: ("≈", "yellow"),
-        }
-
-        icon, style = status_map.get(status, ("?", "white"))
-        return Text(icon, style=style)
-
-    def _format_duration(self, duration: timedelta) -> str:
-        """Format duration for display.
-
-        Args:
-            duration: Duration to format
-
-        Returns:
-            Formatted duration string
-        """
-        total_seconds = int(duration.total_seconds())
-
-        if total_seconds < 60:
-            return f"{total_seconds}s"
-        elif total_seconds < 3600:
-            minutes, seconds = divmod(total_seconds, 60)
-            return f"{minutes}m{seconds:02d}s"
-        else:
-            hours, remainder = divmod(total_seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
-            return f"{hours}h{minutes:02d}m"
+        return compute_summary(self._results, self._start_time, self._end_time)
 
 
 def create_progress_tracker(config: Config) -> ProgressTracker | None:
@@ -833,35 +384,3 @@ def create_progress_tracker(config: Config) -> ProgressTracker | None:
     if config.quiet:
         return None
     return ProgressTracker(config)
-
-
-def create_simple_progress_display(
-    total: int, description: str = "Processing"
-) -> Any | None:
-    """Create a simple progress display for basic operations.
-
-    Args:
-        total: Total number of items
-        description: Description for progress bar
-
-    Returns:
-        Simple progress display or None if Rich not available
-    """
-    if not RICH_AVAILABLE:
-        return None
-
-    try:
-        console = Console(stderr=True)
-        progress = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            console=console,
-        )
-
-        task = progress.add_task(description, total=total)
-        progress.start()
-
-        return {"progress": progress, "task": task, "console": console}
-    except Exception:
-        return None
