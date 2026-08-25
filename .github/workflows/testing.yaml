@@ -46,17 +46,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: "Set up Python"
+      - name: "Install uv"
         # yamllint disable-line rule:line-length
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          # Pin the installer too; the action SHA alone leaves uv floating.
+          version: '0.12.5'
           python-version: '3.11'
 
       - name: "Install gerrit-clone CLI"
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
+          # Hash-pinned via uv.lock; --locked rejects lockfile drift.
+          uv sync --locked --no-dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: "Test GitHub Action: gerrit.o-ran-sc.org [SSH]"
         uses: ./
@@ -221,18 +224,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: "Set up Python"
+      - name: "Install uv"
         # yamllint disable-line rule:line-length
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          # Pin the installer too; the action SHA alone leaves uv floating.
+          version: '0.12.5'
           python-version: '3.11'
 
       - name: "Install gerrit-clone CLI and git-filter-repo"
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install git-filter-repo
+          # Hash-pinned via uv.lock; --locked rejects lockfile drift.
+          # git-filter-repo ships in the dev dependency group, so this
+          # sync deliberately keeps dev dependencies.
+          uv sync --locked
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       # ---------------------------------------------------------------
       # Test 1: Clone with --git-filter (explicit token replacement)
