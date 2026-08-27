@@ -106,7 +106,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
                     result.error_message = str(e)
                     return False
 
-            except RefreshTimeoutError:
+            except RefreshTimeoutError as e:
                 result.retry_count += 1
                 if attempt < max_attempts:
                     delay = self._calculate_adaptive_delay(attempt)
@@ -118,6 +118,12 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
                     logger.error(
                         f"❌ {result.project_name}: Timeout after {max_attempts} attempts"
                     )
+                    # Record which operation timed out and after how
+                    # long, as every sibling branch does. Without it
+                    # _apply_refresh_outcome substitutes "Refresh failed
+                    # for unknown reason", which cannot distinguish a
+                    # slow server from a hung fetch.
+                    result.error_message = str(e)
                     return False
 
             except RefreshError as e:

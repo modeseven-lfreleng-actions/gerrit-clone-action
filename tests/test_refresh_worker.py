@@ -1474,6 +1474,53 @@ class TestAuthRetryBudget:
         assert mock_refresh.call_count == 3
         assert mock_sleep.call_count == 2
 
+    def test_exhausted_timeout_records_the_operation_and_budget(self):
+        """An exhausted timeout must not report "unknown reason".
+
+        Every sibling branch records ``str(e)`` before returning; this
+        one did not, so _apply_refresh_outcome substituted a generic
+        message and discarded which git operation timed out and after
+        how long -- exactly the detail needed to tell a slow server
+        from a hung fetch.
+        """
+        worker = RefreshWorker(
+            retry_policy=RetryPolicy(max_attempts=2, base_delay=0.01),
+            ssh_jitter_seconds=0,
+        )
+        result = self._make_result()
+        with (
+            patch.object(
+                worker,
+                "_perform_refresh",
+                side_effect=RefreshTimeoutError("Fetch timeout after 300s"),
+            ),
+            patch("gerrit_clone.refresh_worker.time.sleep"),
+        ):
+            ok = worker._execute_adaptive_refresh(Path("/tmp/repo"), result)
+
+        assert ok is False
+        assert result.error_message == "Fetch timeout after 300s"
+
+    def test_a_recovered_timeout_leaves_no_error_message(self):
+        """A retry that succeeds must not carry the earlier timeout."""
+        worker = RefreshWorker(
+            retry_policy=RetryPolicy(max_attempts=3, base_delay=0.01),
+            ssh_jitter_seconds=0,
+        )
+        result = self._make_result()
+        with (
+            patch.object(
+                worker,
+                "_perform_refresh",
+                side_effect=[RefreshTimeoutError("Pull timeout after 300s"), True],
+            ),
+            patch("gerrit_clone.refresh_worker.time.sleep"),
+        ):
+            ok = worker._execute_adaptive_refresh(Path("/tmp/repo"), result)
+
+        assert ok is True
+        assert result.error_message is None
+
 
 class TestPopStashSubmoduleNoise:
     """Tests for stash-pop success detection under submodule status noise."""
