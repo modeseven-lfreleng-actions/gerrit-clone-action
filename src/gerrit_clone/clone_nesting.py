@@ -134,6 +134,13 @@ def _read_exclude_lines(exclude_file: Path) -> list[str]:
     return []
 
 
+# Exclude patterns are compared and written in POSIX form.  ``str()`` on a
+# WindowsPath renders backslashes, which git reads as escapes rather than
+# separators: the rule would not match, the child would still show as
+# untracked content in its parent, and -- because the membership test has
+# the same defect -- a duplicate entry would be appended every run.
+
+
 def apply_nested_protection(
     ancestor_repo: Path, path: Path, project_name: str, nested_under: str | None
 ) -> None:
@@ -146,11 +153,11 @@ def apply_nested_protection(
         nested_under: Parent path recorded on the result (for logging)
     """
     try:
-        rel_child = path.relative_to(ancestor_repo)
+        rel_child = path.relative_to(ancestor_repo).as_posix()
         exclude_file = ancestor_repo / ".git" / "info" / "exclude"
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
         existing_lines = _read_exclude_lines(exclude_file)
-        if str(rel_child) not in existing_lines:
+        if rel_child not in existing_lines:
             with exclude_file.open("a", encoding="utf-8") as ef:
                 ef.write(f"\n# auto-added to ignore nested repo\n{rel_child}\n")
             logger.debug(
@@ -183,9 +190,9 @@ def apply_late_nested_protection(
     try:
         exclude_file = ancestor_repo / ".git" / "info" / "exclude"
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        rel_child = path.relative_to(ancestor_repo)
+        rel_child = path.relative_to(ancestor_repo).as_posix()
         existing_lines = _read_exclude_lines(exclude_file)
-        if str(rel_child) not in existing_lines:
+        if rel_child not in existing_lines:
             with exclude_file.open("a", encoding="utf-8") as ef:
                 ef.write(f"\n# auto-added (late) to ignore nested repo\n{rel_child}\n")
             logger.debug(
