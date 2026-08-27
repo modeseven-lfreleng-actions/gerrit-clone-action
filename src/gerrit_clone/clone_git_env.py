@@ -172,6 +172,29 @@ def build_clone_environment(config: Config) -> dict[str, str]:
     return env
 
 
+def _subprocess_error_text(error: BaseException) -> str:
+    """Gather everything a failed git invocation reported.
+
+    ``CalledProcessError.__str__`` is only ``Command '...' returned
+    non-zero exit status N``.  Git writes the reason -- "could not lock
+    config file" and friends -- to stderr, which ``capture_output=True``
+    puts on ``stderr`` and never in the string form.  Classifying on
+    ``str(error)`` alone therefore never matched.
+
+    Args:
+        error: Exception raised by the git invocation
+
+    Returns:
+        The exception text combined with any captured output
+    """
+    parts = [
+        str(error),
+        getattr(error, "stderr", None),
+        getattr(error, "stdout", None),
+    ]
+    return " ".join(str(part) for part in parts if part)
+
+
 def _is_config_lock_error(error_msg: str) -> bool:
     """Report whether a git failure looks like config-file lock contention.
 
@@ -220,16 +243,17 @@ def set_ssh_remote(
             )
             return
         except subprocess.SubprocessError as e:
-            if not _is_config_lock_error(str(e)):
+            error_text = _subprocess_error_text(e)
+            if not _is_config_lock_error(error_text):
                 logger.warning(
-                    f"Failed to set SSH remote for [project]{project_name}[/project]: {e}"
+                    f"Failed to set SSH remote for [project]{project_name}[/project]: {error_text}"
                 )
                 return
             if attempt >= max_attempts:
                 logger.warning(
-                    f"Failed to set SSH remote for [project]{project_name}[/project] after {max_attempts} attempts: {e}"
+                    f"Failed to set SSH remote for [project]{project_name}[/project] after {max_attempts} attempts: {error_text}"
                 )
-                continue
+                return
             # Small delay with jitter for config lock retry
             delay = 0.2 + (random.uniform(0.1, 0.3) * attempt)
             logger.debug(

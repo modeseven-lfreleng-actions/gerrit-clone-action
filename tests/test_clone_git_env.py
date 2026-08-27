@@ -12,15 +12,20 @@ directory.
 
 from __future__ import annotations
 
+import subprocess
 import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gerrit_clone.clone_git_env import (
+    _is_config_lock_error,
     _isolated_config_dirs,
+    _subprocess_error_text,
     build_clone_environment,
     cleanup_isolated_git_configs,
     isolated_git_config_dir,
+    set_ssh_remote,
 )
 from gerrit_clone.models import Config
 
@@ -114,3 +119,103 @@ class TestCleanup:
         cleanup_isolated_git_configs()
 
         assert not _isolated_config_dirs
+
+
+SSH_URL = "ssh://gerrit.example.org:29418/example/repo"
+LOCK_MESSAGE = "error: could not lock config file .git/config: File exists"
+
+
+def _lock_error() -> subprocess.CalledProcessError:
+    """The exception ``check=True`` raises for a lost config-file race."""
+    return subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["git", "remote", "set-url", "origin", SSH_URL],
+        stderr=LOCK_MESSAGE,
+    )
+
+
+class TestConfigLockClassification:
+    """The reason for a git failure lives on stderr, not in str(exc)."""
+
+    def test_str_alone_never_names_the_lock(self) -> None:
+        """This is why the retry loop could never fire."""
+        assert not _is_config_lock_error(str(_lock_error()))
+
+    def test_captured_stderr_is_classified(self) -> None:
+        assert _is_config_lock_error(_subprocess_error_text(_lock_error()))
+
+    def test_error_text_gathers_both_streams(self) -> None:
+        error = subprocess.CalledProcessError(
+            returncode=1, cmd=["git"], output="on stdout", stderr="on stderr"
+        )
+
+        text = _subprocess_error_text(error)
+
+        assert "on stdout" in text
+        assert "on stderr" in text
+
+    def test_absent_streams_are_skipped(self) -> None:
+        error = subprocess.CalledProcessError(returncode=1, cmd=["git"])
+
+        assert _subprocess_error_text(error) == str(error)
+
+
+class TestSetSshRemoteRetry:
+    """Losing the race for .git/config must not leave origin on HTTPS."""
+
+    @patch("gerrit_clone.clone_git_env.time.sleep")
+    @patch("gerrit_clone.clone_git_env.subprocess.run")
+    def test_lock_contention_is_retried_until_it_succeeds(
+        self, mock_run: MagicMock, mock_sleep: MagicMock, tmp_path
+    ) -> None:
+        mock_run.side_effect = [_lock_error(), MagicMock(returncode=0)]
+
+        set_ssh_remote("example/repo", tmp_path, SSH_URL, {})
+
+        assert mock_run.call_count == 2
+        assert mock_sleep.call_count == 1
+        assert mock_run.call_args_list[1][0][0] == [
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            SSH_URL,
+        ]
+
+    @patch("gerrit_clone.clone_git_env.time.sleep")
+    @patch("gerrit_clone.clone_git_env.subprocess.run")
+    def test_retries_are_bounded(
+        self, mock_run: MagicMock, mock_sleep: MagicMock, tmp_path
+    ) -> None:
+        mock_run.side_effect = _lock_error()
+
+        set_ssh_remote("example/repo", tmp_path, SSH_URL, {})
+
+        assert mock_run.call_count == 3
+        # No delay after the final attempt.
+        assert mock_sleep.call_count == 2
+
+    @patch("gerrit_clone.clone_git_env.time.sleep")
+    @patch("gerrit_clone.clone_git_env.subprocess.run")
+    def test_other_failures_are_not_retried(
+        self, mock_run: MagicMock, mock_sleep: MagicMock, tmp_path
+    ) -> None:
+        """Only lock contention is transient; a bad URL will not improve."""
+        mock_run.side_effect = subprocess.CalledProcessError(
+            returncode=128,
+            cmd=["git"],
+            stderr="fatal: No such remote 'origin'",
+        )
+
+        set_ssh_remote("example/repo", tmp_path, SSH_URL, {})
+
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("gerrit_clone.clone_git_env.subprocess.run")
+    def test_success_runs_once(self, mock_run: MagicMock, tmp_path) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+
+        set_ssh_remote("example/repo", tmp_path, SSH_URL, {})
+
+        assert mock_run.call_count == 1
