@@ -11,7 +11,7 @@ membership test fails with it -- appending a duplicate entry every run.
 
 from __future__ import annotations
 
-from pathlib import PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,6 +19,7 @@ import pytest
 from gerrit_clone.clone_nesting import (
     apply_late_nested_protection,
     apply_nested_protection,
+    exclude_pattern,
 )
 
 if TYPE_CHECKING:
@@ -82,10 +83,33 @@ class TestExcludeEntries:
 
 
 class TestWindowsRendering:
-    """Document the rendering difference the fix relies on."""
+    """Exercise the production conversion with a Windows-flavoured path.
 
-    def test_str_and_as_posix_differ_for_a_windows_path(self) -> None:
-        nested = PureWindowsPath("sub", "child")
+    The parametrised tests above run on ``PosixPath``, where ``str()``
+    and ``as_posix()`` agree, so they cannot pin the regression on the
+    Linux CI target.  These go through the same helper the production
+    call sites use.
+    """
 
-        assert str(nested) == "sub\\child"
-        assert nested.as_posix() == "sub/child"
+    def test_a_windows_path_becomes_a_posix_pattern(self) -> None:
+        pattern = exclude_pattern(
+            PureWindowsPath(r"C:\repos\parent\sub\child"),
+            PureWindowsPath(r"C:\repos\parent"),
+        )
+
+        assert pattern == "sub/child"
+        assert "\\" not in pattern
+
+    def test_a_posix_path_is_unaffected(self) -> None:
+        pattern = exclude_pattern(
+            PurePosixPath("/repos/parent/sub/child"),
+            PurePosixPath("/repos/parent"),
+        )
+
+        assert pattern == "sub/child"
+
+    def test_a_child_outside_the_parent_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"/repos/elsewhere"):
+            exclude_pattern(
+                PurePosixPath("/repos/elsewhere"), PurePosixPath("/repos/parent")
+            )

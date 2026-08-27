@@ -25,7 +25,7 @@ from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneStatus
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from pathlib import Path, PurePath
 
     from gerrit_clone.models import CloneResult, Config
 
@@ -139,6 +139,20 @@ def _read_exclude_lines(exclude_file: Path) -> list[str]:
 # separators: the rule would not match, the child would still show as
 # untracked content in its parent, and -- because the membership test has
 # the same defect -- a duplicate entry would be appended every run.
+def exclude_pattern(path: PurePath, ancestor_repo: PurePath) -> str:
+    """Render *path* relative to *ancestor_repo* as a git exclude pattern.
+
+    Args:
+        path: Target path of the nested project
+        ancestor_repo: Parent repository directory
+
+    Returns:
+        The child's path relative to the parent, in POSIX form
+
+    Raises:
+        ValueError: If *path* is not below *ancestor_repo*
+    """
+    return path.relative_to(ancestor_repo).as_posix()
 
 
 def apply_nested_protection(
@@ -153,7 +167,7 @@ def apply_nested_protection(
         nested_under: Parent path recorded on the result (for logging)
     """
     try:
-        rel_child = path.relative_to(ancestor_repo).as_posix()
+        rel_child = exclude_pattern(path, ancestor_repo)
         exclude_file = ancestor_repo / ".git" / "info" / "exclude"
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
         existing_lines = _read_exclude_lines(exclude_file)
@@ -190,7 +204,7 @@ def apply_late_nested_protection(
     try:
         exclude_file = ancestor_repo / ".git" / "info" / "exclude"
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        rel_child = path.relative_to(ancestor_repo).as_posix()
+        rel_child = exclude_pattern(path, ancestor_repo)
         existing_lines = _read_exclude_lines(exclude_file)
         if rel_child not in existing_lines:
             with exclude_file.open("a", encoding="utf-8") as ef:
