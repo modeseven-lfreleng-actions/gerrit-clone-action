@@ -33,12 +33,22 @@ _REMOVAL_COMMIT_MESSAGE = (
 )
 
 
-def _list_branch_heads(repo_path: Path, timeout: int) -> list[str] | None:
+def _list_branch_heads(repo_path: Path, timeout: int) -> list[str]:
     """List local branch names in *repo_path*.
 
-    Returns ``None`` (distinct from an empty list) when the branches
-    cannot be enumerated at all, so the caller can tell an enumeration
-    failure apart from a repository that genuinely has no branches.
+    Args:
+        repo_path: Path to the git repository.
+        timeout: Timeout in seconds for the enumeration.
+
+    Returns:
+        Branch names.  An empty list means the repository genuinely has
+        no branches.
+
+    Raises:
+        RuntimeError: If the branches could not be enumerated.  The
+            caller would otherwise treat a failure as "no branches to
+            filter" and report success with every requested file still
+            present.
     """
     try:
         result = subprocess.run(
@@ -56,20 +66,20 @@ def _list_branch_heads(repo_path: Path, timeout: int) -> list[str] | None:
             timeout=timeout,
         )
         if result.returncode != 0:
-            logger.error(
-                "Failed to list branches in %s: %s",
-                repo_path.name,
-                result.stderr.strip(),
+            msg = (
+                f"Failed to list branches in {repo_path.name}: {result.stderr.strip()}"
             )
-            return None
+            logger.error(msg)
+            raise RuntimeError(msg)
         return [b for b in result.stdout.strip().splitlines() if b]
-    except (subprocess.TimeoutExpired, Exception) as exc:
-        logger.error(
-            "Failed to list branches in %s: %s",
-            repo_path.name,
-            exc,
-        )
-        return None
+    except subprocess.TimeoutExpired as exc:
+        msg = f"Listing branches timed out in {repo_path.name} after {timeout}s"
+        logger.error(msg)
+        raise RuntimeError(msg) from exc
+    except OSError as exc:
+        msg = f"Failed to list branches in {repo_path.name}: {exc}"
+        logger.error(msg)
+        raise RuntimeError(msg) from exc
 
 
 def _add_worktree(
@@ -265,10 +275,14 @@ def _remove_files_worktree(
 
     Returns:
         List of files that were removed (across all branches).
+
+    Raises:
+        RuntimeError: If the repository could not be enumerated, or if
+            removal failed on a branch.  Reporting success while the
+            files are still present is the wrong failure mode for a
+            filter whose job is removing secrets.
     """
     branches = _list_branch_heads(repo_path, timeout)
-    if branches is None:
-        return []
     if not branches:
         logger.debug("No branches found in %s", repo_path.name)
         return []
