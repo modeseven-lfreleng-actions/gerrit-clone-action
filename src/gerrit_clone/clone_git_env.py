@@ -12,8 +12,10 @@ spurious "could not lock config file" failures.
 
 from __future__ import annotations
 
+import atexit
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -27,6 +29,17 @@ if TYPE_CHECKING:
     from gerrit_clone.models import Config
 
 logger = get_logger(__name__)
+
+# One isolated git config directory per worker thread, reused by every
+# clone that thread performs.  Its contents are identical for every
+# clone, so creating one per clone *attempt* -- and deleting none --
+# left thousands of ``git_config_*`` directories in the system temp
+# directory over a large hierarchy, more again with retries.  Reuse
+# bounds the count at the thread count, and the atexit hook below
+# removes them when the process ends.
+_thread_state = threading.local()
+_isolated_config_dirs: set[Path] = set()
+_isolated_config_lock = threading.Lock()
 
 
 def build_ssh_url(project_name: str, config: Config) -> str:
@@ -86,6 +99,45 @@ def create_isolated_git_config(config_dir: Path) -> None:
         logger.debug(f"Could not create isolated git config: {e}")
 
 
+def isolated_git_config_dir() -> Path:
+    """Return this thread's isolated git config directory.
+
+    Created on first use and reused afterwards.  A directory removed by
+    :func:`cleanup_isolated_git_configs` while the thread is idle is
+    recreated on the next call.
+
+    Returns:
+        Directory to use as ``HOME`` for this thread's git subprocesses
+    """
+    existing: Path | None = getattr(_thread_state, "git_config_dir", None)
+    if existing is not None and existing.is_dir():
+        return existing
+
+    config_dir = Path(tempfile.mkdtemp(prefix=f"git_config_{threading.get_ident()}_"))
+    create_isolated_git_config(config_dir)
+    _thread_state.git_config_dir = config_dir
+    with _isolated_config_lock:
+        _isolated_config_dirs.add(config_dir)
+    return config_dir
+
+
+def cleanup_isolated_git_configs() -> None:
+    """Remove every isolated git config directory this process created.
+
+    Registered with :mod:`atexit`, and safe to call directly.  Any
+    thread that goes on to clone again gets a fresh directory.
+    """
+    with _isolated_config_lock:
+        config_dirs = list(_isolated_config_dirs)
+        _isolated_config_dirs.clear()
+
+    for config_dir in config_dirs:
+        shutil.rmtree(config_dir, ignore_errors=True)
+
+
+atexit.register(cleanup_isolated_git_configs)
+
+
 def build_clone_environment(config: Config) -> dict[str, str]:
     """Build environment variables for git clone.
 
@@ -101,10 +153,7 @@ def build_clone_environment(config: Config) -> dict[str, str]:
     if config.git_ssh_command:
         env["GIT_SSH_COMMAND"] = config.git_ssh_command
 
-    thread_id = threading.get_ident()
-    git_config_dir = Path(tempfile.mkdtemp(prefix=f"git_config_{thread_id}_"))
-
-    create_isolated_git_config(git_config_dir)
+    git_config_dir = isolated_git_config_dir()
 
     # Essential git environment isolation to prevent config file contention
     # Keep only the minimal set that prevents conflicts without breaking git
