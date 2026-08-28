@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+# PEP 517 builds run in an isolated environment that uv.lock does not
+# govern, so these are resolved fresh from PyPI on every build --
+# including the release build.  Bounding them stops that resolution
+# crossing a major release of the build backend unnoticed.  The floors
+# match the dev dependency-group entries Dependabot maintains.
+requires = ["hatchling>=1.27.0,<2.0.0", "hatch-vcs>=0.5.0,<1.0.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -354,6 +359,21 @@ reportArgumentType = "error"
 reportIncompatibleVariableOverride = "error"
 reportOverlappingOverload = "error"
 reportUnsupportedDunderAll = "error"
+
+[tool.uv]
+# `[build-system] requires` bounds this project's own build environment
+# only.  These constraints apply to every isolated build environment uv
+# creates, so a dependency that has to be built from an sdist is held to
+# the same bounds.
+#
+# Deliberately ranges rather than `==` pins: an exact pin would have to
+# be bumped by hand before a new Python release could build at all,
+# whereas a major-version cap still blocks the breaking change without
+# blocking routine patches.
+build-constraint-dependencies = [
+    "hatchling>=1.27.0,<2.0.0",
+    "hatch-vcs>=0.5.0,<1.0.0",
+]
 
 [dependency-groups]
 dev = [
