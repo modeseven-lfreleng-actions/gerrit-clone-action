@@ -164,7 +164,14 @@ def _list_tree_files(
         timeout: Timeout in seconds for the ls-tree operation.
 
     Returns:
-        List of file paths relative to the repo root.
+        List of file paths relative to the repo root.  An empty list
+        means the ref genuinely holds no files.
+
+    Raises:
+        RuntimeError: If the listing could not be produced.  A filter
+            whose job is removing secrets must not report success with
+            the files still in place, so a failure to enumerate is a
+            filtering failure rather than "nothing to do".
     """
     try:
         result = subprocess.run(
@@ -183,21 +190,18 @@ def _list_tree_files(
             timeout=timeout,
         )
         if result.returncode != 0:
-            return []
+            msg = (
+                f"git ls-tree failed for {repo_path.name} (ref {ref}): "
+                f"{result.stderr.strip()}"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
         return [line for line in result.stdout.strip().splitlines() if line]
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "git ls-tree timed out for %s (ref %s) after %ds",
-            repo_path.name,
-            ref,
-            timeout,
-        )
-        return []
+    except subprocess.TimeoutExpired as exc:
+        msg = f"git ls-tree timed out for {repo_path.name} (ref {ref}) after {timeout}s"
+        logger.error(msg)
+        raise RuntimeError(msg) from exc
     except OSError as exc:
-        logger.warning(
-            "git ls-tree failed for %s (ref %s): %s",
-            repo_path.name,
-            ref,
-            exc,
-        )
-        return []
+        msg = f"git ls-tree failed for {repo_path.name} (ref {ref}): {exc}"
+        logger.error(msg)
+        raise RuntimeError(msg) from exc

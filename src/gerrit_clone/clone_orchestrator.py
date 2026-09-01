@@ -14,6 +14,7 @@ import threading
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING
 
+from gerrit_clone.clone_git_env import isolated_git_config_scope
 from gerrit_clone.clone_ordering import (
     create_dependency_batches,
     get_filesystem_safe_thread_count,
@@ -377,9 +378,15 @@ class CloneManager:
         logger.debug(f"Starting clone operations with {thread_count} threads")
         logger.debug(f"About to create ThreadPoolExecutor with {thread_count} workers")
 
-        with interruptible_executor(
+        # Every clone pool is built here, including the ones
+        # retry_failed_clones drives without going through
+        # clone_projects, so this is where the workers' isolated git
+        # config directories are scoped.  The scope is reference
+        # counted, so a concurrent operation keeps its own.
+        clone_pool = interruptible_executor(
             max_workers=thread_count, thread_name_prefix="clone"
-        ) as executor:
+        )
+        with isolated_git_config_scope(), clone_pool as executor:
             # Submit all clone tasks
             logger.debug(f"Submitting {len(projects)} clone tasks to thread pool")
             future_to_project = {
