@@ -11,6 +11,7 @@ embedded in a URL that ``git`` then receives as an argument.
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 
@@ -45,11 +46,11 @@ def _project(clone_url: str | None = None) -> Project:
     )
 
 
-def _config(**kwargs: object) -> Config:
+def _config(**kwargs: Any) -> Config:
     return Config(
         host="github.com/org",
         source_type=SourceType.GITHUB,
-        **kwargs,  # type: ignore[arg-type]
+        **kwargs,
     )
 
 
