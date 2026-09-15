@@ -11,6 +11,7 @@ embedded in a URL that ``git`` then receives as an argument.
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 
@@ -45,11 +46,11 @@ def _project(clone_url: str | None = None) -> Project:
     )
 
 
-def _config(**kwargs: object) -> Config:
+def _config(**kwargs: Any) -> Config:
     return Config(
         host="github.com/org",
         source_type=SourceType.GITHUB,
-        **kwargs,  # type: ignore[arg-type]
+        **kwargs,
     )
 
 
@@ -236,18 +237,17 @@ class TestTrustedOrigin:
         refusal exists to withhold.
         """
         hostile = f"https://{TOKEN}.evil.example/org/repo.git"
+        config = _config(use_https=True, github_token=TOKEN)
 
         with pytest.raises(UnsafeCloneUrlError) as excinfo:
-            resolve_clone_url(
-                _project(hostile),
-                _config(use_https=True, github_token=TOKEN),
-            )
+            resolve_clone_url(_project(hostile), config)
 
         message = str(excinfo.value)
         assert TOKEN not in message
         assert "evil.example" not in message
         # The configured source is this run's own, and still named.
-        assert "github.com" in message
+        expected_host, _expected_port = trusted_clone_origin(config)
+        assert expected_host in message
 
     def test_the_configured_host_is_accepted(self) -> None:
         url = resolve_clone_url(
