@@ -29,12 +29,12 @@ from gerrit_clone.git_utils import is_git_repository
 from gerrit_clone.github_clone_env import build_git_env
 from gerrit_clone.github_clone_results import build_clone_result
 from gerrit_clone.github_clone_url import (
-    UnsafeCloneUrlError,
     redact_clone_url,
     resolve_clone_url,
 )
 from gerrit_clone.github_gh_cli import clone_with_gh_cli
 from gerrit_clone.github_token_hygiene import remove_token_from_remote_url
+from gerrit_clone.github_url_safety import UnsafeCloneUrlError
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project
 from gerrit_clone.pathing import AtomicClonePath
@@ -61,9 +61,16 @@ def clone_github_repository(
     For HTTPS cloning with a token:
     - The configured token is not put in the clone URL, so it never
       reaches the process arguments; it is passed via ``GIT_CONFIG_*``
-      instead.  A credential already present in an externally supplied
-      ``project.clone_url`` is passed through as given, and is the
-      subject of issue #277.
+      instead.
+    - A credential the externally supplied ``project.clone_url``
+      arrived with is refused before git or ``gh`` is invoked, so far
+      as one can be identified: this run's configured token wherever
+      it sits, a password under any scheme, a username over HTTP(S),
+      and non-empty HTTP(S) path parameters, query strings or
+      fragments.  An SSH username is not a credential and is allowed,
+      as is syntax that cannot be classified -- scp-style URLs above
+      all.  The policy is stated once, in
+      :func:`gerrit_clone.github_url_safety.reject_credentialed_url`.
     - A clone whose remote URL still holds the configured token is
       destroyed rather than kept, as defence in depth
     - GIT_TERMINAL_PROMPT=0 is set to prevent interactive credential prompts
@@ -317,14 +324,14 @@ def _clone_with_git(
 
             logger.debug(f"✓ Cloned {project.name}")
 
-            # Defence in depth.  This tool no longer puts the token in
-            # the URL, so this fires only for an externally supplied one
-            # that already carried it -- and for that case there is no
-            # clean replacement to write, the only candidate being the
-            # very value the token came in on.  So it refuses and
-            # destroys the clone rather than leaving the credential in
-            # .git/config; issue #277 is what would turn that into a
-            # sanitised clone instead.
+            # Defence in depth, and not expected to fire.  This tool
+            # never puts the token in the URL, and a supplied URL that
+            # carries it is refused by ``resolve_clone_url`` before git
+            # runs -- see ``github_url_safety.reject_credentialed_url``.
+            # Kept for a route that reaches here without that check: if
+            # the token did make it into the remote, there is no clean
+            # replacement to write, so this destroys the clone rather
+            # than leave the credential in .git/config.
             #
             # Keyed on the resolved URL rather than ``config.use_https``:
             # the SSH branch falls back to an HTTPS URL when a project

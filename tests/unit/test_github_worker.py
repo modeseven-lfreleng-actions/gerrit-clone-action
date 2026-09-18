@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import base64
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gerrit_clone.github_gh_cli import _build_gh_clone_command, clone_with_gh_cli
 from gerrit_clone.github_token_hygiene import remove_token_from_remote_url
+from gerrit_clone.github_url_safety import UnsafeCloneUrlError
 from gerrit_clone.github_worker import (
     _is_gh_cli_available,
     clone_github_repository,
@@ -51,6 +54,91 @@ class TestIsGhCliAvailable:
         """Test returns False when gh CLI is not available."""
         mock_which.return_value = None
         assert _is_gh_cli_available() is False
+
+
+class TestGhCloneCommand:
+    """``gh`` puts the identifier in its own ``argv``, exactly as git does.
+
+    The repository identifier can be the externally supplied
+    ``project.clone_url``, so it needs the same check as the git path
+    rather than being trusted because a different tool consumes it.
+    """
+
+    def test_a_credentialed_url_is_refused(self, tmp_path: Path) -> None:
+        project = Project(
+            name="org/repo",
+            state=ProjectState.ACTIVE,
+            source_type=SourceType.GITHUB,
+            clone_url="https://token@github.com/org/repo.git",
+        )
+        config = Config(
+            host="github.com/org", source_type=SourceType.GITHUB, path=tmp_path
+        )
+
+        with pytest.raises(UnsafeCloneUrlError, match="reach the git command line"):
+            _build_gh_clone_command(project, config, tmp_path / "repo")
+
+    def test_a_credentialed_url_is_reported_not_raised(self, tmp_path: Path) -> None:
+        """The caller's contract is a CloneResult, not an exception.
+
+        Every other failure in ``clone_with_gh_cli`` is reported that
+        way, so a refusal during command construction must be too.
+        """
+        project = Project(
+            name="org/repo",
+            state=ProjectState.ACTIVE,
+            source_type=SourceType.GITHUB,
+            clone_url="https://token@github.com/org/repo.git",
+        )
+        config = Config(
+            host="github.com/org", source_type=SourceType.GITHUB, path=tmp_path
+        )
+
+        # The failure path removes the target directory, so it has to
+        # be one this test owns rather than a fixed path.
+        result = clone_with_gh_cli(
+            project, config, tmp_path / "repo", datetime.now(UTC)
+        )
+
+        assert result.status == CloneStatus.FAILED
+        assert result.error_message is not None
+
+    def test_an_ordinary_url_is_used_as_the_identifier(self, tmp_path: Path) -> None:
+        project = Project(
+            name="org/repo",
+            state=ProjectState.ACTIVE,
+            source_type=SourceType.GITHUB,
+            clone_url="https://github.com/org/repo.git",
+        )
+        config = Config(
+            host="github.com/org", source_type=SourceType.GITHUB, path=tmp_path
+        )
+
+        cmd = _build_gh_clone_command(project, config, tmp_path / "repo")
+
+        assert cmd[:4] == [
+            "gh",
+            "repo",
+            "clone",
+            "https://github.com/org/repo.git",
+        ]
+
+    def test_a_project_without_a_url_falls_back_to_its_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing externally supplied is involved, so nothing is checked."""
+        project = Project(
+            name="org/repo",
+            state=ProjectState.ACTIVE,
+            source_type=SourceType.GITHUB,
+        )
+        config = Config(
+            host="github.com/org", source_type=SourceType.GITHUB, path=tmp_path
+        )
+
+        cmd = _build_gh_clone_command(project, config, tmp_path / "repo")
+
+        assert cmd[3] == "org/repo"
 
 
 class TestCloneGitHubRepository:
