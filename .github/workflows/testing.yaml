@@ -62,7 +62,7 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: "Test GitHub Action: gerrit.o-ran-sc.org [SSH]"
-        uses: ./
+        uses: $/
         with:
           host: "gerrit.o-ran-sc.org"
           ssh-user: "${{ vars.GERRIT_SSH_USER }}"
@@ -138,7 +138,7 @@ jobs:
           fi
 
       - name: "Test GitHub Action: gerrit.o-ran-sc.org [HTTPS]"
-        uses: ./
+        uses: $/
         with:
           host: "gerrit.o-ran-sc.org"
           output-path: "gerrit.o-ran-sc.org-action-https"
