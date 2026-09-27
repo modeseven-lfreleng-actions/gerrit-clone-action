@@ -253,11 +253,11 @@ Host gerrit.example.org
 
 ```python
 RetryPolicy(
-    max_attempts=3,      # Default retry count
-    base_delay=2.0,      # Initial delay in seconds
-    factor=2.0,          # Exponential backoff factor
-    max_delay=30.0,      # Upper delay cap
-    jitter=True          # Randomization enabled
+    max_attempts=3,  # Default retry count
+    base_delay=2.0,  # Initial delay in seconds
+    factor=2.0,  # Exponential backoff factor
+    max_delay=30.0,  # Upper delay cap
+    jitter=True,  # Randomization enabled
 )
 ```
 
