@@ -14,6 +14,8 @@ from pathlib import Path
 
 import typer
 
+from gerrit_clone.ssh_identity import parse_identity_file
+
 SERVER = typer.Option(
     ...,
     "--server",
@@ -93,11 +95,7 @@ SSH_IDENTITY_FILE = typer.Option(
     "-i",
     help="SSH identity (private key) file path for authentication",
     envvar="GERRIT_SSH_PRIVATE_KEY",
-    exists=True,
-    file_okay=True,
-    dir_okay=False,
-    readable=True,
-    resolve_path=True,
+    parser=parse_identity_file,
 )
 THREADS = typer.Option(
     None,
