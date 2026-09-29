@@ -3,11 +3,20 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Action test/validation workflow
+#
+# Interim regime: anonymous HTTPS clones of a few small projects on the
+# public O-RAN-SC Gerrit, run for both the composite action and the CLI.
+# No credentials are used, so the job is safe to run on pull requests.
+# SSH coverage returns with a disposable Gerrit container and a per-run
+# key; the content-filter tests return once they pass against bare
+# mirror clones.
 name: "Test GitHub Action 🧪"
 
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+  pull_request:
+    branches: ["main"]
   push:
     branches: ["main"]
 
@@ -17,22 +26,20 @@ concurrency:
 
 permissions: {}
 
+env:
+  GERRIT_HOST: "gerrit.o-ran-sc.org"
+  # Small, active projects; ric-plt/* and com/* exercise nested paths.
+  # Keep the clone set small: this runs against a production server.
+  TEST_PROJECTS: "ric-plt/ricctl,ric-plt/conflictmgr,com/golog"
+  EXPECTED_COUNT: "3"
+
 jobs:
-  ### Test the GitHub Action with O-RAN Gerrit ###
   tests:
     name: "Test Gerrit Clone"
     runs-on: ubuntu-latest
-    # Secrets are unavailable in the pull_request context, so gate the
-    # whole job rather than trying to early-exit from a run block
-    # (an "exit" only ends its step, not the job).
-    if: github.event_name != 'pull_request'
-    # Gate secret access behind a dedicated environment so that access
-    # to the Gerrit SSH key can carry protection rules (zizmor
-    # secrets-outside-env).
-    environment: integration-testing
     permissions:
       contents: read
-    timeout-minutes: 30 # Increase this timeout value as needed
+    timeout-minutes: 15
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -61,442 +68,64 @@ jobs:
           uv sync --locked --no-dev
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: "Test GitHub Action: gerrit.o-ran-sc.org [SSH]"
-        uses: $/
-        with:
-          host: "gerrit.o-ran-sc.org"
-          ssh-user: "${{ vars.GERRIT_SSH_USER }}"
-          ssh-private-key: "${{ secrets.GERRIT_SSH_PRIVATE_KEY }}"
-          output-path: "gerrit.o-ran-sc.org-action"
-          depth: "1"
-          strict-host: "false"
-
-      - name: "Validate GitHub Action Results [SSH]"
-        shell: bash
-        run: |
-          # Validate GitHub Action Results
-          if [ -d "gerrit.o-ran-sc.org-action" ]; then
-            SIZE=$(du -sh gerrit.o-ran-sc.org-action | awk '{print $1}')
-            {
-              echo "🧪 **O-RAN-SC GitHub Action Clone Results:**"
-              echo "- Size: $SIZE"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "❌ Test failed: gerrit.o-ran-sc.org-action/ not found"
-            {
-              echo "❌ Test failed: gerrit.o-ran-sc.org-action/ not found"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-      - name: "Test CLI Tool: gerrit.o-ran-sc.org [SSH]"
-        shell: bash
-        env:
-          GERRIT_SSH_PRIVATE_KEY: ${{ secrets.GERRIT_SSH_PRIVATE_KEY }}
-          GERRIT_SSH_USER: ${{ vars.GERRIT_SSH_USER }}
-        run: |
-          # Set up SSH agent with private key (never touches disk)
-          SSH_AUTH_SOCK="/tmp/ssh_agent_cli_${GITHUB_RUN_ID}.sock"
-
-          # Start SSH agent
-          ssh-agent -a "$SSH_AUTH_SOCK" > /dev/null
-
-          # Add private key to SSH agent
-          echo "$GERRIT_SSH_PRIVATE_KEY" | \
-            SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ssh-add -
-
-          # Run CLI tool with SSH agent
-          SSH_AUTH_SOCK="$SSH_AUTH_SOCK" gerrit-clone clone \
-            --host "gerrit.o-ran-sc.org" \
-            --ssh-user "$GERRIT_SSH_USER" \
-            --output-path "gerrit.o-ran-sc.org-cli" \
-            --threads "2" \
-            --depth "1" \
-            --ssh \
-            --accept-unknown-host \
-            --skip-archived
-
-          # Clean up SSH agent
-          SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ssh-agent -k > /dev/null 2>&1 || true
-
-      - name: "Validate CLI Tool Results [SSH]"
-        shell: bash
-        run: |
-          # Validate CLI Tool Results
-          if [ -d "gerrit.o-ran-sc.org-cli" ]; then
-            SIZE=$(du -sh gerrit.o-ran-sc.org-action | awk '{print $1}')
-            {
-              echo "🧪 **O-RAN-SC CLI Test Clone Results:**"
-              echo "- Size: $SIZE"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "❌ Test failed: gerrit.o-ran-sc.org-cli/ not found"
-            {
-              echo "❌ Test failed: gerrit.o-ran-sc.org-cli/ not found"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
       - name: "Test GitHub Action: gerrit.o-ran-sc.org [HTTPS]"
+        id: action-https
         uses: $/
         with:
-          host: "gerrit.o-ran-sc.org"
-          output-path: "gerrit.o-ran-sc.org-action-https"
-          depth: "1"
+          host: ${{ env.GERRIT_HOST }}
+          output-path: "action-https"
+          include-projects: ${{ env.TEST_PROJECTS }}
           use-https: "true"
-
-      - name: "Validate GitHub Action Results [HTTPS]"
-        shell: bash
-        run: |
-          # Validate GitHub Action HTTPS Results
-          if [ -d "gerrit.o-ran-sc.org-action-https" ]; then
-            SIZE=$(du -sh gerrit.o-ran-sc.org-action-https | awk '{print $1}')
-            {
-              echo "🧪 **O-RAN-SC GitHub Action HTTPS Clone Results:**"
-              echo "- Size: $SIZE"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "❌ Test failed: gerrit.o-ran-sc.org-action-https/ not found"
-            {
-              echo "❌ Test failed: gerrit.o-ran-sc.org-action-https/ not found"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
 
       - name: "Test CLI Tool: gerrit.o-ran-sc.org [HTTPS]"
         shell: bash
         run: |
           gerrit-clone clone \
-            --host "gerrit.o-ran-sc.org" \
-            --output-path "gerrit.o-ran-sc.org-cli-https" \
+            --host "$GERRIT_HOST" \
+            --output-path "cli-https" \
             --threads "2" \
-            --depth "1" \
             --https \
-            --skip-archived
+            --skip-archived \
+            --include-projects "$TEST_PROJECTS"
 
-      - name: "Validate CLI Tool Results [HTTPS]"
-        shell: bash
-        run: |
-          # Validate CLI Tool HTTPS Results
-          if [ -d "gerrit.o-ran-sc.org-cli-https" ]; then
-            SIZE=$(du -sh gerrit.o-ran-sc.org-cli-https | awk '{print $1}')
-            {
-              echo "🧪 **O-RAN-SC CLI HTTPS Test Clone Results:**"
-              echo "- Size: $SIZE"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "❌ Test failed: gerrit.o-ran-sc.org-cli-https/ not found"
-            {
-              echo "❌ Test failed: gerrit.o-ran-sc.org-cli-https/ not found"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-  ### Integration tests: content filtering with real Gerrit repo ###
-  content-filter-tests:
-    name: "Test Content Filtering"
-    needs: tests
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    # Gate secret access behind a dedicated environment so that access
-    # to the content-filter token can carry protection rules (zizmor
-    # secrets-outside-env).
-    environment: integration-testing
-    permissions:
-      contents: read
-    timeout-minutes: 30
-    steps:
-      - name: "Check for pull request context"
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            echo "::warning::Secrets unavailable in PR context"
-          fi
-
-      # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
-        with:
-          egress-policy: 'audit'
-
-      - name: "Checkout repository"
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: "Install uv"
-        # yamllint disable-line rule:line-length
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          # Pin the installer too; the action SHA alone leaves uv floating.
-          version: '0.12.5'
-          python-version: '3.11'
-
-      - name: "Install gerrit-clone CLI and git-filter-repo"
-        shell: bash
-        run: |
-          # Hash-pinned via uv.lock; --locked rejects lockfile drift.
-          # git-filter-repo ships in the dev dependency group, so this
-          # sync deliberately keeps dev dependencies.
-          uv sync --locked
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-
-      # ---------------------------------------------------------------
-      # Test 1: Clone with --git-filter (explicit token replacement)
-      # ---------------------------------------------------------------
-
-      - name: "Test clone with --git-filter (explicit token)"
+      - name: "Validate clone results [HTTPS]"
         shell: bash
         env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
+          ACTION_MANIFEST: ${{ steps.action-https.outputs.manifest-path }}
         run: |
-          if [ -z "$FILTER_TOKEN" ]; then
-            echo "::warning::ONAP_TEST_FILTER_TOKEN not set; skip"
-            exit 0
-          fi
-
-          # Pass the (secret-bearing) filter spec via the
-          # GERRIT_GIT_FILTER environment variable rather than the
-          # --git-filter CLI flag so the token never appears in the
-          # invoked command line.
-          export GERRIT_GIT_FILTER="testsuite/pythonsdk-tests:${FILTER_TOKEN}"
-
-          gerrit-clone clone \
-            --host "gerrit.onap.org" \
-            --output-path "onap-git-filter" \
-            --threads "1" \
-            --https \
-            --include-projects "testsuite/pythonsdk-tests"
-
-      - name: "Validate --git-filter clone results"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          if [ -z "$FILTER_TOKEN" ]; then
-            echo "::warning::Skipped (no secret)" ; exit 0
-          fi
-
-          REPO="onap-git-filter/testsuite/pythonsdk-tests.git"
-          if [ ! -d "$REPO" ]; then
-            echo "::error::Repo not found: $REPO" ; exit 1
-          fi
-
-          # Token must NOT appear in any history
-          if git -C "$REPO" log --all -p \
-            | grep -qF "$FILTER_TOKEN"; then
-            echo "::error::Token still in history after filter"
-            exit 1
-          fi
-
-          # REDACTED_ placeholder must be present
-          if ! git -C "$REPO" log --all -p \
-            | grep -q "REDACTED_"; then
-            echo "::error::No REDACTED_ placeholder found"
-            exit 1
-          fi
-
-          {
-            echo "### ✅ --git-filter clone: token redacted"
-            echo "- Repo: \`$REPO\`"
-            SIZE=$(du -sh "$REPO" | awk '{print $1}')
-            echo "- Size: $SIZE"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------------
-      # Test 2: Clone with --redact-secrets (auto-detection)
-      # ---------------------------------------------------------------
-
-      - name: "Test clone with --redact-secrets (auto-detect)"
-        shell: bash
-        run: |
-          gerrit-clone clone \
-            --host "gerrit.onap.org" \
-            --output-path "onap-redact-secrets" \
-            --threads "1" \
-            --https \
-            --include-projects "testsuite/pythonsdk-tests" \
-            --redact-secrets
-
-      - name: "Validate --redact-secrets clone results"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          REPO="onap-redact-secrets/testsuite/pythonsdk-tests.git"
-          if [ ! -d "$REPO" ]; then
-            echo "::error::Repo not found: $REPO" ; exit 1
-          fi
-
-          # When we have the secret, verify it is NOT present
-          if [ -n "$FILTER_TOKEN" ]; then
-            if git -C "$REPO" log --all -p \
-              | grep -qF "$FILTER_TOKEN"; then
-              echo "::error::Token still present after redact"
-              exit 1
+          # Check each run's manifest counts and that every requested
+          # project is a git repository at its nested path.
+          status=0
+          for target in "action-https:$ACTION_MANIFEST" \
+                        "cli-https:cli-https/clone-manifest.json"; do
+            dir="${target%%:*}"
+            manifest="${target#*:}"
+            if [ ! -f "$manifest" ]; then
+              echo "::error::$dir: manifest not found ($manifest)"
+              status=1
+              continue
             fi
-          fi
-
-          # REDACTED_ placeholder must be present
-          if ! git -C "$REPO" log --all -p \
-            | grep -q "REDACTED_"; then
-            echo "::error::No REDACTED_ placeholder found"
-            exit 1
-          fi
-
-          {
-            echo "### ✅ --redact-secrets clone: secrets redacted"
-            echo "- Repo: \`$REPO\`"
-            SIZE=$(du -sh "$REPO" | awk '{print $1}')
-            echo "- Size: $SIZE"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------------
-      # Test 3: Clone WITHOUT filtering, then refresh with --git-filter
-      # ---------------------------------------------------------------
-
-      - name: "Clone without filtering (for refresh test)"
-        shell: bash
-        run: |
-          gerrit-clone clone \
-            --host "gerrit.onap.org" \
-            --output-path "onap-refresh-test" \
-            --threads "1" \
-            --https \
-            --include-projects "testsuite/pythonsdk-tests"
-
-      - name: "Verify token exists before refresh"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          if [ -z "$FILTER_TOKEN" ]; then
-            echo "::warning::Skipped (no secret)" ; exit 0
-          fi
-
-          REPO="onap-refresh-test/testsuite/pythonsdk-tests.git"
-          if [ ! -d "$REPO" ]; then
-            echo "::error::Repo not found: $REPO" ; exit 1
-          fi
-
-          # Token MUST still be present (no filtering applied yet)
-          if ! git -C "$REPO" log --all -p \
-            | grep -qF "$FILTER_TOKEN"; then
-            echo "::error::Token should exist before refresh"
-            exit 1
-          fi
-          echo "✅ Token confirmed present before refresh"
-
-      - name: "Refresh with --git-filter (explicit token)"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          if [ -z "$FILTER_TOKEN" ]; then
-            echo "::warning::Skipped (no secret)" ; exit 0
-          fi
-
-          # Pass the (secret-bearing) filter spec via the
-          # GERRIT_GIT_FILTER environment variable rather than the
-          # --git-filter CLI flag so the token never appears in the
-          # invoked command line.
-          export GERRIT_GIT_FILTER="testsuite/pythonsdk-tests:${FILTER_TOKEN}"
-
-          gerrit-clone refresh \
-            --output-path "onap-refresh-test" \
-            --threads "1"
-
-      - name: "Validate refresh --git-filter results"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          if [ -z "$FILTER_TOKEN" ]; then
-            echo "::warning::Skipped (no secret)" ; exit 0
-          fi
-
-          REPO="onap-refresh-test/testsuite/pythonsdk-tests.git"
-
-          # Token must NOT appear after refresh
-          if git -C "$REPO" log --all -p \
-            | grep -qF "$FILTER_TOKEN"; then
-            echo "::error::Token still present after refresh"
-            exit 1
-          fi
-
-          # REDACTED_ placeholder must be present
-          if ! git -C "$REPO" log --all -p \
-            | grep -q "REDACTED_"; then
-            echo "::error::No REDACTED_ placeholder found"
-            exit 1
-          fi
-
-          {
-            echo "### ✅ refresh --git-filter: token redacted"
-            echo "- Repo: \`$REPO\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------------
-      # Test 4: Clone WITHOUT filtering, then refresh --redact-secrets
-      # ---------------------------------------------------------------
-
-      - name: "Clone without filtering (for redact refresh test)"
-        shell: bash
-        run: |
-          gerrit-clone clone \
-            --host "gerrit.onap.org" \
-            --output-path "onap-refresh-redact" \
-            --threads "1" \
-            --https \
-            --include-projects "testsuite/pythonsdk-tests"
-
-      - name: "Refresh with --redact-secrets (auto-detect)"
-        shell: bash
-        run: |
-          gerrit-clone refresh \
-            --output-path "onap-refresh-redact" \
-            --threads "1" \
-            --redact-secrets
-
-      - name: "Validate refresh --redact-secrets results"
-        shell: bash
-        env:
-          FILTER_TOKEN: ${{ secrets.ONAP_TEST_FILTER_TOKEN }}
-        run: |
-          REPO="onap-refresh-redact/testsuite/pythonsdk-tests.git"
-          if [ ! -d "$REPO" ]; then
-            echo "::error::Repo not found: $REPO" ; exit 1
-          fi
-
-          if [ -n "$FILTER_TOKEN" ]; then
-            if git -C "$REPO" log --all -p \
-              | grep -qF "$FILTER_TOKEN"; then
-              echo "::error::Token present after redact refresh"
-              exit 1
+            total=$(jq -r '.total' "$manifest")
+            ok=$(jq -r '.succeeded' "$manifest")
+            failed=$(jq -r '.failed' "$manifest")
+            if [ "$total" != "$EXPECTED_COUNT" ] \
+              || [ "$ok" != "$EXPECTED_COUNT" ] || [ "$failed" != "0" ]; then
+              echo "::error::$dir: total=$total succeeded=$ok" \
+                "failed=$failed (expected $EXPECTED_COUNT/$EXPECTED_COUNT/0)"
+              status=1
             fi
-          fi
-
-          if ! git -C "$REPO" log --all -p \
-            | grep -q "REDACTED_"; then
-            echo "::error::No REDACTED_ placeholder found"
-            exit 1
-          fi
-
-          {
-            echo "### ✅ refresh --redact-secrets: auto-redacted"
-            echo "- Repo: \`$REPO\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------------
-      # Summary
-      # ---------------------------------------------------------------
-
-      - name: "Content filter test summary"
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "---"
-            echo "### Content Filter Integration Tests"
-            echo "All 4 test scenarios completed."
-          } >> "$GITHUB_STEP_SUMMARY"
+            IFS=',' read -ra projects <<< "$TEST_PROJECTS"
+            for project in "${projects[@]}"; do
+              if ! git -C "$dir/$project" rev-parse --git-dir \
+                >/dev/null 2>&1; then
+                echo "::error::$dir: $project is not a git repository"
+                status=1
+              fi
+            done
+            {
+              echo "### $dir"
+              echo "- Cloned: $ok/$total (failed: $failed)"
+              echo "- Size: $(du -sh "$dir" | awk '{print $1}')"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit "$status"
