@@ -261,7 +261,7 @@ class ConfigManager(EnvConfigLoader):
 
         if "ssh_identity_file" in config_dict:
             identity = config_dict["ssh_identity_file"]
-            if isinstance(identity, str) and looks_like_key_content(identity):
+            if looks_like_key_content(str(identity)):
                 raise ConfigurationError(
                     f"ssh_identity_file (GERRIT_SSH_PRIVATE_KEY) {KEY_CONTENT_HINT}"
                 )

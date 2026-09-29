@@ -116,8 +116,12 @@ jobs:
             fi
             IFS=',' read -ra projects <<< "$TEST_PROJECTS"
             for project in "${projects[@]}"; do
-              if ! git -C "$dir/$project" rev-parse --git-dir \
-                >/dev/null 2>&1; then
+              # An empty prefix means the directory is a repository
+              # root; a plain directory would otherwise pass by
+              # resolving to the checkout's own .git.
+              prefix=$(git -C "$dir/$project" rev-parse --show-prefix \
+                2>/dev/null) || prefix="(not found)"
+              if [ -n "$prefix" ]; then
                 echo "::error::$dir: $project is not a git repository"
                 status=1
               fi

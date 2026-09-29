@@ -27,19 +27,20 @@ KEY_CONTENT_HINT = (
 
 def looks_like_key_content(value: str) -> bool:
     """Return True when *value* is key material rather than a file path."""
-    return "\n" in value or "PRIVATE KEY" in value
+    return "\n" in value or "\r" in value or "PRIVATE KEY" in value
 
 
 def parse_identity_file(value: str | Path) -> Path:
     """Convert a ``--ssh-identity-file`` value to a readable file path.
 
-    Used as the Typer ``parser`` in place of Click's path type, whose
-    errors quote the offending value.  Real paths get the same checks
-    Click applied (exists, not a directory, readable, resolved).
+    Used as the Typer ``parser`` in place of Typer's path type, whose
+    errors quote the offending value.  Real paths must exist, be a
+    readable regular file, and are resolved; FIFOs and devices are
+    refused because ``ssh -i`` could block reading them.
 
     Raises:
         typer.BadParameter: If *value* is key content or not a readable
-            file.  Key content is never included in the message.
+            regular file.  Key content is never included in the message.
     """
     text = str(value)
     if looks_like_key_content(text):
@@ -50,6 +51,8 @@ def parse_identity_file(value: str | Path) -> Path:
         raise typer.BadParameter(f"File '{text}' does not exist.")
     if path.is_dir():
         raise typer.BadParameter(f"File '{text}' is a directory.")
+    if not path.is_file():
+        raise typer.BadParameter(f"File '{text}' is not a regular file.")
     if not os.access(path, os.R_OK):
         raise typer.BadParameter(f"File '{text}' is not readable.")
     return path
