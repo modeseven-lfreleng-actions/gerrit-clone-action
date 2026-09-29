@@ -14,6 +14,7 @@ import yaml
 from gerrit_clone.config_env import EnvConfigLoader
 from gerrit_clone.config_errors import ConfigurationError
 from gerrit_clone.models import Config, DiscoveryMethod, RetryPolicy, SourceType
+from gerrit_clone.ssh_identity import KEY_CONTENT_HINT, looks_like_key_content
 
 __all__ = ["ConfigManager", "ConfigurationError", "load_config"]
 
@@ -259,7 +260,12 @@ class ConfigManager(EnvConfigLoader):
             config_dict["path"] = Path(config_dict["path"])
 
         if "ssh_identity_file" in config_dict:
-            config_dict["ssh_identity_file"] = Path(config_dict["ssh_identity_file"])
+            identity = config_dict["ssh_identity_file"]
+            if looks_like_key_content(str(identity)):
+                raise ConfigurationError(
+                    f"ssh_identity_file (GERRIT_SSH_PRIVATE_KEY) {KEY_CONTENT_HINT}"
+                )
+            config_dict["ssh_identity_file"] = Path(identity)
 
         # Handle discovery_method conversion. An empty or whitespace value is
         # treated as unset so Config can derive it from the source type and

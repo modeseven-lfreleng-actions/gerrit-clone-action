@@ -1225,10 +1225,14 @@ The following SSH authentication options are available across all interfaces:
 | SSH Key    | `-i` (file path)       | `GERRIT_SSH_PRIVATE_KEY` | `ssh-private-key` (content) | Identity file  |
 | Host Check | `--strict-host`        | `GERRIT_STRICT_HOST`     | `strict-host`               | Key check      |
 
-> **Note:** The CLI flag `--ssh-identity-file` / `-i` expects a **file path**
-> to a private key on disk. The GitHub Action input `ssh-private-key` expects
-> the raw key **content** (loaded into an SSH agent). The legacy CLI alias
-> `--ssh-private-key` is still accepted for backward compatibility.
+> **Note:** The CLI flag `--ssh-identity-file` / `-i` and the
+> `GERRIT_SSH_PRIVATE_KEY` environment variable expect a **file path** to a
+> private key on disk. The GitHub Action input `ssh-private-key` expects the
+> raw key **content** (loaded into an SSH agent). Never place key content in
+> `GERRIT_SSH_PRIVATE_KEY`: the CLI rejects it, without echoing the value. In
+> workflows, hold the secret in a differently named variable and pipe it to
+> `ssh-add -`. The legacy CLI alias `--ssh-private-key` is still accepted for
+> backward compatibility.
 
 <!-- markdownlint-enable MD013 -->
 
