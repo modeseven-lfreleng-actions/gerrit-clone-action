@@ -273,7 +273,7 @@ def build_config(
 ) -> Config:
     """Load the effective configuration, reporting configuration errors."""
     try:
-        return load_config(
+        config = load_config(
             host=request.host,
             port=request.port,  # Leave as None for GitHub, will default to 29418 for Gerrit
             base_url=request.base_url,
@@ -317,6 +317,10 @@ def build_config(
     except ConfigurationError as e:
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
+    config.reapplies_content_filters = bool(
+        request.remove_files or request.git_filter or request.redact_secrets
+    )
+    return config
 
 
 def _report_configuration_error(session: CliSession, error: ConfigurationError) -> None:

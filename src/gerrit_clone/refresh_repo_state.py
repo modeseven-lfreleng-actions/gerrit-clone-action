@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""Working-tree state inspection and stash handling for refresh operations.
+"""Repository state inspection and stash handling for refresh operations.
 
 Second layer of the :class:`~gerrit_clone.refresh_worker.RefreshWorker` mixin
-stack. It answers "what state is this working tree in?" (branch, detached HEAD,
-uncommitted changes, Gerrit meta refs) and owns the stash push/pop lifecycle
-used to move an unclean tree out of the way, including the subtle git
-exit-status semantics documented on :class:`StashOutcome` and ``_pop_stash``.
+stack. It answers "what state is this repository in?" (bare or working tree;
+for a working tree its branch, detached HEAD, uncommitted changes and Gerrit
+meta refs) and owns the stash push/pop lifecycle used to move an unclean tree
+out of the way, including the subtle git exit-status semantics documented on
+:class:`StashOutcome` and ``_pop_stash``.
 """
 
 from __future__ import annotations
@@ -60,6 +61,67 @@ class RepositoryStateMixin(GitEnvironmentMixin):
         """
         # Use shared utility that detects both regular and bare repositories
         return is_git_repository(path)
+
+    def _is_bare_repository(self, repo_path: Path) -> bool:
+        """Whether *repo_path* is a bare repository, as a default clone is.
+
+        A bare repository has no working tree, so none of the branch,
+        upstream or stash handling applies to it.
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            True if git reports the repository as bare
+        """
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-bare-repository"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to check whether repository is bare: {e}")
+            return False
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def _bare_refresh_obstacle(self, repo_path: Path) -> str | None:
+        """Why fetching would not update a bare repository, if it would not.
+
+        A mirror clone fetches ``+refs/*:refs/*``, so a fetch brings
+        every ref up to date.  A bare repository with no fetch refspec on
+        any remote -- ``git clone --bare`` leaves none -- would fetch into
+        ``FETCH_HEAD`` alone and update nothing, and reporting that as a
+        refresh would be the very silent success this is here to avoid.
+        Every remote counts, since the fetch is ``--all``.
+
+        Args:
+            repo_path: Path to a bare repository
+
+        Returns:
+            The reason it cannot be refreshed, or ``None`` if it can.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get-regexp", r"^remote\..*\.fetch$"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+        except Exception as e:
+            return f"Could not read the fetch refspec: {e}"
+        if result.returncode == 0 and result.stdout.strip():
+            return None
+        return "Bare repository has no fetch refspec; nothing to update"
 
     def _check_repository_state(self, repo_path: Path) -> dict[str, Any]:
         """Check the state of the repository.

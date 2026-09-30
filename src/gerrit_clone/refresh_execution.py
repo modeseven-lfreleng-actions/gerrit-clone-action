@@ -55,12 +55,15 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
     prune: bool
     strategy: str
 
-    def _execute_adaptive_refresh(self, repo_path: Path, result: RefreshResult) -> bool:
+    def _execute_adaptive_refresh(
+        self, repo_path: Path, result: RefreshResult, *, bare: bool = False
+    ) -> bool:
         """Execute refresh with adaptive retry logic.
 
         Args:
             repo_path: Repository path
             result: Result object to update
+            bare: Whether the repository is bare, and so can only be fetched
 
         Returns:
             True if refresh succeeded, False otherwise
@@ -78,7 +81,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         while attempt < max_attempts:
             attempt += 1
             try:
-                success = self._perform_refresh(repo_path, result)
+                success = self._perform_refresh(repo_path, result, bare=bare)
                 if success:  # noqa: SIM103
                     return True
 
@@ -143,12 +146,15 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
 
         return False
 
-    def _perform_refresh(self, repo_path: Path, result: RefreshResult) -> bool:
+    def _perform_refresh(
+        self, repo_path: Path, result: RefreshResult, *, bare: bool = False
+    ) -> bool:
         """Perform the actual refresh operation.
 
         Args:
             repo_path: Repository path
             result: Result object to update
+            bare: Whether the repository is bare, and so can only be fetched
 
         Returns:
             True if refresh succeeded, False otherwise
@@ -165,8 +171,10 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         self._ssh_handshake_jitter(repo_path)
 
         try:
-            if self.fetch_only:
-                # Fetch only, don't merge
+            if self.fetch_only or bare:
+                # Fetch only, don't merge.  A bare repository has no
+                # branch to merge into; a mirror's refspec is
+                # +refs/*:refs/*, so the fetch alone updates every ref.
                 success = self._execute_git_fetch(repo_path, result)
             else:
                 success = self._execute_git_pull(repo_path, result)

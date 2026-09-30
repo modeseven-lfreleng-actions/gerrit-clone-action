@@ -184,6 +184,22 @@ a warning.
 
 ### Refresh Command Examples
 
+`refresh` finds both kinds of clone beneath the output path. A default
+(mirror) clone is a bare repository, so it has no branch to pull: refresh
+fetches every ref into it and prunes refs deleted upstream (unless
+`--no-prune`). The branch options (`--strategy`, `--auto-stash`, `--force`,
+`--force-hard`) apply to working-tree (`--no-mirror`) clones only. Refresh
+skips a bare repository with no fetch refspec, such as one made by
+`git clone --bare`, and says why: fetching it would update nothing. If the
+command finds no repositories at all, it says so and exits with status 1
+rather than reporting success.
+
+A repository that content filtering (`--remove-files`, `--git-filter`,
+`--redact-secrets`) has rewritten gets refreshed only by a run that filters
+it again. Fetching would force the original history back, filtered content
+included, so a refresh without those options skips it and says why; the
+same applies to re-running `clone`. A `--dry-run` applies no content filters.
+
 Refresh all repositories in the current directory:
 
 ```bash

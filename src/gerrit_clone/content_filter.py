@@ -34,6 +34,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from gerrit_clone.content_origin import origin_kept
 from gerrit_clone.content_patterns import (
     _glob_to_regex,
     _match_regex_pattern,
@@ -335,6 +336,10 @@ def apply_content_filters(
     the mirror manager after cloning from Gerrit and before pushing
     to GitHub.
 
+    ``git filter-repo`` removes ``origin`` whenever it rewrites history;
+    :func:`gerrit_clone.content_origin.origin_kept` puts back what a later
+    refresh needs to fetch, with pushing disabled.
+
     Args:
         repo_path: Path to the cloned (bare) repository.
         project_name: Gerrit project name (for matching against
@@ -354,74 +359,75 @@ def apply_content_filters(
     Returns:
         Tuple of ``(success, error_message)``.
     """
-    errors: list[str] = []
+    with origin_kept(repo_path):
+        errors: list[str] = []
 
-    if remove_patterns:
-        try:
-            removed = remove_files_from_bare_repo(
-                repo_path, remove_patterns, timeout=timeout
-            )
-            if removed:
-                logger.info(
-                    "Content filter: removed %d path(s) from %s",
-                    len(removed),
-                    project_name,
-                )
-        except Exception as exc:
-            msg = f"File removal failed for {project_name}: {exc}"
-            logger.error(msg)
-            errors.append(msg)
-
-    # Aggregate tokens from all matching patterns so filter-repo runs once.
-    if git_filter_projects:
-        unique_tokens = _collect_filter_tokens(project_name, git_filter_projects)
-        if unique_tokens:
+        if remove_patterns:
             try:
-                success = replace_tokens_in_history(
-                    repo_path,
-                    unique_tokens,
-                    timeout=timeout,
+                removed = remove_files_from_bare_repo(
+                    repo_path, remove_patterns, timeout=timeout
                 )
-                if not success:
-                    msg = f"Token replacement failed for {project_name}"
+                if removed:
+                    logger.info(
+                        "Content filter: removed %d path(s) from %s",
+                        len(removed),
+                        project_name,
+                    )
+            except Exception as exc:
+                msg = f"File removal failed for {project_name}: {exc}"
+                logger.error(msg)
+                errors.append(msg)
+
+        # Aggregate tokens from all matching patterns so filter-repo runs once.
+        if git_filter_projects:
+            unique_tokens = _collect_filter_tokens(project_name, git_filter_projects)
+            if unique_tokens:
+                try:
+                    success = replace_tokens_in_history(
+                        repo_path,
+                        unique_tokens,
+                        timeout=timeout,
+                    )
+                    if not success:
+                        msg = f"Token replacement failed for {project_name}"
+                        errors.append(msg)
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    logger.error(msg)
                     errors.append(msg)
-            except RuntimeError as exc:
+
+        if redact_secrets:
+            try:
+                discovered = scan_repo_for_secrets(repo_path, timeout=timeout)
+                if discovered:
+                    logger.info(
+                        "Redacting %d auto-discovered secret(s) from %s",
+                        len(discovered),
+                        project_name,
+                    )
+                    success = replace_tokens_in_history(
+                        repo_path,
+                        discovered,
+                        timeout=timeout,
+                    )
+                    if not success:
+                        msg = f"Auto-redaction failed for {project_name}"
+                        errors.append(msg)
+                else:
+                    logger.debug(
+                        "No secrets found to redact in %s",
+                        project_name,
+                    )
+            except (RuntimeError, OSError) as exc:
+                # RuntimeError covers the scan/redaction fail-closed
+                # paths; OSError (e.g. FileNotFoundError when git is
+                # missing) can surface from subprocess.Popen.  Both are
+                # reported as filter failures so the (success, error)
+                # contract always holds.
                 msg = str(exc)
                 logger.error(msg)
                 errors.append(msg)
 
-    if redact_secrets:
-        try:
-            discovered = scan_repo_for_secrets(repo_path, timeout=timeout)
-            if discovered:
-                logger.info(
-                    "Redacting %d auto-discovered secret(s) from %s",
-                    len(discovered),
-                    project_name,
-                )
-                success = replace_tokens_in_history(
-                    repo_path,
-                    discovered,
-                    timeout=timeout,
-                )
-                if not success:
-                    msg = f"Auto-redaction failed for {project_name}"
-                    errors.append(msg)
-            else:
-                logger.debug(
-                    "No secrets found to redact in %s",
-                    project_name,
-                )
-        except (RuntimeError, OSError) as exc:
-            # RuntimeError covers the scan/redaction fail-closed
-            # paths; OSError (e.g. FileNotFoundError when git is
-            # missing) can surface from subprocess.Popen.  Both are
-            # reported as filter failures so the (success, error)
-            # contract always holds.
-            msg = str(exc)
-            logger.error(msg)
-            errors.append(msg)
-
-    if errors:
-        return False, "; ".join(errors)
-    return True, None
+        if errors:
+            return False, "; ".join(errors)
+        return True, None

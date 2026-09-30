@@ -33,6 +33,7 @@ from gerrit_clone.file_logging import (
     init_logging,
 )
 from gerrit_clone.models import normalize_project_list
+from gerrit_clone.refresh_discovery import project_name_for
 from gerrit_clone.refresh_manager import refresh_repositories
 
 if TYPE_CHECKING:
@@ -107,6 +108,9 @@ def run_refresh(request: RefreshRequest, console: Console) -> None:
         recursive=request.recursive,
         include_projects=request.include_projects if request.include_projects else None,
         exclude_projects=request.exclude_projects if request.exclude_projects else None,
+        # Judged by what a real run with these options would do, a dry
+        # run included: it predicts that run, filters and all.
+        reapplies_content_filters=_filters_requested(request),
     )
 
     _apply_content_filters(request, console, result)
@@ -197,10 +201,20 @@ def _show_configuration(request: RefreshRequest, console: Console) -> None:
     console.print()
 
 
+def _filters_requested(request: RefreshRequest) -> bool:
+    """Whether the run filters the content of what it refreshes."""
+    return bool(request.remove_files or request.git_filter or request.redact_secrets)
+
+
 def _apply_content_filters(
     request: RefreshRequest, console: Console, result: RefreshBatchResult
 ) -> None:
     """Apply content filters to cleanly refreshed repositories, if requested."""
+    if request.dry_run:
+        # A dry run changes nothing, and filtering rewrites history.
+        if _filters_requested(request) and not request.quiet:
+            console.print("[cyan]Dry run: content filters not applied[/cyan]")
+        return
     remove_file_patterns = (
         normalize_file_patterns([request.remove_files])
         if request.remove_files
@@ -290,7 +304,10 @@ def _filter_repository(
             return 0, 1
     success, error = apply_content_filters(
         result.path,
-        result.project_name,
+        # Matched against --git-filter patterns, which name projects
+        # hierarchically as clone-time filtering does: com/parent, not
+        # the parent the refresh result displays.
+        project_name_for(result.path, request.output_path.resolve()),
         remove_patterns=remove_file_patterns,
         git_filter_projects=repo_git_filter,
         redact_secrets=repo_redact,
@@ -334,6 +351,19 @@ def _exit_with_result_status(
     request: RefreshRequest, console: Console, result: RefreshBatchResult
 ) -> None:
     """Determine exit code."""
+    if result.total_count == 0:
+        # Nothing was refreshed, so nothing can have succeeded: an empty
+        # or mistyped output path, or filters that match nothing, would
+        # otherwise pass as a clean run.
+        if not request.quiet:
+            filtered = request.include_projects or request.exclude_projects
+            console.print(
+                f"[yellow]⚠️  No repositories found to refresh under "
+                f"{request.output_path}"
+                f"{' matching the project filters' if filtered else ''}; "
+                f"nothing was refreshed[/yellow]"
+            )
+        raise typer.Exit(ExitCode.GENERAL_ERROR.value)
     if result.failed_count > 0:
         if not request.quiet:
             console.print(
@@ -348,5 +378,15 @@ def _exit_with_result_status(
         raise typer.Exit(ExitCode.GENERAL_ERROR.value)
     else:
         if not request.quiet:
-            console.print("[green]✅ All repositories refreshed successfully![/green]")
+            not_refreshed = result.total_count - result.success_count
+            if not_refreshed:
+                console.print(
+                    f"[yellow]⚠️  {not_refreshed} of {result.total_count} "
+                    f"repositories were not refreshed; see the summary "
+                    f"above[/yellow]"
+                )
+            else:
+                console.print(
+                    "[green]✅ All repositories refreshed successfully![/green]"
+                )
         raise typer.Exit(ExitCode.SUCCESS.value)

@@ -133,6 +133,10 @@ class Config:
     force_refresh: bool = False
     fetch_only: bool = False
     skip_conflicts: bool = True
+    # Whether the run filters the content of what it clones and refreshes.
+    # A repository content filtering has rewritten is only refreshed when
+    # it will be filtered again; see gerrit_clone.content_origin.
+    reapplies_content_filters: bool = False
 
     def __post_init__(self) -> None:
         """Validate and normalize configuration."""
