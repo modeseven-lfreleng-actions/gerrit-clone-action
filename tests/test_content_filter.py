@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import random
 import re as re_mod
-import shutil
 import string
 import subprocess
 from pathlib import Path
@@ -17,6 +16,7 @@ import pytest
 
 from gerrit_clone.content_filter import (
     SCAN_PATTERNS,
+    _check_git_filter_repo,
     _generate_replacement_string,
     _matches_for_removal,
     _remove_files_filter_repo,
@@ -445,11 +445,20 @@ class TestReplaceTokensInHistory:
         """Empty token list returns True without doing anything."""
         assert replace_tokens_in_history(tmp_path, []) is True
 
-    def test_successful_token_replacement(self, repo_with_token: Path) -> None:
-        """Token is removed from all history when filter-repo is available."""
-        if not shutil.which("git-filter-repo"):
-            pytest.skip("git-filter-repo not installed")
+    def test_git_filter_repo_is_installed(self) -> None:
+        """The history-rewriting tests need the real tool, so it must be here.
 
+        It is a dev dependency.  These tests used to skip when it was
+        missing, and CI's install never supplied it -- so history
+        rewriting went untested there without anything failing.
+        """
+        assert _check_git_filter_repo(), (
+            "git filter-repo is not installed; install the dev extra "
+            "(pip install -e '.[dev]') or run uv sync"
+        )
+
+    def test_successful_token_replacement(self, repo_with_token: Path) -> None:
+        """Token is removed from all history."""
         token = "fake-test-token-abcdefghij1234"
         result = replace_tokens_in_history(repo_with_token, [token])
         assert result is True

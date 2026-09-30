@@ -58,6 +58,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # Supplies the ``git-filter-repo`` executable that content filtering
+    # shells out to.  Listed here as well as in the dev dependency group
+    # because CI's test job installs this extra (``.[test,dev]``) and
+    # never reads the group: without it the history-rewriting tests
+    # cannot run there.
+    "git-filter-repo>=2.47.0,<3.0.0",
     "pytest>=8.4.2,<10.0.0",
     "pytest-cov>=6.3.0,<8.0.0",
     "pytest-mock>=3.15.1,<4.0.0",
