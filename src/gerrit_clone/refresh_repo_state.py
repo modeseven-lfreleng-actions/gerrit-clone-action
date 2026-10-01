@@ -31,6 +31,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _updates_a_ref(refspec: str) -> bool:
+    """Whether fetching *refspec* stores anything but ``FETCH_HEAD``.
+
+    Only a positive refspec with a destination does: ``src:dst``, with
+    ``+`` optional.  An empty one, a bare source, or a negative ``^``
+    one leaves every ref where it was, and ``git fetch`` still exits 0.
+    """
+    spec = refspec.strip().removeprefix("+")
+    if spec.startswith("^"):
+        return False
+    return bool(spec.partition(":")[2])
+
+
 class StashOutcome(Enum):
     """Result of attempting to stash a working tree.
 
@@ -97,7 +110,9 @@ class RepositoryStateMixin(GitEnvironmentMixin):
         any remote -- ``git clone --bare`` leaves none -- would fetch into
         ``FETCH_HEAD`` alone and update nothing, and reporting that as a
         refresh would be the very silent success this is here to avoid.
-        Every remote counts, since the fetch is ``--all``.
+        So would a refspec that names no destination: an empty one,
+        ``refs/heads/main`` alone, or a negative ``^`` one.  Every remote
+        counts, since the fetch is ``--all``.
 
         Args:
             repo_path: Path to a bare repository
@@ -115,9 +130,14 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             raise
         except Exception as e:
             return f"Could not read the fetch refspec: {e}"
-        if result.returncode == 0 and result.stdout.strip():
+        if result.returncode == 0 and any(
+            _updates_a_ref(line.partition(" ")[2])
+            for line in result.stdout.splitlines()
+        ):
             return None
-        return "Bare repository has no fetch refspec; nothing to update"
+        return (
+            "Bare repository has no fetch refspec that updates a ref; nothing to update"
+        )
 
     def _check_repository_state(self, repo_path: Path) -> dict[str, Any]:
         """Check the state of the repository.

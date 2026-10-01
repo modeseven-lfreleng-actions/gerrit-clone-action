@@ -13,6 +13,7 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
+from gerrit_clone.content_git import run_content_git
 from gerrit_clone.logging import get_logger
 
 if TYPE_CHECKING:
@@ -26,15 +27,13 @@ def _check_git_filter_repo() -> bool:
 
     Returns:
         ``True`` if ``git filter-repo`` is available on PATH.
+
+    Raises:
+        ProcessAbandonedError: If the batch was abandoned.  Answering
+            "unavailable" would send removal down the worktree fallback.
     """
     try:
-        result = subprocess.run(
-            ["git", "filter-repo", "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = run_content_git(["git", "filter-repo", "--version"], timeout=5)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -119,13 +118,7 @@ def _remove_files_filter_repo(
     )
 
     try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_content_git(cmd, timeout=timeout)
         if result.returncode != 0:
             msg = (
                 f"git filter-repo failed for {repo_path.name}: {result.stderr.strip()}"
@@ -143,6 +136,8 @@ def _remove_files_filter_repo(
         logger.error(msg)
         raise RuntimeError(msg) from None
     except RuntimeError:
+        # Includes ProcessAbandonedError, which must reach the batch
+        # unwrapped rather than as a filtering failure.
         raise
     except Exception as exc:
         msg = f"git filter-repo error for {repo_path.name}: {exc}"
@@ -172,21 +167,11 @@ def _list_tree_files(
             whose job is removing secrets must not report success with
             the files still in place, so a failure to enumerate is a
             filtering failure rather than "nothing to do".
+        ProcessAbandonedError: If the batch was abandoned.
     """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_path),
-                "ls-tree",
-                "-r",
-                "--name-only",
-                ref,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        result = run_content_git(
+            ["git", "-C", str(repo_path), "ls-tree", "-r", "--name-only", ref],
             timeout=timeout,
         )
         if result.returncode != 0:

@@ -279,6 +279,39 @@ class TestMirrorManager:
 
         assert manager.set_default_branch is False
 
+    def test_its_clone_pass_carries_the_content_filters(self) -> None:
+        """Or every repository they rewrote is refused on the next run.
+
+        The clone pass refreshes what is already on disk, and refreshes a
+        content-filtered repository only under filters covering the ones
+        that rewrote it.
+        """
+        config = Config(host="gerrit.example.org", port=29418, path=Path("/tmp/m"))
+
+        manager = MirrorManager(
+            config=config,
+            github_api=Mock(),
+            github_org="test-org",
+            remove_file_patterns=["secret.txt"],
+            git_filter_projects={"proj": ["tok-123"]},
+            redact_secrets=True,
+        )
+
+        spec = manager.clone_manager.config.content_filters
+        assert spec is not None
+        assert spec.remove_patterns == ["secret.txt"]
+        assert spec.git_filter_projects == {"proj": ["tok-123"]}
+        assert spec.redact_secrets is True
+        assert spec.base_path == config.path
+        assert config.content_filters is None, "mutated the caller's config"
+
+    def test_an_unfiltered_mirror_run_carries_no_filters(self) -> None:
+        config = Config(host="gerrit.example.org", port=29418, path=Path("/tmp/m"))
+
+        manager = MirrorManager(config=config, github_api=Mock(), github_org="o")
+
+        assert manager.clone_manager.config.content_filters is None
+
     @patch("gerrit_clone.mirror_manager.subprocess.run")
     def test_push_to_github_success(self, mock_run: Mock) -> None:
         """Test successful push to GitHub."""

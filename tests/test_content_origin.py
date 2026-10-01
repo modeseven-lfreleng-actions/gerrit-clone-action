@@ -12,7 +12,14 @@ from unittest.mock import patch
 import pytest
 
 from gerrit_clone import content_origin
-from gerrit_clone.content_origin import NO_PUSH_URL, is_content_filtered, origin_kept
+from gerrit_clone.content_origin import NO_PUSH_URL, block_pushes, origin_kept
+from gerrit_clone.subprocess_tracking import (
+    ProcessAbandonedError,
+    _thread_state,
+    enter_generation,
+    new_generation,
+    refuse_generation,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,7 +101,7 @@ class TestOriginKept:
 
     def test_a_partial_restore_still_blocks_pushing(self, mirror: Path) -> None:
         """The push URL goes in first, so a failure after it is fail-safe."""
-        real = content_origin._git_config
+        real = content_origin.git_config
 
         def failing_refspecs(
             repo: Path, *args: str
@@ -104,7 +111,7 @@ class TestOriginKept:
             return real(repo, *args)
 
         with (
-            patch.object(content_origin, "_git_config", failing_refspecs),
+            patch.object(content_origin, "git_config", failing_refspecs),
             origin_kept(mirror),
         ):
             _drop_origin(mirror)
@@ -129,7 +136,6 @@ class TestOriginKept:
 
         assert _config(mirror, "remote.origin.pushurl") == ""
         assert _config(mirror, "remote.origin.mirror") == "true"
-        assert not is_content_filtered(mirror)
 
     def test_no_origin_is_invented(self, tmp_path: Path) -> None:
         repo = tmp_path / "bare"
@@ -153,64 +159,82 @@ class TestOriginKept:
         assert _config(mirror, "--get-all", "remote.origin.fetch") == MIRROR_REFSPEC
 
 
-class TestFilteredMarker:
-    """Refreshing a rewritten repository unfiltered brings the content back."""
+class TestBlockPushes:
+    """Every remote, not only the ``origin`` filter-repo removes.
 
-    def test_a_rewrite_marks_the_repository(self, mirror: Path) -> None:
-        with origin_kept(mirror):
-            _git_in(mirror, "update-ref", "refs/heads/main", _empty_commit(mirror))
+    A mirror cloned with ``--origin upstream`` keeps its source remote
+    through the rewrite, and filter-repo does nothing to stop a push.
+    """
 
-        assert is_content_filtered(mirror)
-
-    def test_a_filter_that_changed_nothing_leaves_no_mark(self, mirror: Path) -> None:
-        """``--remove-files`` runs everywhere, matching or not."""
-        with origin_kept(mirror):
-            _drop_origin(mirror)
-
-        assert not is_content_filtered(mirror)
-
-    def test_losing_remote_tracking_refs_alone_is_no_rewrite(
+    def test_a_push_to_a_source_remote_not_named_origin_fails(
         self, mirror: Path
     ) -> None:
-        """Removing ``origin`` deletes them whether or not content changed."""
-        main = _git_in(mirror, "rev-parse", "main")
-        _git_in(mirror, "update-ref", "refs/remotes/origin/main", main)
+        _git_in(mirror, "remote", "rename", "origin", "upstream")
 
-        with origin_kept(mirror):
-            _git_in(mirror, "update-ref", "-d", "refs/remotes/origin/main")
+        assert block_pushes(mirror)
 
-        assert not is_content_filtered(mirror)
+        assert _config(mirror, "remote.upstream.pushurl") == NO_PUSH_URL
+        push = subprocess.run(
+            ["git", "push", "upstream", "main"],
+            cwd=mirror,
+            capture_output=True,
+            check=False,
+        )
+        assert push.returncode != 0
 
-    def test_a_rewrite_that_raises_part_way_still_marks(self, mirror: Path) -> None:
+    def test_every_remote_is_blocked(self, mirror: Path) -> None:
+        _git_in(mirror, "remote", "add", "second", "https://example.org/second")
+
+        assert block_pushes(mirror)
+
+        for name in ("origin", "second"):
+            assert _config(mirror, f"remote.{name}.pushurl") == NO_PUSH_URL
+
+    def test_fetching_still_works(self, mirror: Path) -> None:
+        assert block_pushes(mirror)
+
+        fetch = subprocess.run(
+            ["git", "fetch", "origin"], cwd=mirror, capture_output=True, check=False
+        )
+        assert fetch.returncode == 0, fetch.stderr
+
+    def test_an_unreadable_repository_is_reported(self, tmp_path: Path) -> None:
+        assert not block_pushes(tmp_path / "missing")
+
+
+class TestAbandonment:
+    def test_a_child_the_batch_terminated_raises(self, mirror: Path) -> None:
+        """It exits nonzero like git failing, and is not that.
+
+        Reported as a failure, it would turn a policy write or a push
+        block that an abandon cut short into an ordinary error.
+        """
+        generation = new_generation()
+        enter_generation(generation)
+        refuse_generation(generation)
+        terminated = subprocess.CompletedProcess(["git"], -15, "", "")
         raised = False
         try:
-            with origin_kept(mirror):
-                _git_in(mirror, "update-ref", "refs/heads/main", _empty_commit(mirror))
-                raise RuntimeError("filter-repo failed part-way")
-        except RuntimeError:
-            raised = True
+            with patch.object(content_origin, "run_tracked", return_value=terminated):
+                try:
+                    content_origin.git(mirror, "config", "--get", "x.y")
+                except ProcessAbandonedError:
+                    raised = True
+        finally:
+            _thread_state.generation = None
 
         assert raised
-        assert is_content_filtered(mirror)
+
+    def test_a_failure_outside_an_abandoned_batch_is_returned(
+        self, mirror: Path
+    ) -> None:
+        result = content_origin.git(mirror, "config", "--get", "no.such")
+
+        assert result is not None
+        assert result.returncode != 0
 
 
 def _git_in(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, text=True, check=True
     ).stdout.strip()
-
-
-def _empty_commit(repo: Path) -> str:
-    """A new commit object, standing in for one a filter rewrote."""
-    tree = _git_in(repo, "rev-parse", "main^{tree}")
-    return _git_in(
-        repo,
-        "-c",
-        "user.email=t@example.com",
-        "-c",
-        "user.name=T",
-        "commit-tree",
-        tree,
-        "-m",
-        "rewritten",
-    )

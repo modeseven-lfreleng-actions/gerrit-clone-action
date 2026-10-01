@@ -10,14 +10,17 @@ could not be filtered.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from gerrit_clone.content_policy import ContentFilterSpec
 from gerrit_clone.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from gerrit_clone.models import Config
 
 logger = get_logger(__name__)
 
@@ -145,6 +148,31 @@ def _filter_one_repo(
         )
 
 
+def with_content_filters(
+    config: Config,
+    remove_file_patterns: list[str] | None,
+    git_filter_projects: dict[str, list[str]] | None,
+    redact_secrets: bool,
+) -> Config:
+    """*config*, carrying the mirror's content filters for its clone pass.
+
+    That pass refreshes repositories already on disk, and one these
+    filters rewrote last time is refreshed only under filters covering
+    those (see :mod:`gerrit_clone.refresh_filtered`) -- so without them
+    every filtered repository would be refused before it could be
+    filtered again.
+
+    Returns:
+        *config* itself when no filter was requested, else a copy.
+    """
+    if not (remove_file_patterns or git_filter_projects or redact_secrets):
+        return config
+    spec = ContentFilterSpec(
+        remove_file_patterns, git_filter_projects, redact_secrets, config.path
+    )
+    return replace(config, content_filters=spec)
+
+
 def apply_filters_to_clones(
     clone_results: list[Any],
     settings: ContentFilterSettings,
@@ -169,6 +197,10 @@ def apply_filters_to_clones(
     logger.info("🔧 Applying content filters to cloned repositories...")
     for clone_result in clone_results:
         if not clone_result.success or not clone_result.path:
+            continue
+        if getattr(clone_result, "content_filtered", False):
+            # Re-filtered as part of its staged refresh already.
+            tally.succeeded += 1
             continue
         _filter_one_repo(clone_result, settings, runner, tally)
     logger.info(

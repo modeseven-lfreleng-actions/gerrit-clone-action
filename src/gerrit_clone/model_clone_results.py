@@ -46,6 +46,8 @@ class CloneResult:
     was_refreshed: bool = False
     refresh_had_updates: bool = False
     refresh_commits_pulled: int = 0
+    # Whether the refresh already re-applied the run's content filters.
+    content_filtered: bool = False
 
     @property
     def success(self) -> bool:

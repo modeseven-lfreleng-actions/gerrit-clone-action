@@ -12,8 +12,10 @@ what the command reports afterwards.
 
 from __future__ import annotations
 
+import json
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -21,7 +23,8 @@ from typer.testing import CliRunner
 from gerrit_clone.cli import app
 from gerrit_clone.clone_manager import _refresh_repositories
 from gerrit_clone.content_filter import apply_content_filters
-from gerrit_clone.content_origin import FILTERED_MARKER, NO_PUSH_URL
+from gerrit_clone.content_origin import NO_PUSH_URL
+from gerrit_clone.content_policy import ContentFilterSpec, FilterPolicy, add_policy
 from gerrit_clone.models import (
     CloneStatus,
     Config,
@@ -30,8 +33,10 @@ from gerrit_clone.models import (
     RefreshStatus,
     RetryPolicy,
 )
+from gerrit_clone.refresh_filtered import SHALLOW_HISTORY_REFUSAL
+from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_manager import RefreshManager, refresh_repositories
-from gerrit_clone.refresh_worker import FILTERED_REFRESH_REFUSAL, RefreshWorker
+from gerrit_clone.refresh_worker import FILTERED_WORKING_COPY_REFUSAL, RefreshWorker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -123,7 +128,7 @@ def _worker(
     force_hard: bool = False,
     auto_stash: bool = False,
     fetch_only: bool = False,
-    reapplies: bool = False,
+    filters: ContentFilterSpec | None = None,
 ) -> RefreshWorker:
     return RefreshWorker(
         retry_policy=RetryPolicy(max_attempts=1),
@@ -134,13 +139,43 @@ def _worker(
         force_hard=force_hard,
         auto_stash=auto_stash,
         fetch_only=fetch_only,
-        reapplies_content_filters=reapplies,
+        content_filters=filters,
     )
 
 
 def _mark_filtered(repo: Path) -> None:
-    """Mark *repo* as content filtering leaves a repository it rewrote."""
-    _git("config", FILTERED_MARKER, "true", cwd=repo)
+    """Record on *repo* what ``--remove-files secret.txt`` leaves."""
+    assert add_policy(repo, FilterPolicy.of(["secret.txt"], [], False))
+
+
+def _spec(base: Path, remove_files: str = "secret.txt") -> ContentFilterSpec:
+    """A run's filters, as ``--remove-files`` gives them."""
+    spec = ContentFilterSpec.from_options(remove_files, None, False, base)
+    assert spec is not None
+    return spec
+
+
+def _filtered_mirror(tree: Path) -> Path:
+    """``com/parent``, fetched with a secret in it and then filtered."""
+    upstream = tree.parent / "up-parent"
+    (upstream / "secret.txt").write_text("hunter2\n")
+    _git("add", "secret.txt", cwd=upstream)
+    _git("commit", "-q", "-m", "oops", cwd=upstream)
+    mirror = tree / "com/parent"
+    assert _worker().refresh_repository(mirror).success
+    success, error = apply_content_filters(
+        mirror, "com/parent", remove_patterns=["secret.txt"]
+    )
+    assert success, error
+    return mirror
+
+
+def _history_files(repo: Path) -> list[str]:
+    return _git("log", "--all", "--name-only", "--format=", cwd=repo).split()
+
+
+def _stages_left(tree: Path) -> list[Path]:
+    return list(tree.rglob(".gerrit-clone-stage-*"))
 
 
 class TestDiscovery:
@@ -243,6 +278,33 @@ class TestRefreshingAMirror:
         assert "no fetch refspec" in (result.error_message or "")
         assert _git("rev-parse", "main", cwd=bare) == before
 
+    @pytest.mark.parametrize(
+        "refspec",
+        ["", "refs/heads/main", "^refs/heads/other", "refs/heads/main:"],
+        ids=["empty", "no-destination", "negative", "empty-destination"],
+    )
+    def test_a_refspec_that_updates_no_ref_is_skipped(
+        self, tree: Path, refspec: str
+    ) -> None:
+        """Git fetches these, exits 0 and stores nothing but ``FETCH_HEAD``."""
+        upstream = tree.parent / "up-child"
+        bare = tree / "com/plainbare"
+        _git("clone", "-q", "--bare", upstream.as_uri(), str(bare))
+        _git("config", "--add", "remote.origin.fetch", refspec, cwd=bare)
+        before = _git("rev-parse", "main", cwd=bare)
+        _advance(upstream)
+
+        result = _worker().refresh_repository(bare)
+        predicted = RefreshManager(
+            dry_run=True, filter_gerrit_only=False
+        ).refresh_repositories(tree, [bare])
+
+        assert result.status == RefreshStatus.SKIPPED
+        assert "no fetch refspec that updates a ref" in (result.error_message or "")
+        assert _git("rev-parse", "main", cwd=bare) == before
+        [prediction] = predicted.results
+        assert prediction.status == RefreshStatus.SKIPPED
+
     def test_a_dry_run_predicts_both_outcomes(self, tree: Path) -> None:
         bare = tree / "com/plainbare"
         _git("clone", "-q", "--bare", (tree.parent / "up-child").as_uri(), str(bare))
@@ -283,22 +345,15 @@ class TestRefreshingAMirror:
     ) -> None:
         _mark_filtered(tree / "com/parent")
 
-        def predicted(reapplies: bool) -> dict[str, RefreshStatus]:
+        def predicted(filters: ContentFilterSpec | None) -> RefreshStatus:
             batch = RefreshManager(
-                dry_run=True,
-                filter_gerrit_only=False,
-                reapplies_content_filters=reapplies,
+                dry_run=True, filter_gerrit_only=False, content_filters=filters
             ).refresh_repositories(tree)
-            return {r.path.name: r.status for r in batch.results}
+            return {r.path.name: r.status for r in batch.results}["parent"]
 
-        assert predicted(reapplies=False) == {
-            "parent": RefreshStatus.SKIPPED,
-            "child": RefreshStatus.SUCCESS,
-        }
-        assert predicted(reapplies=True) == {
-            "parent": RefreshStatus.SUCCESS,
-            "child": RefreshStatus.SUCCESS,
-        }
+        assert predicted(None) == RefreshStatus.SKIPPED
+        assert predicted(_spec(tree, "unrelated.txt")) == RefreshStatus.SKIPPED
+        assert predicted(_spec(tree)) == RefreshStatus.SUCCESS
 
 
 class TestBothEntryPoints:
@@ -349,10 +404,11 @@ class TestBothEntryPoints:
         assert refused.status == CloneStatus.SKIPPED
         assert _git("rev-parse", "main", cwd=mirror) == before
 
-        config.reapplies_content_filters = True
+        config.content_filters = _spec(tree)
         [refreshed] = _refresh_repositories(config, [project])
 
         assert refreshed.status == CloneStatus.REFRESHED, refreshed.error_message
+        assert refreshed.content_filtered
         assert _git("rev-parse", "main", cwd=mirror) == upstream_main
 
 
@@ -374,46 +430,277 @@ def _filtered_working_copy(tmp_path: Path) -> tuple[Path, Path]:
 class TestFilteredWorkingCopy:
     """A ``--no-mirror`` clone after content filtering rewrote its history.
 
-    A hard reset to upstream brings the filtered content back, as a
-    mirror's fetch does, so it is refused unless the run filters again.
-    Its history no longer shares commits with upstream either, so a
-    plain pull could not fast-forward it whatever tracking it had.
+    Its rewritten history cannot fast-forward, and resetting it to
+    upstream would put the filtered content back in its working tree, so
+    it is refused whatever the run's filters: it is left for re-cloning.
     """
 
-    def test_a_normal_refresh_refuses_it(self, tmp_path: Path) -> None:
-        upstream, checkout = _filtered_working_copy(tmp_path)
-        _advance(upstream)
-
-        result = _worker().refresh_repository(checkout)
-
-        assert result.status == RefreshStatus.SKIPPED
-        assert result.error_message == FILTERED_REFRESH_REFUSAL
-
-    def test_force_hard_without_filters_is_refused(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("force_hard", "with_filters"),
+        [(False, False), (True, False), (True, True), (False, True)],
+        ids=["plain", "force-hard", "force-hard-with-filters", "with-filters"],
+    )
+    def test_it_is_refused_and_left_as_it_was(
+        self, tmp_path: Path, force_hard: bool, with_filters: bool
+    ) -> None:
         upstream, checkout = _filtered_working_copy(tmp_path)
         before = _git("rev-parse", "main", cwd=checkout)
         _advance(upstream)
+        filters = _spec(tmp_path) if with_filters else None
 
-        result = _worker(force_hard=True).refresh_repository(checkout)
+        result = _worker(force_hard=force_hard, filters=filters).refresh_repository(
+            checkout
+        )
 
         assert result.status == RefreshStatus.SKIPPED
+        assert result.error_message == FILTERED_WORKING_COPY_REFUSAL
         assert _git("rev-parse", "main", cwd=checkout) == before
+        assert "secret.txt" not in _history_files(checkout)
 
-    def test_force_hard_resets_it_when_it_will_be_filtered_again(
-        self, tmp_path: Path
+
+class TestStagedRefresh:
+    """A filtered mirror is refreshed through a filtered copy, or not at all."""
+
+    def test_it_is_refreshed_and_stays_filtered(self, tree: Path) -> None:
+        mirror = _filtered_mirror(tree)
+        _advance(tree.parent / "up-parent")
+
+        result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.SUCCESS, result.error_message
+        assert result.content_filtered
+        assert _git("show", "main:file.txt", cwd=mirror) == "two"
+        assert "secret.txt" not in _history_files(mirror)
+        assert not _has_ref(mirror, "refs/heads/doomed")
+        assert _git("config", "remote.origin.pushurl", cwd=mirror) == NO_PUSH_URL
+        assert _stages_left(tree) == []
+
+    def test_a_current_mirror_is_up_to_date(self, tree: Path) -> None:
+        """Re-filtering unchanged history reproduces it exactly."""
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+
+        result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.UP_TO_DATE, result.error_message
+        assert _git("for-each-ref", cwd=mirror) == before
+
+    def test_a_failed_re_filter_leaves_the_mirror_as_it_was(self, tree: Path) -> None:
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        _advance(tree.parent / "up-parent")
+
+        with patch(
+            "gerrit_clone.refresh_filtered.apply_content_filters",
+            return_value=(False, "filter-repo failed"),
+        ):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.FAILED
+        assert "left as it was" in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert "secret.txt" not in _history_files(mirror)
+        assert _stages_left(tree) == []
+
+    def test_a_failed_fetch_leaves_the_mirror_as_it_was(self, tree: Path) -> None:
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        gone = (tree.parent / "gone").as_uri()
+        _git("config", "remote.origin.url", gone, cwd=mirror)
+
+        result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.FAILED
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert _stages_left(tree) == []
+
+    def test_a_remote_read_failure_reports_its_own_error(self, tree: Path) -> None:
+        """Not the clone's stderr, which is empty when the clone worked."""
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+
+        def unreadable(
+            cmd: list[str], *args: Any, **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if "--get-regexp" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, "", "bad config line")
+            return run_git(cmd, *args, **kwargs)
+
+        with patch("gerrit_clone.refresh_filtered.run_git", unreadable):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.FAILED
+        assert "bad config line" in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert _stages_left(tree) == []
+
+    def test_a_push_guard_failure_is_reported_as_such(self, tree: Path) -> None:
+        """Told apart from failing to record the policy."""
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        _advance(tree.parent / "up-parent")
+
+        with patch("gerrit_clone.refresh_filtered.block_pushes", return_value=False):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.FAILED
+        assert "block pushing" in (result.error_message or "")
+        assert "policy" not in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert _stages_left(tree) == []
+
+    def test_a_copy_still_attached_to_the_mirror_is_not_fetched(
+        self, tree: Path
     ) -> None:
-        """Needs the ``origin`` filtering would otherwise have removed."""
-        upstream, checkout = _filtered_working_copy(tmp_path)
-        upstream_main = _advance(upstream)
+        """Its origin would still read the mirror, not upstream."""
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        _advance(tree.parent / "up-parent")
 
-        result = _worker(force_hard=True, reapplies=True).refresh_repository(checkout)
+        def stuck(
+            cmd: list[str], *args: Any, **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if cmd[1:3] == ["remote", "remove"]:
+                return subprocess.CompletedProcess(cmd, 1, "", "could not remove")
+            return run_git(cmd, *args, **kwargs)
+
+        with patch("gerrit_clone.refresh_filtered.run_git", stuck):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        assert result.status == RefreshStatus.FAILED
+        assert "could not remove" in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert _stages_left(tree) == []
+
+    def test_a_copy_that_cannot_be_removed_fails_the_refresh(self, tree: Path) -> None:
+        """It may hold unfiltered history, so it is reported, not ignored."""
+        mirror = _filtered_mirror(tree)
+        _advance(tree.parent / "up-parent")
+
+        def undeletable(path: Path, ignore_errors: bool = False) -> None:
+            if not ignore_errors:
+                raise PermissionError(13, "Permission denied", str(path))
+
+        with patch("gerrit_clone.refresh_filtered.shutil.rmtree", undeletable):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        [stage] = _stages_left(tree)
+        assert result.status == RefreshStatus.FAILED
+        assert str(stage) in (result.error_message or "")
+        assert "unfiltered history" in (result.error_message or "")
+
+    def test_other_filters_are_refused(self, tree: Path) -> None:
+        """Any filter is not enough: ``unrelated.txt`` would let it back."""
+        mirror = _filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        _advance(tree.parent / "up-parent")
+
+        result = _worker(filters=_spec(tree, "unrelated.txt")).refresh_repository(
+            mirror
+        )
+
+        assert result.status == RefreshStatus.SKIPPED
+        assert "--remove-files secret.txt" in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+
+    def test_a_staging_copy_is_never_discovered(self, tree: Path) -> None:
+        stage = tree / "com/parent/.gerrit-clone-stage-x/repo.git"
+        _git("clone", "-q", "--mirror", str(tree / "com/parent"), str(stage))
+
+        repos = RefreshManager().discover_local_repositories(tree)
+
+        assert stage.resolve() not in repos
+
+
+def _shallow_filtered_mirror(tree: Path) -> Path:
+    """A filtered mirror holding only the latest commit of its history."""
+    upstream = tree.parent / "up-parent"
+    (upstream / "file.txt").write_text("two\n")
+    _git("commit", "-q", "-am", "two", cwd=upstream)
+    mirror = tree / "com/shallow"
+    _git("clone", "-q", "--mirror", "--depth", "1", upstream.as_uri(), str(mirror))
+    assert _git("rev-parse", "--is-shallow-repository", cwd=mirror) == "true"
+    _mark_filtered(mirror)
+    return mirror
+
+
+class TestStagedRefreshRefusals:
+    """What a staged refresh refuses, and the dry run predicts alike."""
+
+    def test_history_filters_are_refused_on_a_shallow_mirror(self, tree: Path) -> None:
+        """Truncated history hides older secrets; it must not pass as filtered."""
+        mirror = _shallow_filtered_mirror(tree)
+        before = _git("for-each-ref", cwd=mirror)
+        spec = ContentFilterSpec.from_options("secret.txt", None, True, tree)
+        assert spec is not None
+
+        result = _worker(filters=spec).refresh_repository(mirror)
+        predicted = RefreshManager(
+            dry_run=True, filter_gerrit_only=False, content_filters=spec
+        ).refresh_repositories(tree, [mirror])
+
+        assert result.status == RefreshStatus.SKIPPED
+        assert result.error_message == SHALLOW_HISTORY_REFUSAL
+        assert _git("for-each-ref", cwd=mirror) == before
+        [prediction] = predicted.results
+        assert prediction.status == RefreshStatus.SKIPPED
+        assert prediction.error_message == SHALLOW_HISTORY_REFUSAL
+
+    def test_a_shallow_mirror_still_refreshes_under_file_removal_alone(
+        self, tree: Path
+    ) -> None:
+        """``--remove-files`` does not depend on history it cannot see."""
+        mirror = _shallow_filtered_mirror(tree)
+
+        result = _worker(filters=_spec(tree)).refresh_repository(mirror)
 
         assert result.success, result.error_message
-        assert _git("rev-parse", "main", cwd=checkout) == upstream_main
+
+    def test_the_dry_run_predicts_a_refspec_less_refusal(self, tree: Path) -> None:
+        """The refresh checks for a fetch refspec; so must its prediction."""
+        bare = tree / "com/plainbare"
+        _git("clone", "-q", "--bare", (tree.parent / "up-child").as_uri(), str(bare))
+        _mark_filtered(bare)
+
+        real = _worker(filters=_spec(tree)).refresh_repository(bare)
+        predicted = RefreshManager(
+            dry_run=True, filter_gerrit_only=False, content_filters=_spec(tree)
+        ).refresh_repositories(tree, [bare])
+
+        assert real.status == RefreshStatus.SKIPPED
+        [prediction] = predicted.results
+        assert prediction.status == RefreshStatus.SKIPPED
+        assert prediction.error_message == real.error_message
 
 
 class TestReporting:
     """What the ``refresh`` command says must match what it did."""
+
+    def test_the_default_gerrit_only_refresh_reads_every_remote(
+        self, tree: Path
+    ) -> None:
+        """A Gerrit mirror cloned with ``--origin upstream`` is still Gerrit.
+
+        Run as a dry run, through the command's defaults, so that no real
+        Gerrit server is needed.
+        """
+        mirror = tree / "com/parent"
+        _git("remote", "rename", "origin", "upstream", cwd=mirror)
+        gerrit_url = "ssh://gerrit.example.org:29418/com/parent"
+        _git("config", "remote.upstream.url", gerrit_url, cwd=mirror)
+
+        outcome = CliRunner().invoke(
+            app,
+            ["refresh", "--output-path", str(tree), "--dry-run"],
+        )
+
+        assert outcome.exit_code == 0, outcome.output
+        [manifest] = tree.glob("refresh-manifest-*.json")
+        statuses = {
+            r["project"]: r["status"]
+            for r in json.loads(manifest.read_text())["results"]
+        }
+        assert statuses["parent"] == RefreshStatus.SUCCESS.value
 
     def test_an_empty_tree_is_not_reported_as_refreshed(self, tmp_path: Path) -> None:
         empty = tmp_path / "empty"

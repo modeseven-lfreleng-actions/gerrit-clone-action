@@ -189,16 +189,30 @@ a warning.
 fetches every ref into it and prunes refs deleted upstream (unless
 `--no-prune`). The branch options (`--strategy`, `--auto-stash`, `--force`,
 `--force-hard`) apply to working-tree (`--no-mirror`) clones only. Refresh
-skips a bare repository with no fetch refspec, such as one made by
-`git clone --bare`, and says why: fetching it would update nothing. If the
+skips a bare repository with no fetch refspec that updates a ref, such as
+one made by `git clone --bare`, and says why: fetching it would update
+nothing. If the
 command finds no repositories at all, it says so and exits with status 1
 rather than reporting success.
 
 A repository that content filtering (`--remove-files`, `--git-filter`,
-`--redact-secrets`) has rewritten gets refreshed only by a run that filters
-it again. Fetching would force the original history back, filtered content
-included, so a refresh without those options skips it and says why; the
-same applies to re-running `clone`. A `--dry-run` applies no content filters.
+`--redact-secrets`) has rewritten gets refreshed only by a run whose filters
+include the ones that rewrote it, since fetching forces the original history
+back, filtered content included. Each repository records which filters
+rewrote it, keeping each `--git-filter` token as a SHA-256 digest only.
+Refresh copies such a mirror, fetches and filters the copy, and publishes
+its refs only when every step succeeds, so a failure leaves the mirror
+unchanged. A run without those filters skips the mirror and says which
+filters it lacks; the same applies to re-running `clone` and `mirror`. A
+filtered working copy (`--no-mirror`) is always skipped: re-clone it to
+update it. Every remote of a filtered repository refuses pushes.
+Releases up to v2.2.4 recorded no filters, so refresh skips any
+repository they filtered, whatever filters you pass, and asks you to
+re-clone it. It recognises one by the traces those releases left: the
+commit map a `git filter-repo` rewrite leaves in the git directory, or a
+branch tip committed by the file-removal fallback (`Remove filtered files
+for platform sync`).
+A `--dry-run` applies no content filters.
 
 Refresh all repositories in the current directory:
 

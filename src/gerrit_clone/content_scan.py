@@ -11,16 +11,20 @@ can be redacted by the content filter.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import subprocess
-import threading
 import time
 from typing import TYPE_CHECKING
 
+from gerrit_clone.content_git import raise_if_abandoned, run_content_git
+from gerrit_clone.content_scan_process import run_bounded, stop_scan
 from gerrit_clone.logging import get_logger
+from gerrit_clone.subprocess_streaming import popen_tracked
 
 if TYPE_CHECKING:
+    import threading
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -87,21 +91,14 @@ def is_shallow_repository(repo_path: Path, *, timeout: int = 30) -> bool:
     Fails closed: if shallowness cannot be determined (``git`` missing,
     not a repository, or a timeout) the repo is treated as shallow so the
     caller refuses to run history-dependent filters against a repo whose
-    full history could not be verified.
+    full history could not be verified.  An abandoned batch is not an
+    undetermined answer, though: it raises
+    :class:`~gerrit_clone.subprocess_tracking.ProcessAbandonedError`.
     """
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_path),
-                "rev-parse",
-                "--is-shallow-repository",
-            ],
-            capture_output=True,
-            text=True,
+        result = run_content_git(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-shallow-repository"],
             timeout=timeout,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return True
@@ -131,22 +128,22 @@ def _build_scan_command(repo_path: Path) -> list[str]:
     ]
 
 
-def _start_scan_process(cmd: list[str], repo_path: Path) -> subprocess.Popen[str]:
+def _start_scan_process(
+    stack: contextlib.ExitStack[bool | None], cmd: list[str], repo_path: Path
+) -> subprocess.Popen[str]:
     """Start the streaming ``git log`` process for a secret scan.
+
+    The child stays tracked until *stack* closes, so an abandoned batch
+    can stop it mid-scan, and closing *stack* stops anything it left in
+    its process group.
 
     Raises:
         RuntimeError: If the process cannot be started at all.
+        ProcessAbandonedError: If the batch was abandoned before it
+            started.
     """
     try:
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+        return stack.enter_context(popen_tracked(cmd))
     except OSError as exc:
         # subprocess.Popen raises OSError (e.g. FileNotFoundError when
         # the git binary is missing) before the process even starts.
@@ -157,55 +154,6 @@ def _start_scan_process(cmd: list[str], repo_path: Path) -> subprocess.Popen[str
         raise RuntimeError(
             f"Failed to start git log for secret scan in {repo_path.name}: {exc}"
         ) from exc
-
-
-def _drain_stderr_async(
-    proc: subprocess.Popen[str],
-) -> tuple[threading.Thread, list[str]]:
-    """Start a daemon thread draining *proc*'s stderr into a buffer.
-
-    ``git log`` can write to stderr (e.g. warnings) while we are still
-    reading stdout; if stderr were left unread until after the stdout
-    loop finished, a child that filled the OS stderr pipe buffer would
-    block on its write, stop producing stdout, and deadlock the scan
-    until the watchdog killed it.  Reading both pipes in parallel keeps
-    the child unblocked.
-    """
-    stderr_chunks: list[str] = []
-
-    def _drain_stderr() -> None:
-        if proc.stderr is not None:
-            for err_line in proc.stderr:
-                stderr_chunks.append(err_line)
-
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    stderr_thread.start()
-    return stderr_thread, stderr_chunks
-
-
-def _start_scan_watchdog(
-    proc: subprocess.Popen[str],
-    timeout: int,
-) -> tuple[threading.Timer, threading.Event]:
-    """Arm a watchdog that kills *proc* once *timeout* seconds elapse."""
-    timed_out = threading.Event()
-
-    def _on_timeout() -> None:
-        # Fires unconditionally once ``timeout`` seconds have elapsed
-        # since the watchdog started — the Timer is not reset by
-        # output activity.  Killing the process unblocks the ``for
-        # line in stdout`` iterator, which otherwise only re-checks
-        # the deadline when a new line arrives and so could block
-        # indefinitely if git stalls without producing output.  A
-        # threading.Timer is used instead of select() so the timeout
-        # is enforced portably, including on Windows where select()
-        # does not support pipe handles.
-        timed_out.set()
-        proc.kill()
-
-    watchdog = threading.Timer(timeout, _on_timeout)
-    watchdog.start()
-    return watchdog, timed_out
 
 
 def _collect_line_secrets(
@@ -284,7 +232,7 @@ def _consume_scan_stream(
         # producing output but runs long still stops promptly.
         if time.monotonic() > deadline:
             timed_out.set()
-            proc.kill()
+            stop_scan(proc)
             break
 
         # A new commit or a new file resets hunk state; the
@@ -333,37 +281,47 @@ def scan_repo_for_secrets(
         RuntimeError: If the scan cannot complete (git log times
             out or exits non-zero).  Failing closed ensures callers
             never mistake an incomplete scan for a clean repository.
+        ProcessAbandonedError: If the batch was abandoned before or
+            during the scan.
     """
     if not repo_path.exists():
         return []
 
-    proc = _start_scan_process(_build_scan_command(repo_path), repo_path)
-    deadline = time.monotonic() + timeout
-    stderr_thread, stderr_chunks = _drain_stderr_async(proc)
-    watchdog, timed_out = _start_scan_watchdog(proc, timeout)
-
-    try:
-        discovered = _consume_scan_stream(proc, deadline, timed_out, repo_path.name)
-    finally:
-        watchdog.cancel()
-        returncode = proc.wait()
-        # The stderr drain thread exits once the pipe reaches EOF
-        # (which happens when the process terminates).
-        stderr_thread.join()
-        stderr_output = "".join(stderr_chunks)
-
-    if timed_out.is_set():
-        msg = f"Secret scan timed out for {repo_path.name} after {timeout}s"
-        logger.error(msg)
-        raise RuntimeError(msg)
-
-    if returncode != 0:
-        msg = (
-            f"Secret scan git log failed for {repo_path.name}: {stderr_output.strip()}"
+    cmd = _build_scan_command(repo_path)
+    with contextlib.ExitStack() as stack:
+        proc = _start_scan_process(stack, cmd, repo_path)
+        deadline = time.monotonic() + timeout
+        run = run_bounded(
+            proc,
+            lambda timed_out: _consume_scan_stream(
+                proc, deadline, timed_out, repo_path.name
+            ),
+            timeout,
         )
+
+    # Raised only now, the block left normally: its cleanup on an
+    # exception would close pipes a stuck reader may still hold.
+    if run.error is not None:
+        raise run.error
+    # A git that outlived its stop has no exit status; it counts as one
+    # that failed.  The abandon is checked first: a scan the batch cut
+    # short has not read the whole history, and must pass for neither a
+    # clean repository nor git failing.
+    returncode = -1 if run.returncode is None else run.returncode
+    raise_if_abandoned(returncode, cmd)
+    if run.returncode is None:
+        msg = f"Secret scan for {repo_path.name} could not be stopped; gave up on it"
+    elif run.timed_out:
+        msg = f"Secret scan timed out for {repo_path.name} after {timeout}s"
+    elif returncode != 0:
+        msg = f"Secret scan git log failed for {repo_path.name}: {run.stderr.strip()}"
+    else:
+        msg = ""
+    if msg:
         logger.error(msg)
         raise RuntimeError(msg)
 
+    discovered = run.discovered
     if discovered:
         logger.info(
             "Secret scan: found %d unique credential(s) in %s",

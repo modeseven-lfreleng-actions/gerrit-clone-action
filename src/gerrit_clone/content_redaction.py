@@ -13,10 +13,10 @@ filter-repo`` availability check) lives in
 from __future__ import annotations
 
 import hashlib
-import subprocess
 import tempfile
 from typing import TYPE_CHECKING
 
+from gerrit_clone.content_git import run_content_git
 from gerrit_clone.logging import get_logger
 
 if TYPE_CHECKING:
@@ -136,6 +136,8 @@ def _run_replace_text(
         ``True`` when the rewrite succeeded.
 
     Raises:
+        ProcessAbandonedError: If the batch was abandoned before or while
+            the rewrite ran.
         subprocess.TimeoutExpired: If the rewrite exceeds *timeout*.
     """
     cmd = [
@@ -154,13 +156,7 @@ def _run_replace_text(
         repo_path.name,
     )
 
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    result = run_content_git(cmd, timeout=timeout)
 
     if result.returncode != 0:
         logger.error(

@@ -20,7 +20,7 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from gerrit_clone.content_origin import is_content_filtered
+from gerrit_clone.content_policy import PolicyReadError, recorded_policy
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import (
     Config,
@@ -31,10 +31,12 @@ from gerrit_clone.models import (
 )
 from gerrit_clone.refresh_discovery import RepositoryDiscoveryMixin
 from gerrit_clone.refresh_parallel import ParallelRefreshMixin
-from gerrit_clone.refresh_worker import FILTERED_REFRESH_REFUSAL, RefreshWorker
+from gerrit_clone.refresh_worker import RefreshWorker
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from gerrit_clone.content_policy import ContentFilterSpec
 
 logger = get_logger(__name__)
 
@@ -63,7 +65,7 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
         recursive: bool = True,
         include_projects: list[str] | None = None,
         exclude_projects: list[str] | None = None,
-        reapplies_content_filters: bool = False,
+        content_filters: ContentFilterSpec | None = None,
     ) -> None:
         """Initialize refresh manager.
 
@@ -90,8 +92,8 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
             exclude_projects: Optional list of project name patterns to exclude.
                 Applied after include filters.  Same pattern syntax as
                 include_projects.
-            reapplies_content_filters: Whether the caller filters what is
-                refreshed again; see :class:`RefreshWorker`.
+            content_filters: The content filters the caller applies to
+                what is refreshed, if any; see :class:`RefreshWorker`.
         """
         self.config = config
         self.retry_policy = retry_policy or RetryPolicy()
@@ -109,7 +111,7 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
         self.recursive = recursive
         self.include_projects = include_projects
         self.exclude_projects = exclude_projects
-        self.reapplies_content_filters = reapplies_content_filters
+        self.content_filters = content_filters
 
         # Determine thread count
         if threads is not None:
@@ -203,7 +205,7 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
             filter_gerrit_only=self.filter_gerrit_only,
             force=False,  # Never force modifications in dry run
             force_hard=False,  # Never hard-reset in dry run
-            reapplies_content_filters=self.reapplies_content_filters,
+            content_filters=self.content_filters,
         )
 
         for repo_path in repo_paths:
@@ -247,18 +249,33 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
         remote_url = worker._get_remote_url(repo_path)
         result.remote_url = remote_url
 
+        # Read first, as the refresh does: a config too broken to read the
+        # policy hides the remotes too, and is a failure, not "not Gerrit".
+        try:
+            recorded = recorded_policy(repo_path)
+        except PolicyReadError as exc:
+            result.status = RefreshStatus.FAILED
+            result.error_message = str(exc)
+            return
+
         # Check if Gerrit
-        if self.filter_gerrit_only and not worker._is_gerrit_repository(remote_url):
+        if self.filter_gerrit_only and not worker._has_gerrit_remote(repo_path):
             result.status = RefreshStatus.NOT_GERRIT_REPO
             result.error_message = "Not a Gerrit repository"
             return
 
-        if not self.reapplies_content_filters and is_content_filtered(repo_path):
-            result.status = RefreshStatus.SKIPPED
-            result.error_message = FILTERED_REFRESH_REFUSAL
+        bare = worker._is_bare_repository(repo_path)
+        if not recorded.empty:
+            refusal = worker._staged_refusal(repo_path, recorded, bare=bare)
+            if refusal is None:
+                result.status = RefreshStatus.SUCCESS
+                result.error_message = "Would be refreshed and filtered again"
+            else:
+                result.status = RefreshStatus.SKIPPED
+                result.error_message = refusal
             return
 
-        if worker._is_bare_repository(repo_path):
+        if bare:
             # No working tree to be dirty or detached: a bare repository
             # is refreshable exactly when a fetch would update it.
             obstacle = worker._bare_refresh_obstacle(repo_path)
@@ -302,7 +319,7 @@ def refresh_repositories(
     force: bool = False,
     force_hard: bool = False,
     recursive: bool = True,
-    reapplies_content_filters: bool = False,
+    content_filters: ContentFilterSpec | None = None,
 ) -> RefreshBatchResult:
     """Refresh repositories in a directory.
 
@@ -327,8 +344,8 @@ def refresh_repositories(
         force_hard: Superset of force that also hard-resets each repository's
             default branch to upstream, discarding local commits/divergence
         recursive: Recursively discover repositories in subdirectories (default: True)
-        reapplies_content_filters: Whether the caller filters what is
-            refreshed again; see :class:`RefreshWorker`.
+        content_filters: The content filters the caller applies to what
+            is refreshed, if any; see :class:`RefreshWorker`.
 
     Returns:
         RefreshBatchResult with aggregated results
@@ -350,7 +367,7 @@ def refresh_repositories(
         force=force,
         force_hard=force_hard,
         recursive=recursive,
-        reapplies_content_filters=reapplies_content_filters,
+        content_filters=content_filters,
     )
 
     return manager.refresh_repositories(base_path)

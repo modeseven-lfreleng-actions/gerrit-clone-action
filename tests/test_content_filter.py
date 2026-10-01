@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import random
 import re as re_mod
 import string
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,9 +32,29 @@ from gerrit_clone.content_filter import (
     scan_repo_for_secrets,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
 # ---------------------------------------------------------------------------
 # match_file_pattern tests
 # ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _unrecorded(_repo_path: Path, _policy: object) -> Generator[list[str], None, None]:
+    """Stand-in for policy recording, which these filter tests are not about.
+
+    Recording fails closed on a path that is no repository, and these
+    run the filters against stand-ins or mocks.  Recording has its own
+    tests in ``tests/test_content_policy.py``.
+    """
+    yield []
+
+
+@pytest.fixture
+def _no_policy_record() -> Generator[None, None, None]:
+    with patch("gerrit_clone.content_filter.content_filtering", _unrecorded):
+        yield
 
 
 class TestMatchFilePattern:
@@ -474,11 +496,16 @@ class TestReplaceTokensInHistory:
         assert "REDACTED_" in log_result.stdout
 
 
+def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    """What the tracked launch returns: text output, already captured."""
+    return subprocess.CompletedProcess(["git"], returncode, stdout="", stderr=stderr)
+
+
 class TestRemoveFilesFilterRepo:
     """Unit tests for the git filter-repo code path."""
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_glob_pattern_builds_path_glob_flag(
         self,
         mock_run: MagicMock,
@@ -486,7 +513,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """Glob patterns produce --path-glob --invert-paths args."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -500,7 +527,7 @@ class TestRemoveFilesFilterRepo:
         assert "--invert-paths" in cmd
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_regex_pattern_builds_path_regex_flag(
         self,
         mock_run: MagicMock,
@@ -508,7 +535,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """Regex patterns produce --path-regex --invert-paths args."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -522,7 +549,7 @@ class TestRemoveFilesFilterRepo:
         assert "--invert-paths" in cmd
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_exact_path_builds_path_flag(
         self,
         mock_run: MagicMock,
@@ -530,7 +557,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """Exact path patterns produce --path --invert-paths args."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -548,7 +575,7 @@ class TestRemoveFilesFilterRepo:
         assert "--invert-paths" in cmd
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_mixed_patterns_combined_in_single_command(
         self,
         mock_run: MagicMock,
@@ -556,7 +583,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """Multiple pattern types are combined into one command."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -571,7 +598,7 @@ class TestRemoveFilesFilterRepo:
         assert "--path-regex" in cmd
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_failure_raises_runtime_error(
         self,
         mock_run: MagicMock,
@@ -579,11 +606,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """Non-zero exit from filter-repo raises RuntimeError."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stderr="fatal: error",
-            stdout="",
-        )
+        mock_run.return_value = _completed(1, stderr="fatal: error")
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -591,7 +614,7 @@ class TestRemoveFilesFilterRepo:
             _remove_files_filter_repo(repo, ["*.pyc"])
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_empty_regex_pattern_is_skipped(
         self,
         mock_run: MagicMock,
@@ -604,7 +627,7 @@ class TestRemoveFilesFilterRepo:
         --invert-paths it would wipe the entire repository history.
         It must be dropped before the command is built.
         """
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -616,7 +639,7 @@ class TestRemoveFilesFilterRepo:
         mock_run.assert_not_called()
 
     @patch("gerrit_clone.content_filter._check_git_filter_repo", return_value=True)
-    @patch("gerrit_clone.content_filter.subprocess.run")
+    @patch("gerrit_clone.content_git.run_tracked")
     def test_empty_regex_dropped_from_mixed_patterns(
         self,
         mock_run: MagicMock,
@@ -624,7 +647,7 @@ class TestRemoveFilesFilterRepo:
         tmp_path: Path,
     ) -> None:
         """A bare 'regex:' is dropped while valid patterns are kept."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_run.return_value = _completed(0)
         repo = tmp_path / "test.git"
         repo.mkdir()
 
@@ -638,6 +661,7 @@ class TestRemoveFilesFilterRepo:
         assert "--path-glob" in cmd
 
 
+@pytest.mark.usefixtures("_no_policy_record")
 class TestApplyContentFilters:
     """Tests for the high-level apply_content_filters function."""
 
@@ -1044,6 +1068,7 @@ class TestScanRepoForSecrets:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("_no_policy_record")
 class TestApplyContentFiltersRedactSecrets:
     """Tests for apply_content_filters with redact_secrets=True."""
 

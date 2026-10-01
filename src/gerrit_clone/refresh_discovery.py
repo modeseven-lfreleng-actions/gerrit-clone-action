@@ -131,13 +131,19 @@ class RepositoryDiscoveryMixin:
                     # In Gerrit, projects like ccsdk/apps, ccsdk/features are separate
                     # independent repos, not nested submodules within ccsdk
                     # We only skip the git directory itself: .git in a
-                    # working copy, git's own directories in a bare one.
+                    # working copy, git's own directories in a bare one,
+                    # and hidden ones, as everywhere else -- no Gerrit
+                    # project path has a hidden component, and a
+                    # refresh stages filtered mirrors in one.
                     if bare:
                         dirs[:] = [
                             d
                             for d in dirs
-                            if d not in _GIT_DIR_INTERNALS
-                            or _is_repository(root_path / d)
+                            if not d.startswith(".")
+                            and (
+                                d not in _GIT_DIR_INTERNALS
+                                or _is_repository(root_path / d)
+                            )
                         ]
                     else:
                         dirs[:] = [d for d in dirs if d != ".git"]

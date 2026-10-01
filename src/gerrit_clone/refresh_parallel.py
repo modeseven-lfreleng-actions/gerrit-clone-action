@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from rich.progress import TaskID
 
+    from gerrit_clone.content_policy import ContentFilterSpec
     from gerrit_clone.models import Config, RetryPolicy
 
 logger = get_logger(__name__)
@@ -63,7 +64,7 @@ class ParallelRefreshMixin:
     filter_gerrit_only: bool
     force: bool
     force_hard: bool
-    reapplies_content_filters: bool
+    content_filters: ContentFilterSpec | None
     threads: int
     exit_on_error: bool
 
@@ -91,7 +92,7 @@ class ParallelRefreshMixin:
             filter_gerrit_only=self.filter_gerrit_only,
             force=self.force,
             force_hard=self.force_hard,
-            reapplies_content_filters=self.reapplies_content_filters,
+            content_filters=self.content_filters,
         )
 
         # Create progress display with two-line layout

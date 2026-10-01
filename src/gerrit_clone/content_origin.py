@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""Keeping a content-filtered repository both refreshable and filtered.
+"""Keeping a content-filtered repository fetchable, and never pushable.
 
 ``git filter-repo`` removes the ``origin`` remote whenever it rewrites
 history, so that the rewritten history is not pushed back over the
@@ -10,16 +10,15 @@ it came from: without ``remote.origin.fetch`` a later refresh has nothing
 to fetch, and skips the repository from then on.
 
 So what fetching needs -- the URL and the fetch refspecs -- is put back,
-and filter-repo's protection is kept by pointing pushes nowhere.
-``remote.origin.mirror`` is deliberately not restored: it only affects
-pushing, and would make a bare ``git push`` force every rewritten ref
-over the original.
+and filter-repo's protection is kept by pointing pushes nowhere.  That
+protection is extended to every remote, not only ``origin``: a mirror
+cloned with ``--origin upstream`` keeps its source remote through the
+rewrite, and filter-repo does nothing to stop a push to it.
+``remote.<name>.mirror`` is left alone; with nowhere to push to, it no
+longer matters.
 
-Fetching is then the other way the original history can come back: a
-mirror's ``+refs/*:refs/*`` refspec forces every upstream ref over the
-rewritten one, removed files and redacted secrets included.  So the
-repository is also marked as filtered, and a refresh refuses it unless
-the same run filters it again (see :func:`is_content_filtered`).
+Which filters rewrote a repository, and so what may refresh it, is
+:mod:`gerrit_clone.content_policy`'s concern.
 """
 
 from __future__ import annotations
@@ -29,6 +28,11 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.subprocess_tracking import (
+    ProcessAbandonedError,
+    batch_abandoned,
+    run_tracked,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -36,18 +40,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: Push URL left on a restored ``origin``.  Its scheme has no remote
-#: helper, so git refuses a push at once -- and, unlike a bare word, it
-#: can never name a local path, such as a nested repository that
-#: happens to share it.
+#: Push URL left on every remote of a content-filtered repository.  Its
+#: scheme has no remote helper, so git refuses a push at once -- and,
+#: unlike a bare word, it can never name a local path, such as a nested
+#: repository that happens to share it.
 NO_PUSH_URL = "no-push://content-filtered-history"
-
-#: Git config key recording that content filtering has rewritten a
-#: repository.  Set whenever a filter changed any ref -- an interrupted
-#: run included, since a partly filtered repository is no safer to
-#: refresh unfiltered than a fully filtered one -- and whenever the refs
-#: could not be compared, failing closed.
-FILTERED_MARKER = "gerrit-clone.contentFiltered"
 
 
 class _Origin(NamedTuple):
@@ -57,56 +54,38 @@ class _Origin(NamedTuple):
     fetch: list[str]
 
 
-def _git(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+def git(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
     """Run git in *repo_path*, or ``None`` if git could not run.
 
-    Keeping a repository refreshable is a courtesy to later refreshes,
-    and must never be the reason filtering fails.
+    Tracked like every other child, since a refresh asks these questions
+    from its pool threads.  An abandoned batch's refusal propagates, and
+    so does a child it terminated: that exits nonzero exactly as git
+    failing would, and is not a failure to report as one.
+
+    Raises:
+        ProcessAbandonedError: If the calling thread's batch was abandoned.
     """
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
+        result = run_tracked(["git", *args], cwd=repo_path, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(f"Could not run git in {repo_path}: {exc}")
         return None
+    if result.returncode != 0 and batch_abandoned():
+        raise ProcessAbandonedError(f"git {args[0]} in {repo_path} was abandoned")
+    return result
 
 
-def _git_config(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+def git_config(repo_path: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
     """Run ``git config`` in *repo_path*, or ``None`` if git could not run."""
-    return _git(repo_path, "config", *args)
-
-
-def _content_refs(repo_path: Path) -> list[str] | None:
-    """Every ref and its target, bar remote-tracking ones; ``None`` if unread.
-
-    Remote-tracking refs are left out because removing ``origin`` deletes
-    them whether or not any content was filtered.  A filter that rewrote
-    nothing leaves every other ref where it was.
-    """
-    result = _git(repo_path, "for-each-ref", "--format=%(refname) %(objectname)")
-    if result is None or result.returncode != 0:
-        return None
-    return [
-        line
-        for line in result.stdout.splitlines()
-        if not line.startswith("refs/remotes/")
-    ]
+    return git(repo_path, "config", *args)
 
 
 def _read_origin(repo_path: Path) -> _Origin | None:
     """The repository's ``origin`` fetch settings, if it has an origin."""
-    url = _git_config(repo_path, "--get", "remote.origin.url")
+    url = git_config(repo_path, "--get", "remote.origin.url")
     if url is None or url.returncode != 0 or not url.stdout.strip():
         return None
-    fetch = _git_config(repo_path, "--get-all", "remote.origin.fetch")
+    fetch = git_config(repo_path, "--get-all", "remote.origin.fetch")
     refspecs = fetch.stdout.splitlines() if fetch is not None else []
     return _Origin(url.stdout.strip(), refspecs)
 
@@ -121,7 +100,7 @@ def _restore_origin(repo_path: Path, origin: _Origin) -> None:
     settings.append(("remote.origin.url", origin.url))
     settings += [("remote.origin.fetch", refspec) for refspec in origin.fetch]
     for key, value in settings:
-        result = _git_config(repo_path, "--add", key, value)
+        result = git_config(repo_path, "--add", key, value)
         if result is None or result.returncode != 0:
             detail = result.stderr.strip() if result is not None else "git failed"
             logger.warning(
@@ -137,49 +116,64 @@ def _restore_origin(repo_path: Path, origin: _Origin) -> None:
 
 @contextmanager
 def origin_kept(repo_path: Path) -> Generator[None, None, None]:
-    """Filter a repository so that it stays refreshable, and stays filtered.
+    """Restore ``origin`` for fetching if the enclosed filtering removed it.
 
-    Restores ``origin`` for fetching if the enclosed filtering removed
-    it, and marks the repository as content-filtered if the filtering
-    changed any ref.  Both happen even if the filtering raises.
+    Restored even if the filtering raises.
 
     Args:
         repo_path: Repository being filtered
     """
     before = _read_origin(repo_path)
-    refs_before = _content_refs(repo_path)
     try:
         yield
     finally:
         if before is not None and _read_origin(repo_path) is None:
             _restore_origin(repo_path, before)
-        refs_after = _content_refs(repo_path)
-        if refs_before is None or refs_after is None or refs_before != refs_after:
-            _mark_filtered(repo_path)
 
 
-def _mark_filtered(repo_path: Path) -> None:
-    """Record that content filtering has rewritten *repo_path*."""
-    marked = _git_config(repo_path, "--replace-all", FILTERED_MARKER, "true")
-    if marked is None or marked.returncode != 0:
-        logger.warning(
-            f"Could not mark {repo_path} as content-filtered; a refresh "
-            f"without filters would not know to refuse it"
-        )
-
-
-def is_content_filtered(repo_path: Path) -> bool:
-    """Whether content filtering has rewritten *repo_path*.
-
-    Refreshing such a repository without filtering it again would bring
-    the removed or redacted content back, so a refresh that does not
-    re-apply filters refuses it.
+def block_pushes(repo_path: Path) -> bool:
+    """Point every remote's pushes nowhere, so rewritten history stays put.
 
     Args:
-        repo_path: Repository to ask about
+        repo_path: A repository content filtering has rewritten
 
     Returns:
-        True if the repository carries the content-filtered mark
+        True if every remote now refuses a push.
     """
-    result = _git_config(repo_path, "--type=bool", "--get", FILTERED_MARKER)
-    return result is not None and result.stdout.strip() == "true"
+    remotes = git(repo_path, "remote")
+    if remotes is None or remotes.returncode != 0:
+        return False
+    for name in remotes.stdout.split():
+        key = f"remote.{name}.pushurl"
+        result = git_config(repo_path, "--replace-all", key, NO_PUSH_URL)
+        if result is None or result.returncode != 0:
+            return False
+    return True
+
+
+def push_urls(repo_path: Path) -> list[tuple[str, str]] | None:
+    """Every remote's push URL setting, to put back later; ``None`` if unread."""
+    result = git_config(repo_path, "--get-regexp", r"^remote\..*\.pushurl$")
+    if result is None or result.returncode not in (0, 1):
+        return None
+    return [
+        (key, value)
+        for key, _, value in (
+            line.partition(" ") for line in result.stdout.splitlines()
+        )
+    ]
+
+
+def restore_push_urls(repo_path: Path, saved: list[tuple[str, str]]) -> None:
+    """Put back the push URLs *saved* before pushing was blocked.
+
+    Only for a filter that changed nothing: there is no rewritten history
+    to protect, and the remotes should push as they did before.
+    """
+    remotes = git(repo_path, "remote")
+    if remotes is None or remotes.returncode != 0:
+        return
+    for name in remotes.stdout.split():
+        git_config(repo_path, "--unset-all", f"remote.{name}.pushurl")
+    for key, value in saved:
+        git_config(repo_path, "--add", key, value)

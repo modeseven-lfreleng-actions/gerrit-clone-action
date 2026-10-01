@@ -26,6 +26,7 @@ from gerrit_clone.content_filter import (
     normalize_file_patterns,
     parse_git_filter_spec,
 )
+from gerrit_clone.content_policy import ContentFilterSpec
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
@@ -110,7 +111,12 @@ def run_refresh(request: RefreshRequest, console: Console) -> None:
         exclude_projects=request.exclude_projects if request.exclude_projects else None,
         # Judged by what a real run with these options would do, a dry
         # run included: it predicts that run, filters and all.
-        reapplies_content_filters=_filters_requested(request),
+        content_filters=ContentFilterSpec.from_options(
+            request.remove_files,
+            request.git_filter,
+            request.redact_secrets,
+            request.output_path,
+        ),
     )
 
     _apply_content_filters(request, console, result)
@@ -240,6 +246,10 @@ def _apply_content_filters(
         # ``RefreshResult.success`` property captures exactly
         # the SUCCESS / UP_TO_DATE set.
         if not rr.success:
+            continue
+        if rr.content_filtered:
+            # Re-filtered as part of its staged refresh already.
+            filter_success += 1
             continue
         succeeded, failed = _filter_repository(
             request, console, rr, remove_file_patterns, git_filter_projects

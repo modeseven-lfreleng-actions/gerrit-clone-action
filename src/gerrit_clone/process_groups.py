@@ -50,6 +50,16 @@ _POLL_INTERVAL_SECONDS = 0.05
 #: unkillable (uninterruptible I/O), and waiting longer would not help.
 _KILL_CONFIRM_SECONDS = 2.0
 
+
+def escalation_seconds() -> float:
+    """The longest one :func:`terminate_all` waits before giving up.
+
+    Read at call time, so that a caller bounding its own wait on an
+    escalation follows these constants wherever they are set.
+    """
+    return _TERMINATE_GRACE_SECONDS + _KILL_CONFIRM_SECONDS
+
+
 #: Children whose group any escalation has seen go.  Two can run for
 #: the same child at once -- an abandon and the SIGTERM handler, or a
 #: per-call timeout and either -- and an empty group's id is free for
