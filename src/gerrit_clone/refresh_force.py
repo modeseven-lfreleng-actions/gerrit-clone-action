@@ -18,13 +18,14 @@ returned.
 
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING, Any
 
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_execution import RefreshExecutionMixin
+from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_repo_state import StashOutcome
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -315,20 +316,15 @@ class ForceModeMixin(RefreshExecutionMixin):
 
         try:
             # Verify the branch has an upstream to reset to.
-            upstream_check = subprocess.run(
+            upstream_check = run_git(
                 [
                     "git",
                     "rev-parse",
                     "--abbrev-ref",
                     f"{result.current_branch}@{{upstream}}",
                 ],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
             if upstream_check.returncode != 0:
                 logger.debug(
@@ -336,15 +332,10 @@ class ForceModeMixin(RefreshExecutionMixin):
                 )
                 return False
 
-            reset_result = subprocess.run(
+            reset_result = run_git(
                 ["git", "reset", "--hard", f"{result.current_branch}@{{upstream}}"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=30,
-                check=False,
             )
 
             if reset_result.returncode == 0:
@@ -352,6 +343,9 @@ class ForceModeMixin(RefreshExecutionMixin):
 
             logger.debug(f"Hard reset failed: {reset_result.stderr}")
             return False
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to hard reset to upstream: {e}")

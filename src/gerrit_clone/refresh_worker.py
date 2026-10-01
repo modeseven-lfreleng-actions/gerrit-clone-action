@@ -6,7 +6,7 @@
 This module holds the top-level refresh flow. The mechanics it orchestrates
 live in a stack of focused mixins, each of which owns one responsibility:
 
-* :mod:`gerrit_clone.refresh_git_env` — remotes and git subprocess environment
+* :mod:`gerrit_clone.refresh_git_env` — remotes, environment, tracked git launches
 * :mod:`gerrit_clone.refresh_repo_state` — bare or working tree, and stashing
 * :mod:`gerrit_clone.refresh_branch_repair` — default-branch and upstream repair
 * :mod:`gerrit_clone.refresh_execution` — fetch/pull execution and retries
@@ -14,12 +14,11 @@ live in a stack of focused mixins, each of which owns one responsibility:
 * :mod:`gerrit_clone.refresh_output` — git output classification and counting
 
 Their public names are re-exported here so ``gerrit_clone.refresh_worker``
-remains the single import (and test patch) surface for refresh behaviour.
+remains the single import surface for refresh behaviour.
 """
 
 from __future__ import annotations
 
-import subprocess
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -35,6 +34,7 @@ from gerrit_clone.refresh_output import (
     RefreshTimeoutError,
 )
 from gerrit_clone.refresh_repo_state import StashOutcome
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,10 +48,9 @@ FILTERED_REFRESH_REFUSAL = (
     "--remove-files, --git-filter or --redact-secrets as before"
 )
 
-# ``subprocess`` and ``time`` are re-exported deliberately: the refresh git
-# calls and sleeps now live in the mixin modules, but existing patch targets
-# (``gerrit_clone.refresh_worker.subprocess.run``,
-# ``gerrit_clone.refresh_worker.time.sleep``) must keep resolving.
+# ``time`` is re-exported deliberately: the refresh sleeps live in the
+# mixin modules, but the existing patch target
+# ``gerrit_clone.refresh_worker.time.sleep`` must keep resolving.
 __all__ = [
     "SSH_HANDSHAKE_JITTER_SECONDS",
     "RefreshAuthError",
@@ -59,7 +58,6 @@ __all__ = [
     "RefreshTimeoutError",
     "RefreshWorker",
     "StashOutcome",
-    "subprocess",
     "time",
 ]
 
@@ -185,6 +183,13 @@ class RefreshWorker(ForceModeMixin):
             success = self._execute_adaptive_refresh(repo_path, result, bare=bare)
 
             self._apply_refresh_outcome(repo_path, result, success)
+
+        except ProcessAbandonedError:
+            # The batch gave up: no failure to log, and nothing more may be
+            # launched -- a stash it made is left for `git stash list`.
+            result.status = RefreshStatus.FAILED
+            result.error_message = "Refresh abandoned before it finished"
+            logger.debug(f"⊘ {project_name}: refresh abandoned")
 
         except Exception as e:
             result.status = RefreshStatus.FAILED

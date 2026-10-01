@@ -9,17 +9,21 @@ for a working tree its branch, detached HEAD, uncommitted changes and Gerrit
 meta refs) and owns the stash push/pop lifecycle used to move an unclean tree
 out of the way, including the subtle git exit-status semantics documented on
 :class:`StashOutcome` and ``_pop_stash``.
+
+Probes let :class:`~gerrit_clone.subprocess_tracking.ProcessAbandonedError`
+through rather than answering it: a guessed answer would misreport the
+repository, or carry the refresh on towards a stash or a fetch.
 """
 
 from __future__ import annotations
 
-import subprocess
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from gerrit_clone.git_utils import is_git_repository
 from gerrit_clone.logging import get_logger
-from gerrit_clone.refresh_git_env import GitEnvironmentMixin
+from gerrit_clone.refresh_git_env import GitEnvironmentMixin, run_git
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,16 +79,11 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             True if git reports the repository as bare
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--is-bare-repository"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
+            result = run_git(
+                ["git", "rev-parse", "--is-bare-repository"], repo_path, timeout=5
             )
+        except ProcessAbandonedError:
+            raise
         except Exception as e:
             logger.debug(f"Failed to check whether repository is bare: {e}")
             return False
@@ -107,16 +106,13 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             The reason it cannot be refreshed, or ``None`` if it can.
         """
         try:
-            result = subprocess.run(
+            result = run_git(
                 ["git", "config", "--get-regexp", r"^remote\..*\.fetch$"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
+        except ProcessAbandonedError:
+            raise
         except Exception as e:
             return f"Could not read the fetch refspec: {e}"
         if result.returncode == 0 and result.stdout.strip():
@@ -141,15 +137,8 @@ class RepositoryStateMixin(GitEnvironmentMixin):
         }
 
         try:
-            branch_result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
+            branch_result = run_git(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_path, timeout=5
             )
 
             if branch_result.returncode == 0:
@@ -162,33 +151,24 @@ class RepositoryStateMixin(GitEnvironmentMixin):
                     state["branch"] = branch
 
                     # Check if branch has upstream tracking
-                    upstream_result = subprocess.run(
+                    upstream_result = run_git(
                         ["git", "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
+                        repo_path,
                         timeout=5,
-                        check=False,
                     )
 
                     if upstream_result.returncode == 0:
                         state["has_upstream"] = True
 
-            status_result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
+            status_result = run_git(
+                ["git", "status", "--porcelain"], repo_path, timeout=5
             )
 
             if status_result.returncode == 0:
                 state["has_uncommitted"] = bool(status_result.stdout.strip())
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to check repository state: {e}")
@@ -205,15 +185,8 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             True if on meta/config branch
         """
         try:
-            result = subprocess.run(
-                ["git", "symbolic-ref", "-q", "HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
+            result = run_git(
+                ["git", "symbolic-ref", "-q", "HEAD"], repo_path, timeout=5
             )
 
             if result.returncode == 0:
@@ -221,15 +194,10 @@ class RepositoryStateMixin(GitEnvironmentMixin):
                 return ref == "refs/meta/config"
 
             # If not a symbolic ref, check with rev-parse
-            result = subprocess.run(
+            result = run_git(
                 ["git", "rev-parse", "--symbolic-full-name", "HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
 
             if result.returncode == 0:
@@ -237,6 +205,9 @@ class RepositoryStateMixin(GitEnvironmentMixin):
                 return ref == "refs/meta/config" or ref.startswith("refs/meta/")
 
             return False
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to check meta/config state: {e}")
@@ -259,15 +230,8 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             # network operation for Gerrit, so de-sync the handshake to avoid
             # bursty concurrent connections under high worker counts.
             self._ssh_handshake_jitter(repo_path)
-            result = subprocess.run(
-                ["git", "ls-remote", "--heads", "origin"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-                check=False,
+            result = run_git(
+                ["git", "ls-remote", "--heads", "origin"], repo_path, timeout=10
             )
 
             if result.returncode != 0:
@@ -277,15 +241,10 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             output = result.stdout.strip()
             if not output:
                 # Double-check that meta/config exists
-                meta_result = subprocess.run(
+                meta_result = run_git(
                     ["git", "ls-remote", "origin", "refs/meta/config"],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    repo_path,
                     timeout=10,
-                    check=False,
                 )
 
                 if meta_result.returncode == 0 and meta_result.stdout.strip():
@@ -295,6 +254,9 @@ class RepositoryStateMixin(GitEnvironmentMixin):
                     return True
 
             return False
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to check meta-only status: {e}")
@@ -317,7 +279,7 @@ class RepositoryStateMixin(GitEnvironmentMixin):
         """
         try:
             before = self._stash_count(repo_path)
-            result = subprocess.run(
+            result = run_git(
                 [
                     "git",
                     "stash",
@@ -326,13 +288,8 @@ class RepositoryStateMixin(GitEnvironmentMixin):
                     "-m",
                     "gerrit-clone refresh auto-stash",
                 ],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=30,
-                check=False,
             )
 
             if result.returncode != 0:
@@ -352,6 +309,9 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             if "no local changes to save" in result.stdout.lower():
                 return StashOutcome.NOTHING_TO_STASH
             return StashOutcome.CREATED
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to stash changes: {e}")
@@ -376,16 +336,7 @@ class RepositoryStateMixin(GitEnvironmentMixin):
         """
         try:
             before = self._stash_count(repo_path)
-            result = subprocess.run(
-                ["git", "stash", "pop"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
+            result = run_git(["git", "stash", "pop"], repo_path, timeout=30)
 
             if result.returncode == 0:
                 return True
@@ -403,6 +354,9 @@ class RepositoryStateMixin(GitEnvironmentMixin):
 
             return False
 
+        except ProcessAbandonedError:
+            raise
+
         except Exception as e:
             logger.debug(f"Failed to pop stash: {e}")
             return False
@@ -418,19 +372,12 @@ class RepositoryStateMixin(GitEnvironmentMixin):
             determined.
         """
         try:
-            result = subprocess.run(
-                ["git", "stash", "list"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
+            result = run_git(["git", "stash", "list"], repo_path, timeout=30)
             if result.returncode != 0:
                 return -1
             return sum(1 for line in result.stdout.splitlines() if line.strip())
+        except ProcessAbandonedError:
+            raise
         except Exception as e:
             logger.debug(f"Failed to count stash entries: {e}")
             return -1

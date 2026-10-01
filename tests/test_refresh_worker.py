@@ -21,6 +21,17 @@ from gerrit_clone.refresh_worker import (
     StashOutcome,
 )
 
+#: Every refresh git command is launched through this one name, via
+#: ``gerrit_clone.refresh_git_env.run_git``.
+RUN_TRACKED = "gerrit_clone.refresh_git_env.run_tracked"
+
+
+def _completed(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """A finished git command, as the tracked launcher returns it."""
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
 
 @pytest.fixture
 def worker():
@@ -29,7 +40,7 @@ def worker():
         retry_policy=RetryPolicy(max_attempts=2, base_delay=0.1),
         timeout=10,
         # Disable SSH handshake jitter so its remote-URL lookup does not
-        # perturb tests that mock subprocess.run for the network helpers.
+        # perturb tests that mock the git launcher for the network helpers.
         # Dedicated jitter tests construct their own workers.
         ssh_jitter_seconds=0,
     )
@@ -340,10 +351,11 @@ class TestRefreshWorker:
 
     def test_analyze_git_error_network(self, worker):
         """Test analyzing network errors."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = "fatal: Could not resolve host: gerrit.example.org"
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr="fatal: Could not resolve host: gerrit.example.org",
+        )
 
         error_msg = worker._analyze_git_error(process_result, "fetch")
 
@@ -351,10 +363,9 @@ class TestRefreshWorker:
 
     def test_analyze_git_error_auth(self, worker):
         """Test analyzing authentication errors."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = "Permission denied (publickey)"
+        process_result = _completed(
+            returncode=128, stdout="", stderr="Permission denied (publickey)"
+        )
 
         error_msg = worker._analyze_git_error(process_result, "fetch")
 
@@ -362,10 +373,11 @@ class TestRefreshWorker:
 
     def test_analyze_git_error_conflict(self, worker):
         """Test analyzing conflict errors."""
-        process_result = Mock()
-        process_result.returncode = 1
-        process_result.stdout = "CONFLICT (content): Merge conflict in file.txt"
-        process_result.stderr = ""
+        process_result = _completed(
+            returncode=1,
+            stdout="CONFLICT (content): Merge conflict in file.txt",
+            stderr="",
+        )
 
         error_msg = worker._analyze_git_error(process_result, "pull")
 
@@ -373,19 +385,17 @@ class TestRefreshWorker:
 
     def test_is_retryable_git_error_network(self, worker):
         """Test identifying retryable network errors."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = "Connection timed out"
+        process_result = _completed(
+            returncode=128, stdout="", stderr="Connection timed out"
+        )
 
         assert worker._is_retryable_git_error(process_result) is True
 
     def test_is_retryable_git_error_auth(self, worker):
         """Test identifying non-retryable auth errors."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = "Permission denied"
+        process_result = _completed(
+            returncode=128, stdout="", stderr="Permission denied"
+        )
 
         assert worker._is_retryable_git_error(process_result) is False
 
@@ -535,13 +545,14 @@ class TestRefreshWorker:
         assert result.stash_created is True
         assert result.had_uncommitted_changes is True
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_fetch_success(self, mock_run, worker, temp_git_repo):
         """Test successful git fetch execution."""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = "From ssh://gerrit.example.org:29418/test-repo\n   abc123..def456  main -> origin/main"
+        mock_result = _completed(
+            returncode=0,
+            stdout="",
+            stderr="From ssh://gerrit.example.org:29418/test-repo\n   abc123..def456  main -> origin/main",
+        )
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -556,7 +567,7 @@ class TestRefreshWorker:
         assert success is True
         assert result.commits_pulled > 0
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_fetch_timeout(self, mock_run, worker, temp_git_repo):
         """Test git fetch timeout."""
         mock_run.side_effect = subprocess.TimeoutExpired(
@@ -573,15 +584,16 @@ class TestRefreshWorker:
         with pytest.raises(RefreshTimeoutError):
             worker._execute_git_fetch(temp_git_repo, result)
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_pull_success(self, mock_run, worker, temp_git_repo):
         """Test successful git pull execution."""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Updating abc123..def456\nFast-forward\n 2 files changed, 10 insertions(+)"
+        mock_result = _completed(
+            returncode=0,
+            stdout=(
+                "Updating abc123..def456\nFast-forward\n 2 files changed, 10 insertions(+)"
+            ),
+            stderr="",
         )
-        mock_result.stderr = ""
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -597,13 +609,14 @@ class TestRefreshWorker:
         assert result.commits_pulled >= 1
         assert result.files_changed == 2
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_pull_conflict(self, mock_run, worker, temp_git_repo):
         """Test git pull with conflicts."""
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = "CONFLICT (content): Merge conflict in file.txt"
-        mock_result.stderr = ""
+        mock_result = _completed(
+            returncode=1,
+            stdout="CONFLICT (content): Merge conflict in file.txt",
+            stderr="",
+        )
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -620,7 +633,7 @@ class TestRefreshWorker:
         # Conflicts are a hard failure: the message must be recorded.
         assert result.error_message is not None
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_fetch_retryable_error_no_stale_message(
         self, mock_run, worker, temp_git_repo
     ):
@@ -630,10 +643,11 @@ class TestRefreshWorker:
         message recorded on a transient failure would linger on a later
         successful attempt. It must only be set for hard failures.
         """
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
-        mock_result.stderr = "fatal: Could not read from remote repository."
+        mock_result = _completed(
+            returncode=1,
+            stdout="",
+            stderr="fatal: Could not read from remote repository.",
+        )
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -648,15 +662,16 @@ class TestRefreshWorker:
 
         assert result.error_message is None
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_fetch_hard_error_records_message(
         self, mock_run, worker, temp_git_repo
     ):
         """Non-retryable fetch failures record error_message and return False."""
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
-        mock_result.stderr = "fatal: unexpected corruption in object store"
+        mock_result = _completed(
+            returncode=1,
+            stdout="",
+            stderr="fatal: unexpected corruption in object store",
+        )
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -671,15 +686,14 @@ class TestRefreshWorker:
         assert success is False
         assert result.error_message is not None
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_execute_git_pull_retryable_error_no_stale_message(
         self, mock_run, worker, temp_git_repo
     ):
         """Retryable pull failures raise without recording error_message."""
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
-        mock_result.stderr = "fetch-pack: Connection reset by peer"
+        mock_result = _completed(
+            returncode=1, stdout="", stderr="fetch-pack: Connection reset by peer"
+        )
         mock_run.return_value = mock_result
 
         result = RefreshResult(
@@ -730,20 +744,18 @@ class TestRefreshWorkerIntegration:
 class TestMetaOnlyRepo:
     """Test Gerrit meta-only repository detection."""
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_with_no_heads_and_meta_config(
         self, mock_run, worker, temp_git_repo
     ):
         """Test detection of meta-only repo (no heads, has meta/config)."""
         # First call: ls-remote --heads (no output = no heads)
-        mock_heads_result = Mock()
-        mock_heads_result.returncode = 0
-        mock_heads_result.stdout = ""
+        mock_heads_result = _completed(returncode=0, stdout="")
 
         # Second call: ls-remote refs/meta/config (exists)
-        mock_meta_result = Mock()
-        mock_meta_result.returncode = 0
-        mock_meta_result.stdout = "abc123def456\trefs/meta/config"
+        mock_meta_result = _completed(
+            returncode=0, stdout="abc123def456\trefs/meta/config"
+        )
 
         mock_run.side_effect = [mock_heads_result, mock_meta_result]
 
@@ -752,12 +764,12 @@ class TestMetaOnlyRepo:
         assert result is True
         assert mock_run.call_count == 2
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_with_heads(self, mock_run, worker, temp_git_repo):
         """Test repo with regular heads is not meta-only."""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = "abc123def456\trefs/heads/master\n"
+        mock_result = _completed(
+            returncode=0, stdout="abc123def456\trefs/heads/master\n"
+        )
         mock_run.return_value = mock_result
 
         result = worker._is_meta_only_repo(temp_git_repo)
@@ -765,18 +777,14 @@ class TestMetaOnlyRepo:
         assert result is False
         assert mock_run.call_count == 1
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_no_heads_no_meta(self, mock_run, worker, temp_git_repo):
         """Test repo with no heads and no meta/config is not meta-only."""
         # First call: ls-remote --heads (no output)
-        mock_heads_result = Mock()
-        mock_heads_result.returncode = 0
-        mock_heads_result.stdout = ""
+        mock_heads_result = _completed(returncode=0, stdout="")
 
         # Second call: ls-remote refs/meta/config (doesn't exist)
-        mock_meta_result = Mock()
-        mock_meta_result.returncode = 0
-        mock_meta_result.stdout = ""
+        mock_meta_result = _completed(returncode=0, stdout="")
 
         mock_run.side_effect = [mock_heads_result, mock_meta_result]
 
@@ -784,19 +792,17 @@ class TestMetaOnlyRepo:
 
         assert result is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_git_error(self, mock_run, worker, temp_git_repo):
         """Test meta-only check handles git errors gracefully."""
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
+        mock_result = _completed(returncode=1, stdout="")
         mock_run.return_value = mock_result
 
         result = worker._is_meta_only_repo(temp_git_repo)
 
         assert result is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_exception(self, mock_run, worker, temp_git_repo):
         """Test meta-only check handles exceptions gracefully."""
         mock_run.side_effect = Exception("Network error")
@@ -809,49 +815,43 @@ class TestMetaOnlyRepo:
 class TestGetDefaultBranch:
     """Test default branch detection."""
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_via_ls_remote(self, mock_run, worker, temp_git_repo):
         """Test getting default branch via ls-remote --symref."""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = "ref: refs/heads/master\tHEAD\nabc123\tHEAD"
+        mock_result = _completed(
+            returncode=0, stdout="ref: refs/heads/master\tHEAD\nabc123\tHEAD"
+        )
         mock_run.return_value = mock_result
 
         result = worker._get_default_branch(temp_git_repo)
 
         assert result == "master"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_via_ls_remote_main(
         self, mock_run, worker, temp_git_repo
     ):
         """Test getting default branch when it's 'main'."""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = "ref: refs/heads/main\tHEAD"
+        mock_result = _completed(returncode=0, stdout="ref: refs/heads/main\tHEAD")
         mock_run.return_value = mock_result
 
         result = worker._get_default_branch(temp_git_repo)
 
         assert result == "main"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_skips_meta_refs(self, mock_run, worker, temp_git_repo):
         """Test that meta/* refs are skipped when looking for default branch."""
         # First call: ls-remote returns meta/config (should be skipped)
-        mock_ls_remote = Mock()
-        mock_ls_remote.returncode = 0
-        mock_ls_remote.stdout = "ref: refs/heads/meta/config\tHEAD"
+        mock_ls_remote = _completed(
+            returncode=0, stdout="ref: refs/heads/meta/config\tHEAD"
+        )
 
         # Second call: symbolic-ref fails
-        mock_symbolic = Mock()
-        mock_symbolic.returncode = 1
-        mock_symbolic.stdout = ""
+        mock_symbolic = _completed(returncode=1, stdout="")
 
         # Third call: check for master
-        mock_master = Mock()
-        mock_master.returncode = 0
-        mock_master.stdout = "abc123\trefs/heads/master"
+        mock_master = _completed(returncode=0, stdout="abc123\trefs/heads/master")
 
         mock_run.side_effect = [mock_ls_remote, mock_symbolic, mock_master]
 
@@ -859,18 +859,14 @@ class TestGetDefaultBranch:
 
         assert result == "master"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_via_symbolic_ref(self, mock_run, worker, temp_git_repo):
         """Test getting default branch via symbolic-ref."""
         # First call: ls-remote fails
-        mock_ls_remote = Mock()
-        mock_ls_remote.returncode = 1
-        mock_ls_remote.stdout = ""
+        mock_ls_remote = _completed(returncode=1, stdout="")
 
         # Second call: symbolic-ref succeeds
-        mock_symbolic = Mock()
-        mock_symbolic.returncode = 0
-        mock_symbolic.stdout = "refs/remotes/origin/develop\n"
+        mock_symbolic = _completed(returncode=0, stdout="refs/remotes/origin/develop\n")
 
         mock_run.side_effect = [mock_ls_remote, mock_symbolic]
 
@@ -878,28 +874,22 @@ class TestGetDefaultBranch:
 
         assert result == "develop"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_fallback_to_common_names(
         self, mock_run, worker, temp_git_repo
     ):
         """Test fallback to checking common branch names."""
         # First call: ls-remote --symref fails
-        mock_ls_remote = Mock()
-        mock_ls_remote.returncode = 1
+        mock_ls_remote = _completed(returncode=1)
 
         # Second call: symbolic-ref fails
-        mock_symbolic = Mock()
-        mock_symbolic.returncode = 1
+        mock_symbolic = _completed(returncode=1)
 
         # Third call: check master (fails)
-        mock_master = Mock()
-        mock_master.returncode = 0
-        mock_master.stdout = ""
+        mock_master = _completed(returncode=0, stdout="")
 
         # Fourth call: check main (succeeds)
-        mock_main = Mock()
-        mock_main.returncode = 0
-        mock_main.stdout = "abc123\trefs/heads/main"
+        mock_main = _completed(returncode=0, stdout="abc123\trefs/heads/main")
 
         mock_run.side_effect = [mock_ls_remote, mock_symbolic, mock_master, mock_main]
 
@@ -907,19 +897,17 @@ class TestGetDefaultBranch:
 
         assert result == "main"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_not_found(self, mock_run, worker, temp_git_repo):
         """Test when no default branch is found."""
-        mock_result = Mock()
-        mock_result.returncode = 1
-        mock_result.stdout = ""
+        mock_result = _completed(returncode=1, stdout="")
         mock_run.return_value = mock_result
 
         result = worker._get_default_branch(temp_git_repo)
 
         assert result is None
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_exception(self, mock_run, worker, temp_git_repo):
         """Test exception handling in get_default_branch."""
         mock_run.side_effect = Exception("Network timeout")
@@ -935,7 +923,7 @@ class TestFixDetachedHead:
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_meta_only_repo")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._get_default_branch")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_success(
         self,
         mock_run,
@@ -951,16 +939,13 @@ class TestFixDetachedHead:
         mock_default_branch.return_value = "main"
 
         # Mock fetch
-        mock_fetch = Mock()
-        mock_fetch.returncode = 0
+        mock_fetch = _completed(returncode=0)
 
         # Mock checkout
-        mock_checkout = Mock()
-        mock_checkout.returncode = 0
+        mock_checkout = _completed(returncode=0)
 
         # Mock set-upstream
-        mock_upstream = Mock()
-        mock_upstream.returncode = 0
+        mock_upstream = _completed(returncode=0)
 
         mock_run.side_effect = [mock_fetch, mock_checkout, mock_upstream]
 
@@ -979,7 +964,7 @@ class TestFixDetachedHead:
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_meta_only_repo")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._get_default_branch")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_meta_only_repo(
         self,
         mock_run,
@@ -994,8 +979,7 @@ class TestFixDetachedHead:
         mock_meta_only.return_value = True
 
         # Mock fetch
-        mock_fetch = Mock()
-        mock_fetch.returncode = 0
+        mock_fetch = _completed(returncode=0)
         mock_run.return_value = mock_fetch
 
         result = RefreshResult(
@@ -1014,7 +998,7 @@ class TestFixDetachedHead:
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_meta_only_repo")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._get_default_branch")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_no_default_branch(
         self,
         mock_run,
@@ -1030,8 +1014,7 @@ class TestFixDetachedHead:
         mock_default_branch.return_value = None
 
         # Mock fetch
-        mock_fetch = Mock()
-        mock_fetch.returncode = 0
+        mock_fetch = _completed(returncode=0)
         mock_run.return_value = mock_fetch
 
         result = RefreshResult(
@@ -1048,7 +1031,7 @@ class TestFixDetachedHead:
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_meta_only_repo")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._get_default_branch")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_checkout_fails(
         self,
         mock_run,
@@ -1064,14 +1047,12 @@ class TestFixDetachedHead:
         mock_default_branch.return_value = "main"
 
         # Mock fetch (success)
-        mock_fetch = Mock()
-        mock_fetch.returncode = 0
+        mock_fetch = _completed(returncode=0)
 
         # Mock checkout (failure)
-        mock_checkout = Mock()
-        mock_checkout.returncode = 1
-        mock_checkout.stderr = (
-            "error: pathspec 'main' did not match any file(s) known to git"
+        mock_checkout = _completed(
+            returncode=1,
+            stderr=("error: pathspec 'main' did not match any file(s) known to git"),
         )
 
         mock_run.side_effect = [mock_fetch, mock_checkout]
@@ -1090,7 +1071,7 @@ class TestFixDetachedHead:
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_meta_only_repo")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._get_default_branch")
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_fetch_fails(
         self,
         mock_run,
@@ -1106,17 +1087,13 @@ class TestFixDetachedHead:
         mock_default_branch.return_value = "main"
 
         # Mock fetch (failure)
-        mock_fetch = Mock()
-        mock_fetch.returncode = 1
-        mock_fetch.stderr = "Could not resolve host"
+        mock_fetch = _completed(returncode=1, stderr="Could not resolve host")
 
         # Mock checkout (success)
-        mock_checkout = Mock()
-        mock_checkout.returncode = 0
+        mock_checkout = _completed(returncode=0)
 
         # Mock set-upstream
-        mock_upstream = Mock()
-        mock_upstream.returncode = 0
+        mock_upstream = _completed(returncode=0)
 
         mock_run.side_effect = [mock_fetch, mock_checkout, mock_upstream]
 
@@ -1132,7 +1109,7 @@ class TestFixDetachedHead:
         assert success is True  # Should succeed despite fetch failure
 
     @patch("gerrit_clone.refresh_worker.RefreshWorker._is_on_meta_config")
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_exception(
         self, mock_run, mock_meta_config, worker, temp_git_repo
     ):
@@ -1154,16 +1131,14 @@ class TestFixDetachedHead:
 class TestFixUpstreamTracking:
     """Test upstream tracking fixing functionality."""
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_upstream_tracking_success(self, mock_run, worker, temp_git_repo):
         """Test successfully fixing upstream tracking."""
         # Mock rev-parse check (remote branch exists)
-        mock_check = Mock()
-        mock_check.returncode = 0
+        mock_check = _completed(returncode=0)
 
         # Mock set-upstream
-        mock_upstream = Mock()
-        mock_upstream.returncode = 0
+        mock_upstream = _completed(returncode=0)
 
         mock_run.side_effect = [mock_check, mock_upstream]
 
@@ -1180,7 +1155,7 @@ class TestFixUpstreamTracking:
         assert success is True
         assert mock_run.call_count == 2
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_upstream_tracking_no_current_branch(
         self, mock_run, worker, temp_git_repo
     ):
@@ -1198,14 +1173,13 @@ class TestFixUpstreamTracking:
         assert success is False
         assert mock_run.call_count == 0
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_upstream_tracking_remote_branch_missing(
         self, mock_run, worker, temp_git_repo
     ):
         """Test when remote branch doesn't exist."""
         # Mock rev-parse check (remote branch doesn't exist)
-        mock_check = Mock()
-        mock_check.returncode = 1
+        mock_check = _completed(returncode=1)
 
         mock_run.return_value = mock_check
 
@@ -1222,19 +1196,18 @@ class TestFixUpstreamTracking:
         assert success is False
         assert mock_run.call_count == 1
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_upstream_tracking_set_upstream_fails(
         self, mock_run, worker, temp_git_repo
     ):
         """Test when set-upstream command fails."""
         # Mock rev-parse check (success)
-        mock_check = Mock()
-        mock_check.returncode = 0
+        mock_check = _completed(returncode=0)
 
         # Mock set-upstream (failure)
-        mock_upstream = Mock()
-        mock_upstream.returncode = 1
-        mock_upstream.stderr = "error: branch 'main' does not exist"
+        mock_upstream = _completed(
+            returncode=1, stderr="error: branch 'main' does not exist"
+        )
 
         mock_run.side_effect = [mock_check, mock_upstream]
 
@@ -1250,7 +1223,7 @@ class TestFixUpstreamTracking:
 
         assert success is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_upstream_tracking_exception(self, mock_run, worker, temp_git_repo):
         """Test exception handling in fix_upstream_tracking."""
         mock_run.side_effect = Exception("Unexpected error")
@@ -1273,32 +1246,33 @@ class TestTransientAndDivergedClassification:
 
     def test_analyze_transient_ssh_is_network(self, worker):
         """Transient SSH failures are reported as retryable network errors."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = "fatal: Could not read from remote repository."
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr="fatal: Could not read from remote repository.",
+        )
 
         assert "Network error" in worker._analyze_git_error(process_result, "pull")
 
     def test_transient_ssh_is_retryable(self, worker):
         """SSH handshake throttling is retryable."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = (
-            "kex_exchange_identification: Connection closed by remote host"
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr=("kex_exchange_identification: Connection closed by remote host"),
         )
 
         assert worker._is_retryable_git_error(process_result) is True
 
     def test_auth_with_could_not_read_still_non_retryable(self, worker):
         """Real auth failures print 'could not read' too but must not retry."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = (
-            "Permission denied (publickey).\n"
-            "fatal: Could not read from remote repository."
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr=(
+                "Permission denied (publickey).\n"
+                "fatal: Could not read from remote repository."
+            ),
         )
 
         assert worker._is_retryable_git_error(process_result) is False
@@ -1308,10 +1282,11 @@ class TestTransientAndDivergedClassification:
 
     def test_analyze_diverging_branches(self, worker):
         """Diverging branches are recognised and hint at --force-hard."""
-        process_result = Mock()
-        process_result.returncode = 1
-        process_result.stdout = ""
-        process_result.stderr = "hint: Diverging branches can't be fast-forwarded"
+        process_result = _completed(
+            returncode=1,
+            stdout="",
+            stderr="hint: Diverging branches can't be fast-forwarded",
+        )
 
         msg = worker._analyze_git_error(process_result, "pull")
         assert "Diverging branches" in msg
@@ -1319,33 +1294,36 @@ class TestTransientAndDivergedClassification:
 
     def test_diverging_branches_non_retryable(self, worker):
         """Diverging branches are not retryable."""
-        process_result = Mock()
-        process_result.returncode = 1
-        process_result.stdout = ""
-        process_result.stderr = "hint: Diverging branches can't be fast-forwarded"
+        process_result = _completed(
+            returncode=1,
+            stdout="",
+            stderr="hint: Diverging branches can't be fast-forwarded",
+        )
 
         assert worker._is_retryable_git_error(process_result) is False
 
     def test_diverging_with_transfer_stats_first_line(self, worker):
         """Transfer stats before the hint must not mask the divergence."""
-        process_result = Mock()
-        process_result.returncode = 1
-        process_result.stdout = ""
-        process_result.stderr = (
-            "Total 5 (delta 3), reused 5 (delta 3)\n"
-            "hint: Diverging branches can't be fast-forwarded"
+        process_result = _completed(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Total 5 (delta 3), reused 5 (delta 3)\n"
+                "hint: Diverging branches can't be fast-forwarded"
+            ),
         )
 
         assert "Diverging branches" in worker._analyze_git_error(process_result, "pull")
 
     def test_missing_repo_with_could_not_read_is_not_found(self, worker):
         """Missing repos print 'could not read' too but are not transient."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = (
-            "fatal: 'nonexistent' does not exist\n"
-            "fatal: Could not read from remote repository."
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr=(
+                "fatal: 'nonexistent' does not exist\n"
+                "fatal: Could not read from remote repository."
+            ),
         )
 
         assert "Repository not found" in worker._analyze_git_error(
@@ -1354,12 +1332,13 @@ class TestTransientAndDivergedClassification:
 
     def test_missing_repo_is_not_retryable(self, worker):
         """A missing repository must not be retried as a network blip."""
-        process_result = Mock()
-        process_result.returncode = 128
-        process_result.stdout = ""
-        process_result.stderr = (
-            "ERROR: Repository not found.\n"
-            "fatal: Could not read from remote repository."
+        process_result = _completed(
+            returncode=128,
+            stdout="",
+            stderr=(
+                "ERROR: Repository not found.\n"
+                "fatal: Could not read from remote repository."
+            ),
         )
 
         assert worker._is_retryable_git_error(process_result) is False
@@ -1533,7 +1512,7 @@ class TestPopStashSubmoduleNoise:
         assert worker._pop_stash(temp_git_repo) is True
         assert (temp_git_repo / "uncommitted.txt").read_text() == "uncommitted"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_pop_stash_nonzero_but_dropped_is_success(self, mock_run, worker):
         """Non-zero pop that still drops the stash counts as success.
 
@@ -1541,20 +1520,20 @@ class TestPopStashSubmoduleNoise:
         the working-tree changes and drops the stash entry but exits non-zero
         because of submodule status reporting.
         """
-        pop = Mock(returncode=1, stdout="", stderr="error in submodule")
-        before = Mock(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
-        after = Mock(returncode=0, stdout="", stderr="")
+        pop = _completed(returncode=1, stdout="", stderr="error in submodule")
+        before = _completed(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
+        after = _completed(returncode=0, stdout="", stderr="")
         # Call order: _stash_count (before), stash pop, _stash_count (after)
         mock_run.side_effect = [before, pop, after]
 
         assert worker._pop_stash(Path("/tmp/repo")) is True
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_pop_stash_nonzero_and_retained_is_failure(self, mock_run, worker):
         """Non-zero pop that leaves the stash in place is a real failure."""
-        pop = Mock(returncode=1, stdout="", stderr="CONFLICT (content)")
-        before = Mock(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
-        after = Mock(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
+        pop = _completed(returncode=1, stdout="", stderr="CONFLICT (content)")
+        before = _completed(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
+        after = _completed(returncode=0, stdout="stash@{0}: WIP\n", stderr="")
         mock_run.side_effect = [before, pop, after]
 
         assert worker._pop_stash(Path("/tmp/repo")) is False
@@ -1575,11 +1554,11 @@ class TestForceHard:
         assert worker.force is True
         assert worker.force_hard is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_reset_to_upstream_success(self, mock_run, worker, temp_git_repo):
         """Hard reset succeeds when an upstream exists."""
-        upstream_check = Mock(returncode=0, stdout="origin/master", stderr="")
-        reset = Mock(returncode=0, stdout="", stderr="")
+        upstream_check = _completed(returncode=0, stdout="origin/master", stderr="")
+        reset = _completed(returncode=0, stdout="", stderr="")
         mock_run.side_effect = [upstream_check, reset]
 
         result = RefreshResult(
@@ -1592,10 +1571,12 @@ class TestForceHard:
 
         assert worker._reset_to_upstream(temp_git_repo, result) is True
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_reset_to_upstream_no_upstream(self, mock_run, worker, temp_git_repo):
         """Hard reset is skipped when there is no upstream to reset to."""
-        upstream_check = Mock(returncode=128, stdout="", stderr="fatal: no upstream")
+        upstream_check = _completed(
+            returncode=128, stdout="", stderr="fatal: no upstream"
+        )
         mock_run.side_effect = [upstream_check]
 
         result = RefreshResult(
@@ -1620,21 +1601,21 @@ class TestForceHard:
 
         assert worker._reset_to_upstream(temp_git_repo, result) is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_switch_to_default_branch_success(self, mock_run, worker, temp_git_repo):
         """Switching to the default branch checks it out and sets upstream."""
-        checkout = Mock(returncode=0, stdout="", stderr="")
-        set_upstream = Mock(returncode=0, stdout="", stderr="")
+        checkout = _completed(returncode=0, stdout="", stderr="")
+        set_upstream = _completed(returncode=0, stdout="", stderr="")
         mock_run.side_effect = [checkout, set_upstream]
 
         assert worker._switch_to_default_branch(temp_git_repo, "master") is True
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_switch_to_default_branch_checkout_fails(
         self, mock_run, worker, temp_git_repo
     ):
         """A failed checkout is reported as failure."""
-        checkout = Mock(returncode=1, stdout="", stderr="error: pathspec")
+        checkout = _completed(returncode=1, stdout="", stderr="error: pathspec")
         mock_run.side_effect = [checkout]
 
         assert worker._switch_to_default_branch(temp_git_repo, "master") is False
@@ -1872,11 +1853,11 @@ class TestSshJitter:
         assert ssh("./peer") is False
         assert ssh("~/repos/peer") is False
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_get_default_branch_applies_jitter(self, mock_run, temp_git_repo):
         """Networked default-branch lookup is preceded by SSH jitter."""
         worker = RefreshWorker(ssh_jitter_seconds=0.1)
-        mock_run.return_value = Mock(
+        mock_run.return_value = _completed(
             returncode=0,
             stdout="ref: refs/heads/main\tHEAD\n",
             stderr="",
@@ -1887,11 +1868,11 @@ class TestSshJitter:
         mock_jitter.assert_called_once()
         assert branch == "main"
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_is_meta_only_repo_applies_jitter(self, mock_run, temp_git_repo):
         """The networked meta-only check is preceded by SSH jitter."""
         worker = RefreshWorker(ssh_jitter_seconds=0.1)
-        mock_run.return_value = Mock(
+        mock_run.return_value = _completed(
             returncode=0,
             stdout="abc123\trefs/heads/main\n",
             stderr="",
@@ -1901,11 +1882,11 @@ class TestSshJitter:
 
         mock_jitter.assert_called()
 
-    @patch("gerrit_clone.refresh_worker.subprocess.run")
+    @patch(RUN_TRACKED)
     def test_fix_detached_head_applies_jitter(self, mock_run, temp_git_repo):
         """The networked detached-HEAD fetch is preceded by SSH jitter."""
         worker = RefreshWorker(ssh_jitter_seconds=0.1)
-        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = _completed(returncode=0, stdout="", stderr="")
         result = RefreshResult(
             path=temp_git_repo,
             project_name="test-repo",
