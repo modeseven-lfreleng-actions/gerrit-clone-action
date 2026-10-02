@@ -21,6 +21,7 @@ from rich.text import Text
 from gerrit_clone import cli_hooks
 from gerrit_clone.cli_app import format_version_string
 from gerrit_clone.config import ConfigurationError, load_config
+from gerrit_clone.content_policy import ContentFilterSpec
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
@@ -273,7 +274,7 @@ def build_config(
 ) -> Config:
     """Load the effective configuration, reporting configuration errors."""
     try:
-        return load_config(
+        config = load_config(
             host=request.host,
             port=request.port,  # Leave as None for GitHub, will default to 29418 for Gerrit
             base_url=request.base_url,
@@ -317,6 +318,10 @@ def build_config(
     except ConfigurationError as e:
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
+    config.content_filters = ContentFilterSpec.from_options(
+        request.remove_files, request.git_filter, request.redact_secrets, config.path
+    )
+    return config
 
 
 def _report_configuration_error(session: CliSession, error: ConfigurationError) -> None:

@@ -172,6 +172,7 @@ def build_refresh_result(
         was_refreshed=updated,
         refresh_had_updates=updated,
         refresh_commits_pulled=refresh_result.commits_pulled,
+        content_filtered=refresh_result.content_filtered,
         error_message=error_message,
     )
 

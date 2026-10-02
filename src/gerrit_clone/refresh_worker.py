@@ -6,27 +6,33 @@
 This module holds the top-level refresh flow. The mechanics it orchestrates
 live in a stack of focused mixins, each of which owns one responsibility:
 
-* :mod:`gerrit_clone.refresh_git_env` — remotes and git subprocess environment
-* :mod:`gerrit_clone.refresh_repo_state` — working-tree state and stashing
+* :mod:`gerrit_clone.refresh_git_env` — remotes, environment, tracked git launches
+* :mod:`gerrit_clone.refresh_repo_state` — bare or working tree, and stashing
 * :mod:`gerrit_clone.refresh_branch_repair` — default-branch and upstream repair
 * :mod:`gerrit_clone.refresh_execution` — fetch/pull execution and retries
 * :mod:`gerrit_clone.refresh_force` — force-mode repository repair
+* :mod:`gerrit_clone.refresh_filtered` — content-filtered repositories
 * :mod:`gerrit_clone.refresh_output` — git output classification and counting
 
 Their public names are re-exported here so ``gerrit_clone.refresh_worker``
-remains the single import (and test patch) surface for refresh behaviour.
+remains the single import surface for refresh behaviour.
 """
 
 from __future__ import annotations
 
-import subprocess
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from gerrit_clone.content_policy import recorded_policy
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import Config, RefreshResult, RefreshStatus, RetryPolicy
-from gerrit_clone.refresh_force import ForceModeMixin
+from gerrit_clone.refresh_filtered import (
+    EARLIER_RELEASE_REFUSAL,
+    FILTERED_REFRESH_REFUSAL,
+    FILTERED_WORKING_COPY_REFUSAL,
+    FilteredRefreshMixin,
+)
 from gerrit_clone.refresh_git_env import SSH_HANDSHAKE_JITTER_SECONDS
 from gerrit_clone.refresh_output import (
     RefreshAuthError,
@@ -34,29 +40,33 @@ from gerrit_clone.refresh_output import (
     RefreshTimeoutError,
 )
 from gerrit_clone.refresh_repo_state import StashOutcome
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from gerrit_clone.content_policy import ContentFilterSpec
+
 logger = get_logger(__name__)
 
-# ``subprocess`` and ``time`` are re-exported deliberately: the refresh git
-# calls and sleeps now live in the mixin modules, but existing patch targets
-# (``gerrit_clone.refresh_worker.subprocess.run``,
-# ``gerrit_clone.refresh_worker.time.sleep``) must keep resolving.
+# ``time`` is re-exported deliberately: the refresh sleeps live in the
+# mixin modules, but the existing patch target
+# ``gerrit_clone.refresh_worker.time.sleep`` must keep resolving.
 __all__ = [
+    "EARLIER_RELEASE_REFUSAL",
+    "FILTERED_REFRESH_REFUSAL",
+    "FILTERED_WORKING_COPY_REFUSAL",
     "SSH_HANDSHAKE_JITTER_SECONDS",
     "RefreshAuthError",
     "RefreshError",
     "RefreshTimeoutError",
     "RefreshWorker",
     "StashOutcome",
-    "subprocess",
     "time",
 ]
 
 
-class RefreshWorker(ForceModeMixin):
+class RefreshWorker(FilteredRefreshMixin):
     """Worker for refreshing individual repositories."""
 
     def __init__(
@@ -73,6 +83,7 @@ class RefreshWorker(ForceModeMixin):
         force: bool = False,
         force_hard: bool = False,
         ssh_jitter_seconds: float = SSH_HANDSHAKE_JITTER_SECONDS,
+        content_filters: ContentFilterSpec | None = None,
     ) -> None:
         """Initialize refresh worker.
 
@@ -92,6 +103,10 @@ class RefreshWorker(ForceModeMixin):
                 divergence. Implies ``force``.
             ssh_jitter_seconds: Maximum random delay before each SSH-backed git
                 network operation, used to de-synchronise concurrent handshakes.
+            content_filters: The content filters this run applies to what
+                it refreshes, if any.  A repository content filtering has
+                rewritten is refreshed only when they cover the filters it
+                was rewritten under; see :mod:`gerrit_clone.refresh_filtered`.
         """
         self.config = config
         self.retry_policy = retry_policy or RetryPolicy()
@@ -106,6 +121,7 @@ class RefreshWorker(ForceModeMixin):
         self.force_hard = force_hard
         self.force = force or force_hard
         self.ssh_jitter_seconds = max(0.0, ssh_jitter_seconds)
+        self.content_filters = content_filters
 
     def refresh_repository(self, repo_path: Path) -> RefreshResult:
         """Refresh a single repository.
@@ -135,30 +151,57 @@ class RefreshWorker(ForceModeMixin):
                 logger.debug(f"⊘ {project_name}: Not a Git repository")
                 return result
 
-            state = self._check_repository_state(repo_path)
-            result.current_branch = state.get("branch")
-            result.detached_head = state.get("detached_head", False)
-            result.had_uncommitted_changes = state.get("has_uncommitted", False)
+            bare = self._is_bare_repository(repo_path)
+            state: dict[str, Any] = {}
+            if not bare:
+                state = self._check_repository_state(repo_path)
+                result.current_branch = state.get("branch")
+                result.detached_head = state.get("detached_head", False)
+                result.had_uncommitted_changes = state.get("has_uncommitted", False)
 
             remote_url = self._get_remote_url(repo_path)
             result.remote_url = remote_url
 
-            # Check if it's a Gerrit repository
-            if self.filter_gerrit_only and not self._is_gerrit_repository(remote_url):
+            # Read before the Gerrit gate: a config too broken to read the
+            # policy hides the remotes too, and must fail the repository,
+            # not pass it off as "not Gerrit".
+            recorded = recorded_policy(repo_path)
+
+            # Check if it's a Gerrit repository.  Every remote counts, the
+            # fetch being --all.
+            if self.filter_gerrit_only and not self._has_gerrit_remote(repo_path):
                 result.status = RefreshStatus.NOT_GERRIT_REPO
                 result.error_message = f"Not a Gerrit repository (remote: {remote_url})"
                 self._stamp_completion(result, started_at)
                 logger.debug(f"⊘ {project_name}: Not a Gerrit repository")
                 return result
 
-            if not self._prepare_repository(repo_path, result, state, started_at):
+            if not recorded.empty:
+                return self._refresh_filtered(
+                    repo_path, result, recorded, bare=bare, started_at=started_at
+                )
+
+            if bare:
+                # A bare mirror -- the default clone -- has no working
+                # tree: no branch to repair or pull, nothing to stash.
+                # It is brought up to date by fetching every ref.
+                if not self._prepare_bare_repository(repo_path, result, started_at):
+                    return result
+            elif not self._prepare_repository(repo_path, result, state, started_at):
                 return result
 
             result.status = RefreshStatus.REFRESHING
 
-            success = self._execute_adaptive_refresh(repo_path, result)
+            success = self._execute_adaptive_refresh(repo_path, result, bare=bare)
 
             self._apply_refresh_outcome(repo_path, result, success)
+
+        except ProcessAbandonedError:
+            # The batch gave up: no failure to log, and nothing more may be
+            # launched -- a stash it made is left for `git stash list`.
+            result.status = RefreshStatus.FAILED
+            result.error_message = "Refresh abandoned before it finished"
+            logger.debug(f"⊘ {project_name}: refresh abandoned")
 
         except Exception as e:
             result.status = RefreshStatus.FAILED
@@ -205,6 +248,29 @@ class RefreshWorker(ForceModeMixin):
             return False
 
         return self._handle_uncommitted_changes(repo_path, result, started_at)
+
+    def _prepare_bare_repository(
+        self, repo_path: Path, result: RefreshResult, started_at: datetime
+    ) -> bool:
+        """Skip a bare repository that fetching would not update.
+
+        Args:
+            repo_path: Path to a bare repository
+            result: Result object to update
+            started_at: Timestamp the refresh began, for completion metadata
+
+        Returns:
+            True if the repository is ready to refresh, False if it was
+            skipped.
+        """
+        obstacle = self._bare_refresh_obstacle(repo_path)
+        if obstacle is None:
+            return True
+        result.status = RefreshStatus.SKIPPED
+        result.error_message = obstacle
+        self._stamp_completion(result, started_at)
+        logger.warning(f"⚠️ {result.project_name}: {obstacle}, skipping refresh")
+        return False
 
     def _guard_unforced_repository(
         self, result: RefreshResult, state: dict[str, Any], started_at: datetime

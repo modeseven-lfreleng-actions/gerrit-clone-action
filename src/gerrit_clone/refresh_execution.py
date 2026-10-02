@@ -21,12 +21,14 @@ from typing import TYPE_CHECKING
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_branch_repair import BranchRepairMixin
+from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_output import (
     GitOutputAnalysisMixin,
     RefreshAuthError,
     RefreshError,
     RefreshTimeoutError,
 )
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,15 +57,23 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
     prune: bool
     strategy: str
 
-    def _execute_adaptive_refresh(self, repo_path: Path, result: RefreshResult) -> bool:
+    def _execute_adaptive_refresh(
+        self, repo_path: Path, result: RefreshResult, *, bare: bool = False
+    ) -> bool:
         """Execute refresh with adaptive retry logic.
 
         Args:
             repo_path: Repository path
             result: Result object to update
+            bare: Whether the repository is bare, and so can only be fetched
 
         Returns:
             True if refresh succeeded, False otherwise
+
+        Raises:
+            ProcessAbandonedError: If the batch was abandoned.  Never
+                retried: every later launch would be refused, and a retry
+                that slipped past the refusal would outlive the batch.
         """
         max_attempts = self.retry_policy.max_attempts
         # Auth-style failures get a smaller, dedicated retry budget (see
@@ -78,7 +88,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         while attempt < max_attempts:
             attempt += 1
             try:
-                success = self._perform_refresh(repo_path, result)
+                success = self._perform_refresh(repo_path, result, bare=bare)
                 if success:  # noqa: SIM103
                     return True
 
@@ -143,12 +153,15 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
 
         return False
 
-    def _perform_refresh(self, repo_path: Path, result: RefreshResult) -> bool:
+    def _perform_refresh(
+        self, repo_path: Path, result: RefreshResult, *, bare: bool = False
+    ) -> bool:
         """Perform the actual refresh operation.
 
         Args:
             repo_path: Repository path
             result: Result object to update
+            bare: Whether the repository is bare, and so can only be fetched
 
         Returns:
             True if refresh succeeded, False otherwise
@@ -156,6 +169,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         Raises:
             RefreshError: If refresh fails with retryable error
             RefreshTimeoutError: If refresh times out
+            ProcessAbandonedError: If the batch was abandoned
         """
         result.attempts += 1
         attempt_start = datetime.now(UTC)
@@ -165,8 +179,10 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         self._ssh_handshake_jitter(repo_path)
 
         try:
-            if self.fetch_only:
-                # Fetch only, don't merge
+            if self.fetch_only or bare:
+                # Fetch only, don't merge.  A bare repository has no
+                # branch to merge into; a mirror's refspec is
+                # +refs/*:refs/*, so the fetch alone updates every ref.
                 success = self._execute_git_fetch(repo_path, result)
             else:
                 success = self._execute_git_pull(repo_path, result)
@@ -189,6 +205,11 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
             result.error_message = error_msg
             raise RefreshTimeoutError(error_msg) from err
 
+        except ProcessAbandonedError:
+            # Not a refresh failure: wrapped as a RefreshError it would be
+            # judged retryable, recorded as this repository's error, or both.
+            raise
+
         except Exception as e:
             error_msg = f"Unexpected error during refresh: {e}"
             result.error_message = error_msg
@@ -203,6 +224,9 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
 
         Returns:
             True if fetch succeeded
+
+        Raises:
+            ProcessAbandonedError: If the batch was abandoned
         """
         cmd = ["git", "fetch"]
 
@@ -216,17 +240,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         logger.debug(f"🔄 Fetching {result.project_name}")
 
         try:
-            process_result = subprocess.run(
-                cmd,
-                cwd=repo_path,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                check=False,
-            )
+            process_result = run_git(cmd, repo_path, timeout=self.timeout, env=env)
 
             if process_result.returncode == 0:
                 # Parse fetch output to see if anything was updated
@@ -257,6 +271,9 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
 
         Returns:
             True if pull succeeded
+
+        Raises:
+            ProcessAbandonedError: If the batch was abandoned
         """
         cmd = ["git", "pull"]
 
@@ -275,17 +292,7 @@ class RefreshExecutionMixin(BranchRepairMixin, GitOutputAnalysisMixin):
         logger.debug(f"🔄 Pulling {result.project_name}")
 
         try:
-            process_result = subprocess.run(
-                cmd,
-                cwd=repo_path,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                check=False,
-            )
+            process_result = run_git(cmd, repo_path, timeout=self.timeout, env=env)
 
             if process_result.returncode == 0:
                 output = process_result.stdout + process_result.stderr

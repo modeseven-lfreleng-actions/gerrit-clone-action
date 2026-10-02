@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gerrit_clone.content_git import run_content_git
 from gerrit_clone.content_removal import _list_tree_files
 from gerrit_clone.logging import get_logger
 
@@ -49,9 +50,10 @@ def _list_branch_heads(repo_path: Path, timeout: int) -> list[str]:
             caller would otherwise treat a failure as "no branches to
             filter" and report success with every requested file still
             present.
+        ProcessAbandonedError: If the batch was abandoned.
     """
     try:
-        result = subprocess.run(
+        result = run_content_git(
             [
                 "git",
                 "-C",
@@ -60,9 +62,6 @@ def _list_branch_heads(repo_path: Path, timeout: int) -> list[str]:
                 "--format=%(refname:short)",
                 "refs/heads/",
             ],
-            check=False,
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
         if result.returncode != 0:
@@ -92,8 +91,9 @@ def _add_worktree(
 
     Raises:
         subprocess.CalledProcessError: If ``git worktree add`` fails.
+        ProcessAbandonedError: If the batch was abandoned.
     """
-    subprocess.run(
+    run_content_git(
         [
             "git",
             "-C",
@@ -112,8 +112,6 @@ def _add_worktree(
             worktree_dir,
             branch,
         ],
-        capture_output=True,
-        text=True,
         timeout=timeout,
         check=True,
     )
@@ -135,19 +133,8 @@ def _git_rm_files(
         full_path = Path(worktree_dir) / file_path
         if not full_path.exists():
             continue
-        rm_result = subprocess.run(
-            [
-                "git",
-                "-C",
-                worktree_dir,
-                "rm",
-                "-f",
-                "--",
-                file_path,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        rm_result = run_content_git(
+            ["git", "-C", worktree_dir, "rm", "-f", "--", file_path],
             timeout=timeout,
         )
         if rm_result.returncode != 0:
@@ -170,7 +157,7 @@ def _commit_removal(
     Raises:
         RuntimeError: If ``git commit`` fails.
     """
-    result = subprocess.run(
+    result = run_content_git(
         [
             "git",
             "-C",
@@ -184,9 +171,6 @@ def _commit_removal(
             _REMOVAL_COMMIT_MESSAGE,
             "--allow-empty",
         ],
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=timeout,
     )
 
@@ -198,24 +182,31 @@ def _commit_removal(
 
 
 def _cleanup_worktree(repo_path: Path, worktree_dir: str, timeout: int) -> None:
-    """Detach and delete the temporary worktree, best effort."""
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo_path),
-            "worktree",
-            "remove",
-            "--force",
-            worktree_dir,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if Path(worktree_dir).exists():
-        shutil.rmtree(worktree_dir, ignore_errors=True)
+    """Detach and delete the temporary worktree, best effort.
+
+    Raises:
+        ProcessAbandonedError: If the batch was abandoned.  The
+            temporary directory is deleted regardless.
+    """
+    try:
+        run_content_git(
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                "worktree",
+                "remove",
+                "--force",
+                worktree_dir,
+            ],
+            timeout=timeout,
+        )
+    finally:
+        # The directory is ours whether or not git got to detach it; an
+        # abandoned batch would otherwise leave a checkout in the
+        # temporary directory for every branch it was filtering.
+        if Path(worktree_dir).exists():
+            shutil.rmtree(worktree_dir, ignore_errors=True)
 
 
 def _remove_files_on_branch(

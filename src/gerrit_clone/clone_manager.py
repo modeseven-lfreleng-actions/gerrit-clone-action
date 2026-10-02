@@ -182,6 +182,7 @@ def _refresh_repositories(
         strategy="merge",
         filter_gerrit_only=False,  # Refresh all repos including GitHub
         force=config.force_refresh,
+        content_filters=config.content_filters,
     )
 
     return run_refresh_with_progress(config, refresh_worker, repos_needing_refresh)

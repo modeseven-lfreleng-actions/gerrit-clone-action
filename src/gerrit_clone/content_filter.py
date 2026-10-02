@@ -40,6 +40,12 @@ from gerrit_clone.content_patterns import (
     normalize_file_patterns,
     parse_git_filter_spec,
 )
+from gerrit_clone.content_policy import (
+    FilterPolicy,
+    PolicyRecordError,
+    collect_filter_tokens,
+    content_filtering,
+)
 from gerrit_clone.content_redaction import (
     _generate_replacement_string,
     _run_replace_text,
@@ -56,7 +62,7 @@ from gerrit_clone.content_scan import (
 )
 from gerrit_clone.content_worktree import _remove_files_worktree
 from gerrit_clone.logging import get_logger
-from gerrit_clone.models import match_project_pattern
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 logger = get_logger(__name__)
 
@@ -259,6 +265,8 @@ def replace_tokens_in_history(
 
         return _run_replace_text(repo_path, replacements_file, valid_count, timeout)
 
+    except ProcessAbandonedError:
+        raise
     except subprocess.TimeoutExpired:
         logger.error(
             "Token replacement timed out for %s after %ds",
@@ -278,48 +286,6 @@ def replace_tokens_in_history(
             Path(replacements_file).unlink()
 
 
-def _collect_filter_tokens(
-    project_name: str,
-    git_filter_projects: dict[str, list[str]],
-) -> list[str]:
-    """Aggregate the tokens configured for *project_name*.
-
-    Tokens from every matching project pattern are combined and
-    de-duplicated (preserving order) so ``git filter-repo`` only has to
-    run once for the repository.
-
-    Returns:
-        De-duplicated token list; empty when no pattern matched.
-    """
-    aggregated_tokens: list[str] = []
-    matched_patterns: list[str] = []
-    for pattern, token_list in git_filter_projects.items():
-        if match_project_pattern(project_name, pattern):
-            matched_patterns.append(pattern)
-            aggregated_tokens.extend(token_list)
-
-    if not aggregated_tokens:
-        return []
-
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique_tokens: list[str] = []
-    for t in aggregated_tokens:
-        if t not in seen:
-            seen.add(t)
-            unique_tokens.append(t)
-
-    logger.info(
-        "Applying token replacement to %s "
-        "(matched %d filter pattern(s): %s, %d unique token(s))",
-        project_name,
-        len(matched_patterns),
-        matched_patterns,
-        len(unique_tokens),
-    )
-    return unique_tokens
-
-
 def apply_content_filters(
     repo_path: Path,
     project_name: str,
@@ -334,6 +300,10 @@ def apply_content_filters(
     This is the main entry point for content filtering, called by
     the mirror manager after cloning from Gerrit and before pushing
     to GitHub.
+
+    The policy filtered under is recorded first, and filtering refused
+    if it cannot be; afterwards ``origin`` is put back for fetching and
+    pushing is blocked.  See :mod:`gerrit_clone.content_policy`.
 
     Args:
         repo_path: Path to the cloned (bare) repository.
@@ -354,8 +324,45 @@ def apply_content_filters(
     Returns:
         Tuple of ``(success, error_message)``.
     """
-    errors: list[str] = []
+    tokens = (
+        collect_filter_tokens(project_name, git_filter_projects)
+        if git_filter_projects
+        else []
+    )
+    policy = FilterPolicy.of(remove_patterns, tokens, redact_secrets)
+    if policy.empty:
+        return True, None
+    try:
+        with content_filtering(repo_path, policy) as safety_errors:
+            errors = _run_filters(
+                repo_path,
+                project_name,
+                remove_patterns,
+                tokens,
+                redact_secrets,
+                timeout,
+            )
 
+    except PolicyRecordError as exc:
+        logger.error(str(exc))
+        return False, str(exc)
+
+    errors.extend(safety_errors)
+    if errors:
+        return False, "; ".join(errors)
+    return True, None
+
+
+def _run_filters(
+    repo_path: Path,
+    project_name: str,
+    remove_patterns: list[str] | None,
+    tokens: list[str],
+    redact_secrets: bool,
+    timeout: int,
+) -> list[str]:
+    """Apply each requested filter to *repo_path*, collecting the failures."""
+    errors: list[str] = []
     if remove_patterns:
         try:
             removed = remove_files_from_bare_repo(
@@ -367,28 +374,35 @@ def apply_content_filters(
                     len(removed),
                     project_name,
                 )
+        except ProcessAbandonedError:
+            raise
         except Exception as exc:
             msg = f"File removal failed for {project_name}: {exc}"
             logger.error(msg)
             errors.append(msg)
 
-    # Aggregate tokens from all matching patterns so filter-repo runs once.
-    if git_filter_projects:
-        unique_tokens = _collect_filter_tokens(project_name, git_filter_projects)
-        if unique_tokens:
-            try:
-                success = replace_tokens_in_history(
-                    repo_path,
-                    unique_tokens,
-                    timeout=timeout,
-                )
-                if not success:
-                    msg = f"Token replacement failed for {project_name}"
-                    errors.append(msg)
-            except RuntimeError as exc:
-                msg = str(exc)
-                logger.error(msg)
+    # Tokens from all matching patterns, so filter-repo runs once.
+    if tokens:
+        logger.info(
+            "Applying token replacement to %s (%d unique token(s))",
+            project_name,
+            len(tokens),
+        )
+        try:
+            success = replace_tokens_in_history(
+                repo_path,
+                tokens,
+                timeout=timeout,
+            )
+            if not success:
+                msg = f"Token replacement failed for {project_name}"
                 errors.append(msg)
+        except ProcessAbandonedError:
+            raise
+        except RuntimeError as exc:
+            msg = str(exc)
+            logger.error(msg)
+            errors.append(msg)
 
     if redact_secrets:
         try:
@@ -412,6 +426,8 @@ def apply_content_filters(
                     "No secrets found to redact in %s",
                     project_name,
                 )
+        except ProcessAbandonedError:
+            raise
         except (RuntimeError, OSError) as exc:
             # RuntimeError covers the scan/redaction fail-closed
             # paths; OSError (e.g. FileNotFoundError when git is
@@ -421,7 +437,4 @@ def apply_content_filters(
             msg = str(exc)
             logger.error(msg)
             errors.append(msg)
-
-    if errors:
-        return False, "; ".join(errors)
-    return True, None
+    return errors

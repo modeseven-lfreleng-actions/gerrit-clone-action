@@ -16,6 +16,7 @@ import platform
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from gerrit_clone.model_clone_results import BatchResult, CloneResult
 from gerrit_clone.model_config_validation import validate_and_normalize
@@ -33,6 +34,9 @@ from gerrit_clone.model_project_filters import (
     normalize_project_list,
 )
 from gerrit_clone.model_refresh_results import RefreshBatchResult, RefreshResult
+
+if TYPE_CHECKING:
+    from gerrit_clone.content_policy import ContentFilterSpec
 
 __all__ = [
     "BatchResult",
@@ -133,6 +137,11 @@ class Config:
     force_refresh: bool = False
     fetch_only: bool = False
     skip_conflicts: bool = True
+    # The content filters the run applies to what it clones and refreshes,
+    # if any.  A repository content filtering has rewritten is refreshed
+    # only under filters covering the ones that rewrote it; see
+    # gerrit_clone.refresh_filtered.  Kept out of repr: it holds tokens.
+    content_filters: ContentFilterSpec | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Validate and normalize configuration."""

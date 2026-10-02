@@ -9,7 +9,7 @@ which URL is configured, whether that URL implies an SSH handshake (and so
 needs pacing), and what environment git subprocesses should run with.
 
 Every higher layer that performs a network operation depends on the handshake
-jitter provided here.
+jitter provided here, and launches its git commands through :func:`run_git`.
 """
 
 from __future__ import annotations
@@ -17,13 +17,19 @@ from __future__ import annotations
 import os
 import random
 import re
-import subprocess
 import time
 from typing import TYPE_CHECKING
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.subprocess_tracking import (
+    ProcessAbandonedError,
+    batch_abandoned,
+    run_tracked,
+)
 
 if TYPE_CHECKING:
+    import subprocess
+    from collections.abc import Mapping
     from pathlib import Path
 
     from gerrit_clone.models import Config
@@ -38,6 +44,44 @@ logger = get_logger(__name__)
 SSH_HANDSHAKE_JITTER_SECONDS = 0.25
 
 
+def run_git(
+    cmd: list[str],
+    repo_path: Path,
+    *,
+    timeout: float,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a refresh git command as a tracked child of the calling batch.
+
+    Tracked so that a refresh pool abandoned on Ctrl+C or SIGTERM can
+    refuse the command, or stop it together with the ssh helpers git
+    spawned, instead of leaving a fetch updating refs after the command
+    has returned.
+
+    A child the batch terminated exits nonzero exactly like git failing
+    on its own, and callers would report or retry it as such.  Only the
+    tracker can tell the two apart, so that case is raised instead.
+
+    Args:
+        cmd: Git command to run.
+        repo_path: Repository to run it in.
+        timeout: Seconds to wait before killing the child and raising.
+        env: Environment for the child; inherited when omitted.
+
+    Returns:
+        The completed process, with text stdout and stderr.
+
+    Raises:
+        ProcessAbandonedError: If the calling thread's batch was abandoned
+            before or while the command ran.
+        subprocess.TimeoutExpired: If *timeout* elapses.
+    """
+    result = run_tracked(cmd, cwd=repo_path, timeout=timeout, env=env)
+    if result.returncode != 0 and batch_abandoned():
+        raise ProcessAbandonedError(f"{' '.join(cmd[:2])} in {repo_path} was abandoned")
+    return result
+
+
 class GitEnvironmentMixin:
     """Remote-URL inspection and git subprocess environment construction."""
 
@@ -46,34 +90,75 @@ class GitEnvironmentMixin:
     config: Config | None
     ssh_jitter_seconds: float
 
-    def _get_remote_url(self, repo_path: Path) -> str | None:
-        """Get the remote URL for the repository.
+    def _remote_urls(self, repo_path: Path) -> list[tuple[str, str]]:
+        """List the URL of every configured remote, in configuration order.
 
         Args:
             repo_path: Repository path
 
         Returns:
-            Remote URL or None if not found
+            ``(remote name, URL)`` pairs; empty if there are no remotes or
+            the configuration could not be read.
+
+        Raises:
+            ProcessAbandonedError: If the batch was abandoned.  Answering
+                "no remotes" instead would misreport the repository.
         """
         try:
-            result = subprocess.run(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+            result = run_git(
+                ["git", "config", "--get-regexp", r"^remote\..*\.url$"],
+                repo_path,
                 timeout=5,
-                check=False,
             )
-
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return None
-
+        except ProcessAbandonedError:
+            raise
         except Exception as e:
-            logger.debug(f"Failed to get remote URL: {e}")
-            return None
+            logger.debug(f"Failed to read remote URLs: {e}")
+            return []
+        if result.returncode != 0:
+            return []
+        remotes = []
+        for line in result.stdout.splitlines():
+            key, _, url = line.partition(" ")
+            # Remote names may themselves contain dots, so the name is
+            # whatever lies between the fixed prefix and suffix.
+            if url.strip():
+                remotes.append((key[len("remote.") : -len(".url")], url.strip()))
+        return remotes
+
+    def _get_remote_url(self, repo_path: Path) -> str | None:
+        """Get the remote URL to report for the repository.
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            The ``origin`` URL if that remote exists, else the first
+            remote's URL, or None if there are no remotes.
+        """
+        remotes = self._remote_urls(repo_path)
+        origin = [url for name, url in remotes if name == "origin"]
+        if origin:
+            # git config --get reports the last of a multi-valued key.
+            return origin[-1]
+        return remotes[0][1] if remotes else None
+
+    def _has_gerrit_remote(self, repo_path: Path) -> bool:
+        """Whether any remote of the repository looks like Gerrit.
+
+        The refresh fetch is ``--all``, so a repository whose Gerrit
+        remote is not called ``origin`` -- ``git clone --mirror --origin
+        upstream`` -- is still refreshed from Gerrit.
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            True if at least one remote URL looks like Gerrit
+        """
+        return any(
+            self._is_gerrit_repository(url) for _, url in self._remote_urls(repo_path)
+        )
 
     def _is_gerrit_repository(self, remote_url: str | None) -> bool:
         """Check if remote URL looks like a Gerrit repository.

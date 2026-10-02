@@ -9,15 +9,20 @@ branch before a fetch/pull is attempted: working out what the default branch
 is (locally first, then over the network), recovering from a detached HEAD,
 switching away from a feature branch, restoring upstream tracking and — for
 force-hard mode — resetting a branch to its upstream ref.
+
+Every step lets :class:`~gerrit_clone.subprocess_tracking.ProcessAbandonedError`
+through: reported as an ordinary failure, it would send force mode on to its
+fallback repairs, each a further write to a repository the batch gave up on.
 """
 
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_repo_state import RepositoryStateMixin
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -74,15 +79,10 @@ class BranchRepairMixin(RepositoryStateMixin):
             # handshake here too to avoid the same throttling _perform_refresh
             # guards against under high concurrency.
             self._ssh_handshake_jitter(repo_path)
-            ls_remote_result = subprocess.run(
+            ls_remote_result = run_git(
                 ["git", "ls-remote", "--symref", "origin", "HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=10,
-                check=False,
             )
 
             if ls_remote_result.returncode == 0:
@@ -92,15 +92,10 @@ class BranchRepairMixin(RepositoryStateMixin):
                     return branch_name
 
             # Try to get origin/HEAD symbolic ref
-            result = subprocess.run(
+            result = run_git(
                 ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
 
             if result.returncode == 0:
@@ -113,15 +108,10 @@ class BranchRepairMixin(RepositoryStateMixin):
 
             # Fallback: check common branch names in remote
             for branch_name in ["master", "main", "develop"]:
-                result = subprocess.run(
+                result = run_git(
                     ["git", "ls-remote", "--heads", "origin", branch_name],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    repo_path,
                     timeout=5,
-                    check=False,
                 )
 
                 if result.returncode == 0 and result.stdout.strip():
@@ -130,6 +120,9 @@ class BranchRepairMixin(RepositoryStateMixin):
 
             logger.debug(f"No default branch found for {repo_path.name}")
             return None
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to get default branch: {e}")
@@ -149,15 +142,10 @@ class BranchRepairMixin(RepositoryStateMixin):
             Default branch name, or None if it cannot be determined locally
         """
         try:
-            result = subprocess.run(
+            result = run_git(
                 ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
             if result.returncode == 0:
                 ref = result.stdout.strip()
@@ -166,6 +154,8 @@ class BranchRepairMixin(RepositoryStateMixin):
                 if branch and not branch.startswith("meta/"):
                     return branch
             return None
+        except ProcessAbandonedError:
+            raise
         except Exception as e:
             logger.debug(f"Failed to get local default branch: {e}")
             return None
@@ -197,15 +187,8 @@ class BranchRepairMixin(RepositoryStateMixin):
             # git fetch opens an SSH connection for Gerrit, so de-sync the
             # handshake to avoid contributing to concurrent-connection throttling.
             self._ssh_handshake_jitter(repo_path)
-            fetch_result = subprocess.run(
-                ["git", "fetch", "--quiet", "origin"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
+            fetch_result = run_git(
+                ["git", "fetch", "--quiet", "origin"], repo_path, timeout=30
             )
 
             if fetch_result.returncode != 0:
@@ -228,15 +211,8 @@ class BranchRepairMixin(RepositoryStateMixin):
                 return False
 
             # Checkout the default branch
-            checkout_result = subprocess.run(
-                ["git", "checkout", default_branch],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
+            checkout_result = run_git(
+                ["git", "checkout", default_branch], repo_path, timeout=30
             )
 
             if checkout_result.returncode == 0:
@@ -245,20 +221,15 @@ class BranchRepairMixin(RepositoryStateMixin):
                 )
 
                 # Set upstream tracking if not already set
-                set_upstream_result = subprocess.run(
+                set_upstream_result = run_git(
                     [
                         "git",
                         "branch",
                         f"--set-upstream-to=origin/{default_branch}",
                         default_branch,
                     ],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    repo_path,
                     timeout=10,
-                    check=False,
                 )
 
                 if set_upstream_result.returncode == 0:
@@ -270,6 +241,9 @@ class BranchRepairMixin(RepositoryStateMixin):
                     f"Failed to checkout '{default_branch}': {checkout_result.stderr}"
                 )
                 return False
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to fix detached HEAD: {e}")
@@ -290,15 +264,8 @@ class BranchRepairMixin(RepositoryStateMixin):
             True if the branch was checked out successfully
         """
         try:
-            checkout_result = subprocess.run(
-                ["git", "checkout", default_branch],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
+            checkout_result = run_git(
+                ["git", "checkout", default_branch], repo_path, timeout=30
             )
 
             if checkout_result.returncode != 0:
@@ -308,22 +275,20 @@ class BranchRepairMixin(RepositoryStateMixin):
                 return False
 
             # Best-effort: ensure upstream tracking is set for the default branch.
-            subprocess.run(
+            run_git(
                 [
                     "git",
                     "branch",
                     f"--set-upstream-to=origin/{default_branch}",
                     default_branch,
                 ],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=10,
-                check=False,
             )
             return True
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to switch to default branch: {e}")
@@ -344,15 +309,10 @@ class BranchRepairMixin(RepositoryStateMixin):
 
         try:
             # Check if origin/<branch> exists
-            check_result = subprocess.run(
+            check_result = run_git(
                 ["git", "rev-parse", "--verify", f"origin/{result.current_branch}"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=5,
-                check=False,
             )
 
             if check_result.returncode != 0:
@@ -362,20 +322,15 @@ class BranchRepairMixin(RepositoryStateMixin):
                 return False
 
             # Set upstream tracking
-            upstream_result = subprocess.run(
+            upstream_result = run_git(
                 [
                     "git",
                     "branch",
                     f"--set-upstream-to=origin/{result.current_branch}",
                     result.current_branch,
                 ],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                repo_path,
                 timeout=10,
-                check=False,
             )
 
             if upstream_result.returncode == 0:
@@ -386,6 +341,9 @@ class BranchRepairMixin(RepositoryStateMixin):
             else:
                 logger.debug(f"Failed to set upstream: {upstream_result.stderr}")
                 return False
+
+        except ProcessAbandonedError:
+            raise
 
         except Exception as e:
             logger.debug(f"Failed to fix upstream tracking: {e}")

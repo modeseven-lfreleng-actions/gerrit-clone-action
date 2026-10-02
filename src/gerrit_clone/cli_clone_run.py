@@ -125,6 +125,10 @@ def _apply_content_filters(
     for cr in batch_result.results:
         if not cr.success or not cr.path:
             continue
+        if cr.content_filtered:
+            # Re-filtered as part of its staged refresh already.
+            filter_success += 1
+            continue
         succeeded, failed = _filter_repository(
             request, console, cr, remove_file_patterns, git_filter_projects
         )

@@ -31,6 +31,7 @@ from gerrit_clone.mirror_content_filters import (
     ContentFilterRunner,
     ContentFilterSettings,
     apply_filters_to_clones,
+    with_content_filters,
 )
 from gerrit_clone.mirror_default_branch import set_default_branch_from_local
 from gerrit_clone.mirror_filtering import filter_projects_by_hierarchy
@@ -138,6 +139,9 @@ class MirrorManager:
         self.remove_file_patterns = remove_file_patterns
         self.git_filter_projects = git_filter_projects
         self.redact_secrets = redact_secrets
+        self.config = config = with_content_filters(
+            config, remove_file_patterns, git_filter_projects, redact_secrets
+        )
         self.clone_manager = CloneManager(config, progress_tracker)
 
     def _push_settings(self) -> PushSettings:

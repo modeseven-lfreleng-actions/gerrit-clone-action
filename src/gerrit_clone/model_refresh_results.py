@@ -53,6 +53,10 @@ class RefreshResult:
     stash_branch: str | None = None
     hard_reset: bool = False
     detached_head: bool = False
+    # Whether the refresh already re-applied the run's content filters,
+    # as a content-filtered mirror is refreshed (see
+    # gerrit_clone.refresh_filtered), so they need not run again.
+    content_filtered: bool = False
 
     # Retry tracking
     first_started_at: datetime | None = None
