@@ -37,6 +37,7 @@ from gerrit_clone.refresh_filtered import SHALLOW_HISTORY_REFUSAL
 from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_manager import RefreshManager, refresh_repositories
 from gerrit_clone.refresh_worker import FILTERED_WORKING_COPY_REFUSAL, RefreshWorker
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -524,7 +525,8 @@ class TestStagedRefresh:
         ) -> subprocess.CompletedProcess[str]:
             if "--get-regexp" in cmd:
                 return subprocess.CompletedProcess(cmd, 128, "", "bad config line")
-            return run_git(cmd, *args, **kwargs)
+            ran: subprocess.CompletedProcess[str] = run_git(cmd, *args, **kwargs)
+            return ran
 
         with patch("gerrit_clone.refresh_filtered.run_git", unreadable):
             result = _worker(filters=_spec(tree)).refresh_repository(mirror)
@@ -562,7 +564,8 @@ class TestStagedRefresh:
         ) -> subprocess.CompletedProcess[str]:
             if cmd[1:3] == ["remote", "remove"]:
                 return subprocess.CompletedProcess(cmd, 1, "", "could not remove")
-            return run_git(cmd, *args, **kwargs)
+            ran: subprocess.CompletedProcess[str] = run_git(cmd, *args, **kwargs)
+            return ran
 
         with patch("gerrit_clone.refresh_filtered.run_git", stuck):
             result = _worker(filters=_spec(tree)).refresh_repository(mirror)
@@ -586,6 +589,43 @@ class TestStagedRefresh:
 
         [stage] = _stages_left(tree)
         assert result.status == RefreshStatus.FAILED
+        assert str(stage) in (result.error_message or "")
+        assert "unfiltered history" in (result.error_message or "")
+
+    @pytest.mark.xfail(
+        strict=True, reason="The stop reason replaces the error naming the copy"
+    )
+    @pytest.mark.parametrize(
+        ("raised", "reported"),
+        [
+            (ProcessAbandonedError("abandoned"), "Refresh abandoned"),
+            (RuntimeError("boom"), "Unexpected error: boom"),
+        ],
+        ids=["abandoned", "unexpected"],
+    )
+    def test_a_copy_left_behind_is_still_named_when_the_refresh_stops(
+        self, tree: Path, raised: BaseException, reported: str
+    ) -> None:
+        """Not overwritten by the reason the refresh stopped."""
+        mirror = _filtered_mirror(tree)
+        _advance(tree.parent / "up-parent")
+
+        def undeletable(path: Path, ignore_errors: bool = False) -> None:
+            if not ignore_errors:
+                raise PermissionError(13, "Permission denied", str(path))
+
+        with (
+            patch("gerrit_clone.refresh_filtered.shutil.rmtree", undeletable),
+            patch(
+                "gerrit_clone.refresh_filtered.apply_content_filters",
+                side_effect=raised,
+            ),
+        ):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        [stage] = _stages_left(tree)
+        assert result.status == RefreshStatus.FAILED
+        assert reported in (result.error_message or "")
         assert str(stage) in (result.error_message or "")
         assert "unfiltered history" in (result.error_message or "")
 
