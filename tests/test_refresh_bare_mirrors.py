@@ -843,13 +843,16 @@ class TestReporting:
         assert "secret.txt" not in history.split()
         assert _git("config", "remote.origin.pushurl", cwd=mirror) == NO_PUSH_URL
 
-    def test_a_filtered_mirror_is_refused_a_refresh_without_filters(
+    @pytest.mark.xfail(
+        strict=True, reason="#307: later runs do not yet honour the tree's filters"
+    )
+    def test_a_filtered_mirror_is_refreshed_without_restating_its_filters(
         self, tree: Path
     ) -> None:
-        """Fetching ``+refs/*:refs/*`` would force the original refs back.
+        """The tree recorded them; the run applies them as before.
 
-        The file the filter removed would return with them, and nothing
-        in the run would remove it again.
+        Fetching ``+refs/*:refs/*`` alone would force the original refs
+        back, the removed file with them.
         """
         upstream = tree.parent / "up-parent"
         (upstream / "secret.txt").write_text("hunter2\n")
@@ -859,15 +862,13 @@ class TestReporting:
         filtered = CliRunner().invoke(app, [*command, "--remove-files", "secret.txt"])
         assert filtered.exit_code == 0, filtered.output
         mirror = tree / "com/parent"
-        before = _git("rev-parse", "main", cwd=mirror)
         _advance(upstream)
 
         again = CliRunner().invoke(app, command)
 
-        # The child, which the filter left alone, is refreshed as usual.
         assert again.exit_code == 0, again.output
-        assert "1 of 2 repositories were not refreshed" in again.output
-        assert _git("rev-parse", "main", cwd=mirror) == before
+        assert "All repositories refreshed successfully" in again.output
+        assert _git("show", "main:file.txt", cwd=mirror) == "two"
         history = _git("log", "--all", "--name-only", "--format=", cwd=mirror)
         assert "secret.txt" not in history.split()
 
