@@ -13,20 +13,32 @@ filtered content straight back.  Each must be refused, for good.
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from gerrit_clone import content_legacy
 from gerrit_clone.content_filter import apply_content_filters
+from gerrit_clone.content_intent import FilterIntent
 from gerrit_clone.content_legacy import LEGACY_REMOVAL_SUBJECT
 from gerrit_clone.content_policy import (
-    ContentFilterSpec,
     PolicyReadError,
     recorded_policy,
 )
-from gerrit_clone.models import RefreshStatus
+from gerrit_clone.content_spec import ContentFilterSpec
+from gerrit_clone.github_api import GitHubRepo, transform_gerrit_name_to_github
+from gerrit_clone.mirror_manager import MirrorManager
+from gerrit_clone.mirror_models import MirrorResult, MirrorStatus
+from gerrit_clone.models import (
+    CloneResult,
+    CloneStatus,
+    Config,
+    Project,
+    ProjectState,
+    RefreshStatus,
+)
 from gerrit_clone.refresh_manager import RefreshManager
 from gerrit_clone.refresh_worker import EARLIER_RELEASE_REFUSAL, RefreshWorker
 
@@ -153,6 +165,18 @@ class TestUpgrade:
         assert _git("for-each-ref", cwd=mirror) == before
         assert not _secret_at_tip(mirror)
 
+    def test_a_missing_token_does_not_hide_the_lasting_refusal(
+        self, upstream: Path, legacy: Callable[[Path], Path]
+    ) -> None:
+        """Passing the token would only meet the re-clone refusal next."""
+        mirror = legacy(upstream)
+        intent = FilterIntent.of_options(None, {"proj.git": ["tok-123"]}, False)
+        spec = ContentFilterSpec(None, None, False, mirror.parent, intent)
+
+        result = _worker(spec).refresh_repository(mirror)
+
+        assert result.error_message == EARLIER_RELEASE_REFUSAL
+
     def test_the_dry_run_predicts_the_refusal(
         self, upstream: Path, legacy: Callable[[Path], Path]
     ) -> None:
@@ -252,6 +276,127 @@ class TestThisReleaseIsNotMistaken:
 
         assert recorded_policy(mirror).empty
         assert result.status == RefreshStatus.SUCCESS, result.error_message
+
+
+@dataclass
+class _Overwritten:
+    """What one ``mirror --overwrite`` run did."""
+
+    pushed: list[str]
+    deleted: list[str]
+    created: list[str]
+    results: list[MirrorResult]
+
+
+def _overwrite(
+    tree: Path, name: str, upstream: Path, *, recreate: bool = False
+) -> _Overwritten:
+    """``mirror --overwrite`` of project *name*, unfiltered.
+
+    Its GitHub repository already exists, so ``--recreate`` would delete
+    and recreate it.
+    """
+    pushed: list[str] = []
+
+    def clone(self: Any, projects: list[Project]) -> list[CloneResult]:
+        results = []
+        for project in projects:
+            path = self.config.path / project.name
+            status = CloneStatus.ALREADY_EXISTS
+            if not path.exists():
+                _git("clone", "-q", "--mirror", upstream.as_uri(), str(path))
+                status = CloneStatus.SUCCESS
+            results.append(CloneResult(project=project, status=status, path=path))
+        return results
+
+    def push(_self: Any, local: Path, _repo: Any) -> tuple[bool, None]:
+        pushed.append(str(local))
+        return True, None
+
+    github_name = transform_gerrit_name_to_github(name)
+    existing: dict[str, Any] = {
+        "name": github_name,
+        "full_name": f"org/{github_name}",
+        "html_url": f"https://github.com/org/{github_name}",
+        "clone_url": f"https://github.com/org/{github_name}.git",
+        "ssh_url": f"git@github.com:org/{github_name}.git",
+        "private": False,
+    }
+    repo = GitHubRepo(
+        name=github_name,
+        full_name=f"org/{github_name}",
+        ssh_url=f"git@github.com:org/{github_name}.git",
+        clone_url=f"https://github.com/org/{github_name}.git",
+        html_url=f"https://github.com/org/{github_name}",
+        private=False,
+    )
+    api = Mock()
+    api.list_all_repos_graphql = Mock(return_value={github_name: existing})
+    api.list_repos = Mock(return_value=[])
+    api.batch_delete_repos = AsyncMock(return_value={})
+    api.batch_create_repos = AsyncMock(return_value={github_name: (repo, None)})
+    with (
+        patch("gerrit_clone.clone_orchestrator.CloneManager.clone_projects", clone),
+        patch.object(MirrorManager, "_push_to_github", push),
+    ):
+        results = MirrorManager(
+            config=Config(host="gerrit.example.org", port=29418, path=tree),
+            github_api=api,
+            github_org="org",
+            overwrite=True,
+            recreate=recreate,
+        ).mirror_projects([Project(name, ProjectState.ACTIVE)])
+    return _Overwritten(
+        pushed,
+        [n for call in api.batch_delete_repos.call_args_list for n in call.args[1]],
+        [
+            c["name"]
+            for call in api.batch_create_repos.call_args_list
+            for c in call.args[1]
+        ],
+        results,
+    )
+
+
+@pytest.mark.parametrize("legacy", LEGACY.values(), ids=LEGACY.keys())
+class TestOverwrite:
+    """``mirror --overwrite`` leaves what an earlier release filtered alone."""
+
+    @pytest.mark.parametrize("recreate", [False, True], ids=["reuse", "recreate"])
+    def test_the_repository_is_kept_and_never_published(
+        self, upstream: Path, legacy: Callable[[Path], Path], recreate: bool
+    ) -> None:
+        """Cloned again it would go out unfiltered, and with --recreate even
+        the kept copy would replace its GitHub repository."""
+        mirror = legacy(upstream)
+        before = _git("for-each-ref", cwd=mirror)
+
+        run = _overwrite(mirror.parent, "proj.git", upstream, recreate=recreate)
+
+        assert run.pushed == []
+        assert run.deleted == []
+        assert run.created == []
+        [result] = run.results
+        assert result.status == MirrorStatus.SKIPPED
+        assert "earlier gerrit-clone release" in (result.error_message or "")
+        assert _git("for-each-ref", cwd=mirror) == before
+        assert not _secret_at_tip(mirror)
+
+    def test_a_directory_holding_one_is_kept(
+        self, upstream: Path, legacy: Callable[[Path], Path]
+    ) -> None:
+        """Deleting the parent would take the nested repository with it."""
+        nested = legacy(upstream)
+        parent = nested.parent / "com"
+        _git("clone", "-q", "--mirror", upstream.as_uri(), str(parent))
+        inner = parent / "proj.git"
+        nested.rename(inner)
+
+        run = _overwrite(nested.parent, "com", upstream, recreate=True)
+
+        assert inner.is_dir()
+        assert not _secret_at_tip(inner)
+        assert run.pushed == []
 
 
 def test_unreadable_traces_fail_closed(upstream: Path) -> None:

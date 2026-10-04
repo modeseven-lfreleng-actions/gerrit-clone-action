@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from gerrit_clone.content_legacy import earlier_release_traces
@@ -42,13 +42,8 @@ from gerrit_clone.content_origin import (
     push_urls,
     restore_push_urls,
 )
-from gerrit_clone.content_patterns import (
-    normalize_file_patterns,
-    parse_git_filter_spec,
-)
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import match_project_pattern
-from gerrit_clone.refresh_discovery import project_name_for
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -184,55 +179,6 @@ def collect_filter_tokens(
     return unique_tokens
 
 
-@dataclass(frozen=True)
-class ContentFilterSpec:
-    """The content filters a whole run applies, to decide per repository."""
-
-    remove_patterns: list[str] | None
-    # Tokens are secrets; kept out of any repr that might reach a log.
-    git_filter_projects: dict[str, list[str]] | None = field(repr=False)
-    redact_secrets: bool
-    base_path: Path
-
-    def policy_for(self, repo_path: Path) -> FilterPolicy:
-        """The policy this run would filter *repo_path* under."""
-        tokens = (
-            collect_filter_tokens(
-                self.project_name(repo_path), self.git_filter_projects
-            )
-            if self.git_filter_projects
-            else []
-        )
-        return FilterPolicy.of(self.remove_patterns, tokens, self.redact_secrets)
-
-    def project_name(self, repo_path: Path) -> str:
-        """*repo_path*'s project name, relative to the run's base path.
-
-        Both sides are resolved: a clone's target path is not, and on
-        a system where the temporary directory is a symlink the two
-        would otherwise never compare, leaving only the leaf name.
-        """
-        return project_name_for(repo_path.resolve(), self.base_path.resolve())
-
-    @classmethod
-    def from_options(
-        cls,
-        remove_files: str | None,
-        git_filter: str | None,
-        redact_secrets: bool,
-        base_path: Path,
-    ) -> ContentFilterSpec | None:
-        """Parse the command-line filter options; ``None`` if none were given."""
-        if not (remove_files or git_filter or redact_secrets):
-            return None
-        return cls(
-            normalize_file_patterns([remove_files]) if remove_files else None,
-            parse_git_filter_spec(git_filter) if git_filter else None,
-            redact_secrets,
-            base_path,
-        )
-
-
 def recorded_policy(repo_path: Path) -> FilterPolicy:
     """The policy *repo_path* was last filtered under; empty if never.
 
@@ -255,26 +201,47 @@ def recorded_policy(repo_path: Path) -> FilterPolicy:
 
 
 def _stored(repo_path: Path) -> tuple[FilterPolicy, bool]:
-    """The policy *repo_path*'s config holds, and whether it was stamped."""
+    """The policy *repo_path*'s config holds, and whether it was stamped.
 
-    def values(key: str) -> list[str]:
-        result = git_config(repo_path, "--get-all", key)
-        if result is not None and result.returncode == 1:
-            return []
-        if result is None or result.returncode != 0:
-            detail = result.stderr.strip() if result is not None else "git failed"
-            raise PolicyReadError(
-                f"Could not read the content-filter policy of {repo_path}: {detail}"
-            )
-        return [line for line in result.stdout.splitlines() if line]
+    Every key in one git call: refresh asks this of each repository, and
+    a run gathers it from every repository in the tree.
+
+    Raises:
+        PolicyReadError: If the config could not be read.  Only git's
+            exit status 1 -- no key set -- reads as no record.
+    """
+    result = git_config(repo_path, "--null", "--get-regexp", r"^gerrit-clone\.")
+    if result is None or result.returncode not in (0, 1):
+        detail = result.stderr.strip() if result is not None else "git failed"
+        raise PolicyReadError(
+            f"Could not read the content-filter policy of {repo_path}: {detail}"
+        )
+    values: dict[str, list[str]] = {}
+    for entry in result.stdout.split("\0") if result.returncode == 0 else []:
+        key, _, value = entry.partition("\n")
+        if key and value:
+            # Git prints variable names in lower case.
+            values.setdefault(key.lower(), []).append(value)
+
+    def get(key: str) -> list[str]:
+        return values.get(key.lower(), [])
 
     policy = FilterPolicy(
-        frozenset(values(_REMOVED)),
-        frozenset(values(_TOKEN)),
-        "true" in values(_REDACTED),
-        "true" in values(_EARLIER),
+        frozenset(get(_REMOVED)),
+        frozenset(get(_TOKEN)),
+        "true" in get(_REDACTED),
+        "true" in get(_EARLIER),
     )
-    return policy, "true" in values(_RECORDED)
+    return policy, "true" in get(_RECORDED)
+
+
+def stored_policy(repo_path: Path) -> FilterPolicy:
+    """The policy *repo_path*'s config records, its traces not inspected.
+
+    Raises:
+        PolicyReadError: If the record could not be read.
+    """
+    return _stored(repo_path)[0]
 
 
 def add_policy(repo_path: Path, policy: FilterPolicy) -> bool:

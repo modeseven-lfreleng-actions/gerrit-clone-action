@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from gerrit_clone.clone_manager import CloneManager
 from gerrit_clone.content_filter import apply_content_filters, is_shallow_repository
+from gerrit_clone.content_intent_resolve import resolve_filters
 from gerrit_clone.git_utils import (
     get_current_branch,
     get_head_ref,
@@ -26,7 +27,11 @@ from gerrit_clone.git_utils import (
 )
 from gerrit_clone.logging import get_logger
 from gerrit_clone.mirror_branch_repair import BranchRepairContext, fix_default_branches
-from gerrit_clone.mirror_cleanup import collect_paths_to_remove, log_cleanup_outcome
+from gerrit_clone.mirror_cleanup import (
+    collect_paths_to_remove,
+    hold_back_earlier_releases,
+    remove_paths,
+)
 from gerrit_clone.mirror_content_filters import (
     ContentFilterRunner,
     ContentFilterSettings,
@@ -59,6 +64,7 @@ from gerrit_clone.mirror_result_builder import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from gerrit_clone.content_spec import ContentFilterSpec
     from gerrit_clone.github_api import GitHubAPI, GitHubRepo
     from gerrit_clone.models import Config, Project
     from gerrit_clone.progress import ProgressTracker
@@ -171,14 +177,11 @@ class MirrorManager:
             apply_filters=apply_content_filters,
         )
 
-    def _content_filter_settings(self) -> ContentFilterSettings:
-        """Snapshot the content filtering options for this manager."""
-        return ContentFilterSettings(
-            remove_file_patterns=self.remove_file_patterns,
-            git_filter_projects=self.git_filter_projects,
-            redact_secrets=self.redact_secrets,
-            clone_timeout=self.config.clone_timeout,
-        )
+    def _content_filter_settings(
+        self, spec: ContentFilterSpec | None
+    ) -> ContentFilterSettings:
+        """The content filtering for this batch, under *spec*."""
+        return ContentFilterSettings(spec=spec, clone_timeout=self.config.clone_timeout)
 
     def _build_push_url(self, github_repo: GitHubRepo) -> str:
         """Build the push URL for *github_repo*.
@@ -301,15 +304,27 @@ class MirrorManager:
         Returns:
             List of MirrorResult instances
         """
+        # Settled, and written down, first: even a run that selects nothing
+        # decides for the projects a later run selects, and --overwrite
+        # below deletes repositories that are then cloned and filtered again.
+        spec = resolve_filters(
+            self.config.path, self.config.content_filters, persist=True
+        )
         if not projects:
             logger.info("No projects to mirror")
             return []
 
         logger.info(f"Starting mirror of {len(projects)} projects")
 
+        held: list[MirrorResult] = []
         if self.overwrite and self.config.path.exists():
+            projects, held = hold_back_earlier_releases(
+                self.config.path, projects, self.github_org
+            )
             logger.info("🧹 Overwrite enabled - cleaning existing directories...")
             self._cleanup_existing_repos(projects)
+            if not projects:
+                return held
 
         # Step 0b: Pre-flight rate-limit budget check (synchronous)
         logger.info("📊 Checking rate-limit budget before batch operations...")
@@ -324,7 +339,7 @@ class MirrorManager:
         # Step 1b: Apply content filters to cloned repositories
         apply_filters_to_clones(
             clone_results,
-            self._content_filter_settings(),
+            self._content_filter_settings(spec),
             self._content_filter_runner(),
         )
 
@@ -356,7 +371,7 @@ class MirrorManager:
                 mirror_results,
             )
 
-        return mirror_results
+        return held + mirror_results
 
     def _fix_default_branches(
         self,
@@ -410,25 +425,4 @@ class MirrorManager:
         Args:
             projects: List of projects whose directories should be removed
         """
-        paths_to_remove = collect_paths_to_remove(self.config.path, projects)
-        if not paths_to_remove:
-            return
-
-        removed_count = 0
-        failed_removals: list[tuple[str, str]] = []
-
-        for project_name, path in paths_to_remove:
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path)
-                    removed_count += 1
-                    logger.debug(f"Removed {path}")
-                elif path.exists():
-                    path.unlink()
-                    removed_count += 1
-                    logger.debug(f"Removed file {path}")
-            except OSError as e:
-                failed_removals.append((project_name, str(e)))
-                logger.warning(f"Failed to remove {path}: {e}")
-
-        log_cleanup_outcome(removed_count, failed_removals)
+        remove_paths(collect_paths_to_remove(self.config.path, projects), shutil.rmtree)

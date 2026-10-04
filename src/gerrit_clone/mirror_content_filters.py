@@ -3,17 +3,18 @@
 
 """Content filtering of cloned repositories before they are pushed.
 
-Applies the ``--remove-files`` / ``--git-filter`` / ``--redact-secrets``
-options to each successful clone and aborts the batch if any repository
-could not be filtered.
+Filters each successful clone with the run's ``--remove-files`` /
+``--git-filter`` / ``--redact-secrets`` options and the tree's recorded
+intent, and aborts the batch if any repository could not be filtered.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
-from gerrit_clone.content_policy import ContentFilterSpec
+from gerrit_clone.content_spec import ContentFilterSpec
+from gerrit_clone.content_stage import ApplyContentFilters, filter_repository
 from gerrit_clone.logging import get_logger
 
 if TYPE_CHECKING:
@@ -23,23 +24,6 @@ if TYPE_CHECKING:
     from gerrit_clone.models import Config
 
 logger = get_logger(__name__)
-
-
-class ApplyContentFilters(Protocol):
-    """Call signature of :func:`gerrit_clone.content_filter.apply_content_filters`."""
-
-    def __call__(
-        self,
-        repo_path: Path,
-        project_name: str,
-        remove_patterns: list[str] | None = None,
-        git_filter_projects: dict[str, list[str]] | None = None,
-        *,
-        redact_secrets: bool = False,
-        timeout: int = 600,
-    ) -> tuple[bool, str | None]:
-        """Filter the repository at *repo_path*."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -52,19 +36,15 @@ class ContentFilterRunner:
 
 @dataclass(frozen=True)
 class ContentFilterSettings:
-    """Requested content filtering behaviour for a mirror batch."""
+    """Content filtering for a mirror batch: its options and the tree's intent."""
 
-    remove_file_patterns: list[str] | None
-    git_filter_projects: dict[str, list[str]] | None
-    redact_secrets: bool
+    spec: ContentFilterSpec | None
     clone_timeout: int
 
     @property
     def enabled(self) -> bool:
-        """Whether any content filter was requested."""
-        return bool(
-            self.remove_file_patterns or self.git_filter_projects or self.redact_secrets
-        )
+        """Whether anything is filtered at all."""
+        return self.spec is not None
 
 
 @dataclass
@@ -82,70 +62,24 @@ def _filter_one_repo(
     runner: ContentFilterRunner,
     tally: _FilterTally,
 ) -> None:
-    """Apply the requested filters to a single cloned repository."""
-    # Fail closed on shallow repositories when history-
-    # dependent filters are requested: --git-filter /
-    # --redact-secrets rely on full commit history, so a
-    # shallow repo (e.g. created by a prior clone --depth)
-    # can hide older secrets and give a false sense of
-    # safety.  --remove-files targets file paths present at
-    # the branch tips and does not depend on full history
-    # being available (though it may still rewrite history
-    # via git filter-repo when that tool is present), so it
-    # remains safe on a shallow repo and still runs; only
-    # the unsafe history-scanning filters are dropped for
-    # the repo.
-    repo_git_filter = settings.git_filter_projects
-    repo_redact = settings.redact_secrets
-    history_filters_skipped = False
-    if (settings.git_filter_projects or settings.redact_secrets) and (
-        runner.is_shallow(clone_result.path)
-    ):
-        logger.warning(
-            "Refusing to run --git-filter / --redact-secrets "
-            "on shallow repo %s: truncated history can hide "
-            "older secrets. Re-clone without --depth.",
-            clone_result.project.name,
-        )
-        # The requested redaction/rewrite did not run, so
-        # this repo counts as a filtering failure even if
-        # the safe --remove-files step below succeeds.
-        tally.failed += 1
-        tally.failed_projects.add(clone_result.project.name)
-        history_filters_skipped = True
-        repo_git_filter = None
-        repo_redact = False
-        if not settings.remove_file_patterns:
-            # Nothing history-independent left to do.
-            return
-
-    success, error = runner.apply_filters(
+    """Filter one cloned repository, as its project's filters decide."""
+    assert settings.spec is not None  # Checked by apply_filters_to_clones.
+    reason = filter_repository(
+        settings.spec,
         clone_result.path,
-        clone_result.project.name,
-        remove_patterns=settings.remove_file_patterns,
-        git_filter_projects=repo_git_filter,
-        redact_secrets=repo_redact,
-        timeout=settings.clone_timeout,
+        settings.spec.project_name(clone_result.path),
+        settings.clone_timeout,
+        is_shallow=runner.is_shallow,
+        apply=runner.apply_filters,
     )
-    if history_filters_skipped:
-        # Already counted as a failure above; don't also
-        # count the safe --remove-files step as a success.
-        if not success:
-            logger.warning(
-                "Content filter failed for %s: %s",
-                clone_result.project.name,
-                error,
-            )
-    elif success:
+    if reason is None:
         tally.succeeded += 1
-    else:
-        tally.failed += 1
-        tally.failed_projects.add(clone_result.project.name)
-        logger.warning(
-            "Content filter failed for %s: %s",
-            clone_result.project.name,
-            error,
-        )
+        return
+    tally.failed += 1
+    tally.failed_projects.add(clone_result.project.name)
+    logger.warning(
+        "Content filter failed for %s: %s", clone_result.project.name, reason
+    )
 
 
 def with_content_filters(
@@ -154,13 +88,11 @@ def with_content_filters(
     git_filter_projects: dict[str, list[str]] | None,
     redact_secrets: bool,
 ) -> Config:
-    """*config*, carrying the mirror's content filters for its clone pass.
+    """*config*, carrying the mirror's own content-filter options.
 
-    That pass refreshes repositories already on disk, and one these
-    filters rewrote last time is refreshed only under filters covering
-    those (see :mod:`gerrit_clone.refresh_filtered`) -- so without them
-    every filtered repository would be refused before it could be
-    filtered again.
+    :meth:`~gerrit_clone.mirror_manager.MirrorManager.mirror_projects`
+    combines them with what the tree recorded (see
+    :mod:`gerrit_clone.content_intent_resolve`) before it clones anything.
 
     Returns:
         *config* itself when no filter was requested, else a copy.

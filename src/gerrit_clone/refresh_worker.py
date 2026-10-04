@@ -45,7 +45,7 @@ from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from gerrit_clone.content_policy import ContentFilterSpec
+    from gerrit_clone.content_spec import ContentFilterSpec
 
 logger = get_logger(__name__)
 
@@ -186,7 +186,7 @@ class RefreshWorker(FilteredRefreshMixin):
                 logger.debug(f"⊘ {project_name}: Not a Gerrit repository")
                 return result
 
-            if not recorded.empty:
+            if self._needs_staging(repo_path, recorded, bare=bare):
                 return self._refresh_filtered(
                     repo_path, result, recorded, bare=bare, started_at=started_at
                 )

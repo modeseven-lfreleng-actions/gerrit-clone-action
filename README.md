@@ -195,24 +195,35 @@ nothing. If the
 command finds no repositories at all, it says so and exits with status 1
 rather than reporting success.
 
-A repository that content filtering (`--remove-files`, `--git-filter`,
-`--redact-secrets`) has rewritten gets refreshed only by a run whose filters
-include the ones that rewrote it, since fetching forces the original history
-back, filtered content included. Each repository records which filters
-rewrote it, keeping each `--git-filter` token as a SHA-256 digest only.
-Refresh copies such a mirror, fetches and filters the copy, and publishes
-its refs only when every step succeeds, so a failure leaves the mirror
-unchanged. A run without those filters skips the mirror and says which
-filters it lacks; the same applies to re-running `clone` and `mirror`. A
-filtered working copy (`--no-mirror`) is always skipped: re-clone it to
-update it. Every remote of a filtered repository refuses pushes.
-Releases up to v2.2.4 recorded no filters, so refresh skips any
-repository they filtered, whatever filters you pass, and asks you to
-re-clone it. It recognises one by the traces those releases left: the
+Content filtering (`--remove-files`, `--git-filter`, `--redact-secrets`) is a
+decision about a whole clone tree, and later runs keep to it. The first run
+that filters writes the decision to `.gerrit-clone/filter-policy.json` at the
+root of the tree. Every later `clone`, `refresh` or `mirror` in that tree
+applies it, even without the options: to repositories cloned later, to files
+that appear upstream later, and to a repository you delete and clone again.
+Options add to the decision; leaving one out never removes a filter. The file
+keeps each `--git-filter` token as a SHA-256 digest only, so a run must pass
+those tokens again. If a run lacks a project's tokens, `refresh` skips that
+project, `clone` exits with a filtering failure, and `mirror` aborts the
+whole batch before it pushes anything; each gives the number of tokens the
+project needs. A file the tool cannot read stops the run.
+
+Each repository also records which filters rewrote it. Fetching would force
+the original history back, filtered content included, so refresh copies each
+mirror it filters, fetches and filters the copy, and publishes its refs only
+when every step succeeds; a failure leaves the mirror unchanged. A filtered
+working copy (`--no-mirror`) always gets skipped: re-clone it to update it.
+Every remote of a filtered repository refuses pushes. A tree filtered before
+the tree-level file existed gains one from these per-repository records on
+its next run. Releases up to v2.2.4 recorded no filters at all, so refresh
+skips any repository they filtered, whatever filters you pass, and asks you
+to re-clone it, and `mirror --overwrite` leaves it out of the run rather
+than cloning or pushing it: delete it yourself, then clone it again with the
+filters it needs. The tool recognises one by the traces those releases left: the
 commit map a `git filter-repo` rewrite leaves in the git directory, or a
 branch tip committed by the file-removal fallback (`Remove filtered files
 for platform sync`).
-A `--dry-run` applies no content filters.
+A `--dry-run` applies no content filters and records nothing.
 
 Refresh all repositories in the current directory:
 
@@ -873,8 +884,16 @@ export GITHUB_TOKEN=github_pat_your_token_here
 
 **With `--overwrite` flag**:
 
-- Removes and re-clones local repositories
-- Still skips existing GitHub repositories unless `--recreate` is also used
+- Removes and re-clones local repositories, then pushes each one
+  (`git push --mirror`) to its GitHub repository, existing ones included;
+  the tree's recorded content filters still apply first
+- Leaves out of the run any repository a release up to v2.2.4
+  content-filtered, and any directory holding one: those releases recorded
+  no filters to apply again, so the run neither re-clones nor pushes it,
+  `--recreate` leaves its GitHub repository alone, and the manifest lists
+  it as skipped
+- Without `--recreate`, reuses existing GitHub repositories rather than
+  deleting them
 
 **With both `--recreate` and `--overwrite`**:
 

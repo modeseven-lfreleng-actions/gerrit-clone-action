@@ -15,7 +15,6 @@ from gerrit_clone import content_policy
 from gerrit_clone.content_filter import apply_content_filters
 from gerrit_clone.content_origin import NO_PUSH_URL, git_config
 from gerrit_clone.content_policy import (
-    ContentFilterSpec,
     FilterPolicy,
     PolicyReadError,
     PolicyRecordError,
@@ -23,6 +22,7 @@ from gerrit_clone.content_policy import (
     content_filtering,
     recorded_policy,
 )
+from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_manager import RefreshManager
 from gerrit_clone.refresh_worker import RefreshWorker
@@ -236,7 +236,7 @@ class TestUnreadablePolicy:
 
     @staticmethod
     def _unreadable(repo: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
-        if "--get-all" in args:
+        if "--get-regexp" in args:
             return subprocess.CompletedProcess(args, 128, "", "bad config line")
         return git_config(repo, *args)
 

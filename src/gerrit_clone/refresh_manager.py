@@ -36,7 +36,7 @@ from gerrit_clone.refresh_worker import RefreshWorker
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from gerrit_clone.content_policy import ContentFilterSpec
+    from gerrit_clone.content_spec import ContentFilterSpec
 
 logger = get_logger(__name__)
 
@@ -265,7 +265,7 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
             return
 
         bare = worker._is_bare_repository(repo_path)
-        if not recorded.empty:
+        if worker._needs_staging(repo_path, recorded, bare=bare):
             refusal = worker._staged_refusal(repo_path, recorded, bare=bare)
             if refusal is None:
                 result.status = RefreshStatus.SUCCESS

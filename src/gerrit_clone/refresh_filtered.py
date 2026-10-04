@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from gerrit_clone.content_filter import apply_content_filters, is_shallow_repository
 from gerrit_clone.content_origin import block_pushes
 from gerrit_clone.content_policy import add_policy, mark_recorded, recorded_policy
+from gerrit_clone.content_spec import missing_tokens_refusal
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_force import ForceModeMixin
@@ -35,7 +36,8 @@ from gerrit_clone.refresh_git_env import run_git
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from gerrit_clone.content_policy import ContentFilterSpec, FilterPolicy
+    from gerrit_clone.content_policy import FilterPolicy
+    from gerrit_clone.content_spec import ContentFilterSpec
     from gerrit_clone.models import RefreshResult
 
 logger = get_logger(__name__)
@@ -160,12 +162,46 @@ class FilteredRefreshMixin(ForceModeMixin):
             The first reason found, or ``None`` if a staged refresh may go
             ahead.
         """
-        refusal = self._filtered_refusal(repo_path, recorded, bare=bare)
+        refusal = None
+        if not recorded.empty:
+            refusal = self._filtered_refusal(repo_path, recorded, bare=bare)
+        if refusal is None:
+            # After the refusals no option can lift: passing the tokens
+            # would only meet them next.
+            refusal = self._missing_tokens_refusal(repo_path)
         if refusal is None:
             refusal = self._bare_refresh_obstacle(repo_path)
         if refusal is None and self._shallow_history_filtered(repo_path):
             refusal = SHALLOW_HISTORY_REFUSAL
         return refusal
+
+    def _needs_staging(
+        self, repo_path: Path, recorded: FilterPolicy, *, bare: bool
+    ) -> bool:
+        """Whether *repo_path* is refreshed through a staged copy, or refused.
+
+        One the filters rewrote always is.  So is a mirror this run
+        filters, though nothing rewrote it yet: fetched in place, it would
+        hold whatever arrived until the filters ran, and keep it if they
+        then failed.  One lacking tokens its intent replaces is refused.
+        A working copy cannot be staged; it is filtered after it pulls.
+        """
+        if not recorded.empty or self._missing_tokens_refusal(repo_path):
+            return True
+        spec = self.content_filters
+        if not bare or spec is None:
+            return False
+        return not spec.filters_for(spec.project_name(repo_path)).empty
+
+    def _missing_tokens_refusal(self, repo_path: Path) -> str | None:
+        """Why *repo_path* is refused for lacking tokens its intent replaces.
+
+        Checked before any fetch: a token the tree's intent replaces but
+        the run does not supply cannot be replaced in what arrives.
+        """
+        spec = self.content_filters
+        missing = spec.missing_tokens(repo_path) if spec is not None else 0
+        return missing_tokens_refusal(missing) if missing else None
 
     def _shallow_history_filtered(self, repo_path: Path) -> bool:
         """Whether history filters would run on a shallow *repo_path*.
@@ -178,7 +214,7 @@ class FilteredRefreshMixin(ForceModeMixin):
         spec = self.content_filters
         if spec is None:
             return False
-        history = spec.redact_secrets or bool(spec.policy_for(repo_path).token_digests)
+        history = spec.filters_for(spec.project_name(repo_path)).history
         return history and is_shallow_repository(repo_path)
 
     def _staged_refresh(self, repo_path: Path, result: RefreshResult) -> bool:
@@ -213,12 +249,14 @@ class FilteredRefreshMixin(ForceModeMixin):
             return False
         if not self._execute_adaptive_refresh(stage, result, bare=True):
             return False
+        project = spec.project_name(repo_path)
+        filters = spec.filters_for(project)
         filtered, error = apply_content_filters(
             stage,
-            spec.project_name(repo_path),
-            remove_patterns=spec.remove_patterns,
-            git_filter_projects=spec.git_filter_projects,
-            redact_secrets=spec.redact_secrets,
+            project,
+            remove_patterns=filters.remove_patterns,
+            git_filter_projects=filters.git_filter_projects,
+            redact_secrets=filters.redact_secrets,
             timeout=self.timeout,
         )
         if not filtered:

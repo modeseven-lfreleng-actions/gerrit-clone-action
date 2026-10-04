@@ -9,6 +9,7 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -22,6 +23,24 @@ from gerrit_clone.mirror_manager import (
     filter_projects_by_hierarchy,
 )
 from gerrit_clone.models import CloneResult, CloneStatus, Config, Project, ProjectState
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def _options_only() -> Iterator[None]:
+    """Filter with the run's options alone, as these tests' fake trees need.
+
+    They mirror into paths such as ``/tmp/test`` that are never created;
+    recording an intent there would leak from one test into the next.
+    What a tree records is tested in ``test_content_intent_commands.py``.
+    """
+    with patch(
+        "gerrit_clone.mirror_manager.resolve_filters",
+        side_effect=lambda _root, options, **_: options,
+    ):
+        yield
 
 
 class TestFilterProjectsByHierarchy:
@@ -279,13 +298,8 @@ class TestMirrorManager:
 
         assert manager.set_default_branch is False
 
-    def test_its_clone_pass_carries_the_content_filters(self) -> None:
-        """Or every repository they rewrote is refused on the next run.
-
-        The clone pass refreshes what is already on disk, and refreshes a
-        content-filtered repository only under filters covering the ones
-        that rewrote it.
-        """
+    def test_its_config_carries_the_filter_options(self) -> None:
+        """For mirror_projects to combine with what the tree recorded."""
         config = Config(host="gerrit.example.org", port=29418, path=Path("/tmp/m"))
 
         manager = MirrorManager(

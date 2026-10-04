@@ -24,7 +24,8 @@ from gerrit_clone.cli import app
 from gerrit_clone.clone_manager import _refresh_repositories
 from gerrit_clone.content_filter import apply_content_filters
 from gerrit_clone.content_origin import NO_PUSH_URL
-from gerrit_clone.content_policy import ContentFilterSpec, FilterPolicy, add_policy
+from gerrit_clone.content_policy import FilterPolicy, add_policy
+from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.models import (
     CloneStatus,
     Config,
@@ -843,9 +844,6 @@ class TestReporting:
         assert "secret.txt" not in history.split()
         assert _git("config", "remote.origin.pushurl", cwd=mirror) == NO_PUSH_URL
 
-    @pytest.mark.xfail(
-        strict=True, reason="#307: later runs do not yet honour the tree's filters"
-    )
     def test_a_filtered_mirror_is_refreshed_without_restating_its_filters(
         self, tree: Path
     ) -> None:
