@@ -592,9 +592,6 @@ class TestStagedRefresh:
         assert str(stage) in (result.error_message or "")
         assert "unfiltered history" in (result.error_message or "")
 
-    @pytest.mark.xfail(
-        strict=True, reason="The stop reason replaces the error naming the copy"
-    )
     @pytest.mark.parametrize(
         ("raised", "reported"),
         [
