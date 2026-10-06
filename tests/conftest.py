@@ -28,14 +28,18 @@ Integration Test Behavior:
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 import pytest
+
+from gerrit_clone.discovery import GerritDiscoveryError
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -305,6 +309,165 @@ def ensure_git_isolation(
         "ssh_dir": ssh_dir,
         "is_integration": is_integration,
     }
+
+
+# =============================================================================
+# LAYER 3b: No network for unit tests
+# =============================================================================
+
+
+class NetworkUseError(RuntimeError):
+    """A unit test tried to reach the network."""
+
+
+def _is_local_host(host: Any) -> bool:
+    """Whether *host* names this machine: loopback, or a wildcard to bind.
+
+    Checked as an address, never by prefix: ``127.0.0.1.example.org`` is a
+    name anywhere on the network.
+    """
+    if isinstance(host, bytes):
+        host = host.decode(errors="replace")
+    if host in (None, "", "localhost"):
+        return True
+    try:
+        # The whole string: ipaddress takes a scoped IPv6 address as is, and
+        # anything it rejects -- 127.0.0.1%example.org -- is a name.
+        address = ipaddress.ip_address(str(host))
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _is_local(address: Any) -> bool:
+    """Whether a socket *address* stays on this machine.
+
+    A Unix socket path, or a host :func:`_is_local_host` accepts.
+    """
+    if isinstance(address, (str, bytes)):
+        return True
+    return _is_local_host(
+        address[0] if isinstance(address, tuple) and address else None
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Generator[list[str], None, None]:
+    """Keep unit tests off the network, and fail any that try to reach it.
+
+    Building a Gerrit ``Config`` discovers its API base URL over HTTPS,
+    trying several paths against the host.  Where DNS fails fast that
+    costs nothing; on a runner that drops connections instead, every
+    ``Config`` waits out a connect timeout per path, and the suite runs
+    past the job's time limit.  Discovery therefore fails at once here,
+    and ``Config`` falls back to ``https://<host>`` as it does whenever
+    discovery fails.
+
+    Anything else that resolves a name or connects off this machine
+    raises, and is recorded so the test fails even if the code under
+    test swallows the error.  Integration tests keep the network.
+    """
+    attempts: list[str] = []
+    if _is_integration_test(request.node):
+        yield attempts
+        return
+
+    def refuse(what: str) -> NoReturn:
+        attempts.append(what)
+        raise NetworkUseError(f"Unit test tried to reach the network: {what}")
+
+    def offline_discovery(host: str, timeout: float = 30.0) -> str:
+        raise GerritDiscoveryError(f"No API discovery in unit tests ({host})")
+
+    def guarded_lookup(name: str, real: Any) -> Any:
+        def lookup(host: Any, *args: Any, **kwargs: Any) -> Any:
+            if not _is_local_host(host):
+                refuse(f"{name} {host}")
+            return real(host, *args, **kwargs)
+
+        return lookup
+
+    # Reverse lookups are answered here even for this machine: the system
+    # resolver may ask DNS about a loopback address that no hosts entry
+    # names, below Python's socket layer, where nothing would record it.
+
+    def offline_gethostbyaddr(host: Any) -> tuple[str, list[str], list[str]]:
+        if not _is_local_host(host):
+            refuse(f"gethostbyaddr {host}")
+        return "localhost", [], [str(host or "127.0.0.1")]
+
+    def offline_getnameinfo(address: Any, flags: int) -> tuple[str, str]:
+        # Numbers only from the real call, so it never consults a resolver;
+        # a requested name is this machine's, and the port stays numeric.
+        if not _is_local(address):
+            refuse(f"getnameinfo {address}")
+        numeric = socket.NI_NUMERICHOST | socket.NI_NUMERICSERV
+        host, port = real_getnameinfo(address, numeric)
+        if not flags & socket.NI_NUMERICHOST:
+            host = "localhost"
+        return host, port
+
+    def guarded_sendto(sock: socket.socket, data: Any, *rest: Any) -> Any:
+        # sendto(data, address) or sendto(data, flags, address): no connect,
+        # and no lookup for an address given as numbers.
+        if rest and not _is_local(rest[-1]):
+            refuse(f"sendto {rest[-1]}")
+        return real_sendto(sock, data, *rest)
+
+    def guarded_sendmsg(sock: socket.socket, *args: Any) -> Any:
+        # sendmsg(buffers, ancdata, flags, address): a destination only when
+        # all four are given.
+        if len(args) >= 4 and args[3] is not None and not _is_local(args[3]):
+            refuse(f"sendmsg {args[3]}")
+        assert real_sendmsg is not None  # Installed only where it exists.
+        return real_sendmsg(sock, *args)
+
+    def guarded_bind(sock: socket.socket, address: Any) -> Any:
+        # A host name to bind to is resolved natively, past the lookups.
+        if not _is_local(address):
+            refuse(f"bind {address}")
+        return real_bind(sock, address)
+
+    def guarded_connect(sock: socket.socket, address: Any) -> Any:
+        if not _is_local(address):
+            refuse(f"connect {address}")
+        return real_connect(sock, address)
+
+    def guarded_connect_ex(sock: socket.socket, address: Any) -> Any:
+        if not _is_local(address):
+            refuse(f"connect {address}")
+        return real_connect_ex(sock, address)
+
+    real_getnameinfo = socket.getnameinfo
+    real_sendto = socket.socket.sendto
+    real_bind = socket.socket.bind
+    # Not on every platform: Windows has no sendmsg.
+    real_sendmsg = getattr(socket.socket, "sendmsg", None)
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    monkeypatch.setattr(
+        "gerrit_clone.discovery.discover_gerrit_base_url", offline_discovery
+    )
+    # Each resolver entry point, not getaddrinfo alone: the others call the
+    # system resolver themselves.  The reverse lookups are answered above.
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex"):
+        monkeypatch.setattr(socket, name, guarded_lookup(name, getattr(socket, name)))
+    monkeypatch.setattr(socket, "gethostbyaddr", offline_gethostbyaddr)
+    monkeypatch.setattr(socket, "getnameinfo", offline_getnameinfo)
+    monkeypatch.setattr(socket.socket, "bind", guarded_bind)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "sendto", guarded_sendto)
+    if real_sendmsg is not None:
+        monkeypatch.setattr(socket.socket, "sendmsg", guarded_sendmsg)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    yield attempts
+    if attempts:
+        pytest.fail(
+            f"Unit test tried to reach the network: {', '.join(attempts)}",
+            pytrace=False,
+        )
 
 
 # =============================================================================
