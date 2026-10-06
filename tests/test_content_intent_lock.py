@@ -35,8 +35,6 @@ if TYPE_CHECKING:
 #: Holds the lock as another run would; there is none on Windows.
 fcntl = pytest.importorskip("fcntl")
 
-_NO_LOCK = pytest.mark.xfail(strict=True, reason="#309: the intent has no lock yet")
-
 
 #: Another run adding ``b.txt`` to the tree given as its argument.
 _OTHER_RUN = """
@@ -83,7 +81,6 @@ def held(tree: Path) -> Generator[None, None, None]:
 
 
 class TestConcurrentRuns:
-    @_NO_LOCK
     def test_both_runs_additions_survive(self, tree: Path) -> None:
         """This run read the intent, then another started before it wrote."""
         with _holding(tree):
@@ -116,7 +113,6 @@ class TestConcurrentRuns:
 
 
 class TestWaiting:
-    @_NO_LOCK
     def test_a_run_gives_up_with_a_clear_error(
         self, tree: Path, held: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:

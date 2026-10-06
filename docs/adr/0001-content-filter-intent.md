@@ -76,7 +76,13 @@ At the start of a run, before it clones, refreshes or deletes anything:
    held.
 3. Add the run's options.
 4. Write the result, unless the run is a dry run, or a refresh of a path
-   that does not exist.
+   that does not exist. A run writes under the tree's lock,
+   `.gerrit-clone/filter-policy.lock`, held with `flock` (`msvcrt.locking`
+   on Windows): it takes the lock, reads the intent again, adds its
+   additions and writes. Two runs on one tree, such as a `refresh` and a
+   `mirror`, never lose each other's additions. A run waits up
+   to two minutes for another to release the lock, then stops with an
+   error. A run with nothing to add, and a dry run, never take it.
 
 The run then filters every repository with the union of its options and
 the intent for that project, through one shared step
@@ -142,10 +148,6 @@ Tracked in
 - **Per-run history.** The file records the accumulated decision, not a
   log of the runs that made it, nor the refs before and after each
   rewrite.
-- **Concurrent runs.** Within a run, only the main thread writes the
-  file. Two processes on one tree could each extend it, and the last
-  write would win, losing the other's additions; a lock file would close
-  that.
 - **Manifests.** The clone, refresh and mirror manifests do not yet
   summarise the tree's intent; the file itself is the auditable record.
 - **Staged working copies.** A working copy pulls before its filters

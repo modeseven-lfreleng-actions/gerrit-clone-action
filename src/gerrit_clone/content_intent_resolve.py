@@ -14,6 +14,9 @@ written down, before the run clones, refreshes or deletes anything:
    delete a repository without losing what it was filtered with.
 3. The run's own options are added.
 
+Writing it down happens under the tree's intent lock, after reading the
+intent again: another run may have extended it in the meantime.
+
 Nothing is ever taken away.  A repository an earlier release filtered
 without any record is not added: what it was filtered with is unknown,
 and it stays refused on its own (see :mod:`gerrit_clone.content_legacy`).
@@ -28,6 +31,7 @@ from gerrit_clone.content_intent import (
     FilterIntent,
     IntentError,
     find_root,
+    intent_locked,
     load_intent,
     save_intent,
 )
@@ -73,18 +77,24 @@ def resolve_filters(
     """
     root = find_root(start) or start.resolve()
     recorded = load_intent(root)
-    intent = recorded.union(gathered_intent(root))
+    additions = gathered_intent(root)
     if options is not None:
-        intent = intent.union(
+        additions = additions.union(
             FilterIntent.of_options(
                 options.remove_patterns,
                 options.git_filter_projects,
                 options.redact_secrets,
             )
         )
+    intent = recorded.union(additions)
     if persist and intent.scopes != recorded.scopes and not intent.empty:
-        save_intent(root, intent)
-        logger.info(f"Recorded the content-filter intent for {root}")
+        with intent_locked(root):
+            # Another run may have extended it since it was read.
+            current = load_intent(root)
+            intent = current.union(additions)
+            if intent.scopes != current.scopes:
+                save_intent(root, intent)
+                logger.info(f"Recorded the content-filter intent for {root}")
     if persist and not intent.empty:
         # Left visible at a checkout's top level, the intent would be an
         # untracked change there, and refresh would skip the checkout.

@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,11 +40,15 @@ from gerrit_clone.content_policy import FilterPolicy
 from gerrit_clone.models import match_project_pattern
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Generator, Iterable, Mapping
 
 INTENT_DIR = ".gerrit-clone"
 INTENT_FILE = "filter-policy.json"
+LOCK_FILE = "filter-policy.lock"
 SCHEMA = 1
+
+#: Seconds a run waits for another to finish extending the intent.
+LOCK_WAIT = 120.0
 
 #: Scope of every project in the tree.
 ALL_PROJECTS = ("projects", "*")
@@ -154,6 +161,9 @@ def load_intent(root: Path) -> FilterIntent:
 def save_intent(root: Path, intent: FilterIntent) -> None:
     """Write *intent* for the tree at *root*, all of it or none of it.
 
+    Hold :func:`intent_locked` around reading the intent, extending it
+    and calling this, or another run's additions can be lost.
+
     Raises:
         IntentError: If it could not be written.
     """
@@ -173,6 +183,77 @@ def save_intent(root: Path, intent: FilterIntent) -> None:
             raise
     except OSError as exc:
         raise IntentError(f"Could not write the filter intent {path}: {exc}") from exc
+
+
+@contextmanager
+def intent_locked(root: Path) -> Generator[None, None, None]:
+    """Hold the tree's intent lock, so runs extend the intent one at a time.
+
+    Every run reads the intent, adds to it and writes it back.  Two at
+    once would each write what they read, and the last write would undo
+    the other's additions -- filtering that run had just decided on.
+    The lock file stays in place: deleting it would let a run lock a
+    file another had already replaced.
+
+    Raises:
+        IntentError: If the lock could not be taken within
+            :data:`LOCK_WAIT` seconds, or not at all.
+    """
+    path = root / INTENT_DIR / LOCK_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        raise IntentError(
+            f"Could not open the filter-intent lock {path}: {exc}"
+        ) from exc
+    try:
+        deadline = time.monotonic() + LOCK_WAIT
+        while not _try_lock(handle):
+            if time.monotonic() >= deadline:
+                raise IntentError(
+                    f"Gave up after {LOCK_WAIT:.0f}s waiting for another "
+                    f"gerrit-clone run on this tree to release {path}; run "
+                    f"again once it finishes"
+                )
+            time.sleep(0.1)
+        try:
+            yield
+        finally:
+            _unlock(handle)
+    finally:
+        os.close(handle)
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock(handle: int) -> bool:
+        """Take the lock on *handle* if no other process holds it."""
+        try:
+            msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False  # msvcrt reports a held lock as a plain OSError.
+        return True
+
+    def _unlock(handle: int) -> None:
+        msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(handle: int) -> bool:
+        """Take the lock on *handle* if no other process holds it."""
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        except OSError as exc:
+            raise IntentError(f"Could not lock the filter intent: {exc}") from exc
+        return True
+
+    def _unlock(handle: int) -> None:
+        fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _encode(intent: FilterIntent) -> dict[str, Any]:
