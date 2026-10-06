@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from rich.progress import TaskID
 
-    from gerrit_clone.content_policy import ContentFilterSpec
+    from gerrit_clone.content_spec import ContentFilterSpec
     from gerrit_clone.models import Config, RetryPolicy
 
 logger = get_logger(__name__)

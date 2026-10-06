@@ -36,7 +36,7 @@ from gerrit_clone.model_project_filters import (
 from gerrit_clone.model_refresh_results import RefreshBatchResult, RefreshResult
 
 if TYPE_CHECKING:
-    from gerrit_clone.content_policy import ContentFilterSpec
+    from gerrit_clone.content_spec import ContentFilterSpec
 
 __all__ = [
     "BatchResult",

@@ -21,7 +21,9 @@ from rich.text import Text
 from gerrit_clone import cli_hooks
 from gerrit_clone.cli_app import format_version_string
 from gerrit_clone.config import ConfigurationError, load_config
-from gerrit_clone.content_policy import ContentFilterSpec
+from gerrit_clone.content_intent import IntentError
+from gerrit_clone.content_intent_resolve import resolve_filters
+from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
@@ -318,13 +320,19 @@ def build_config(
     except ConfigurationError as e:
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
-    config.content_filters = ContentFilterSpec.from_options(
+    options = ContentFilterSpec.from_options(
         request.remove_files, request.git_filter, request.redact_secrets, config.path
     )
+    try:
+        # Written down before anything is cloned or refreshed.
+        config.content_filters = resolve_filters(config.path, options, persist=True)
+    except IntentError as e:
+        _report_configuration_error(session, e)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     return config
 
 
-def _report_configuration_error(session: CliSession, error: ConfigurationError) -> None:
+def _report_configuration_error(session: CliSession, error: Exception) -> None:
     """Log and display a configuration error before aborting."""
     if session.file_logger:
         session.file_logger.error("Configuration error: %s", str(error))

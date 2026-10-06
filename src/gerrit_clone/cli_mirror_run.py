@@ -28,6 +28,7 @@ from gerrit_clone.cli_mirror_setup import (
     validate_request,
 )
 from gerrit_clone.content_filter import normalize_file_patterns, parse_git_filter_spec
+from gerrit_clone.content_intent import IntentError
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.mirror_manager import (
     MirrorBatchResult,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
     from gerrit_clone.cli_mirror_models import MirrorRequest
     from gerrit_clone.cli_session import CliSession
+    from gerrit_clone.mirror_models import MirrorResult
     from gerrit_clone.models import Config, Project
 
 
@@ -102,11 +104,17 @@ def run_mirror(request: MirrorRequest, session: CliSession) -> None:
         redact_secrets=request.redact_secrets,
     )
 
+    if not projects_to_mirror:
+        # Nothing to mirror, but the run's filters still decide for the
+        # projects a later run selects: the manager records them.
+        _mirror(mirror_manager, [], console)
+        raise typer.Exit(0)
+
     started_at = datetime.now(UTC)
     if not request.quiet:
         console.print("🚀 Starting mirror operation...")
 
-    results = mirror_manager.mirror_projects(projects_to_mirror)
+    results = _mirror(mirror_manager, projects_to_mirror, console)
 
     completed_at = datetime.now(UTC)
 
@@ -130,6 +138,17 @@ def run_mirror(request: MirrorRequest, session: CliSession) -> None:
     _finish(request, session, batch_result)
 
 
+def _mirror(
+    mirror_manager: MirrorManager, projects: list[Project], console: Console
+) -> list[MirrorResult]:
+    """Mirror *projects*; a tree whose filter intent is unreadable stops the run."""
+    try:
+        return mirror_manager.mirror_projects(projects)
+    except IntentError as exc:
+        console.print(f"[red]❌ {exc}[/red]")
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from exc
+
+
 def _select_projects(
     request: MirrorRequest,
     console: Console,
@@ -137,12 +156,16 @@ def _select_projects(
     project_filters: list[str],
     exclude_filters: list[str],
 ) -> list[Project]:
-    """Discover projects and apply the include/exclude filters."""
+    """Discover projects and apply the include/exclude filters.
+
+    Returns:
+        The projects to mirror; empty, after saying so, if none are.
+    """
     all_projects, _discovery_stats = cli_hooks.discover_projects(config)
 
     if not all_projects:
         console.print("[yellow]No projects found on Gerrit server[/yellow]")
-        raise typer.Exit(0)
+        return []
 
     # Filter projects by include/exclude patterns
     if project_filters or exclude_filters:
@@ -156,7 +179,7 @@ def _select_projects(
 
     if not projects_to_mirror:
         console.print("[yellow]No projects matched the specified filters[/yellow]")
-        raise typer.Exit(0)
+        return []
 
     if not request.quiet:
         console.print(

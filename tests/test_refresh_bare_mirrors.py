@@ -24,7 +24,8 @@ from gerrit_clone.cli import app
 from gerrit_clone.clone_manager import _refresh_repositories
 from gerrit_clone.content_filter import apply_content_filters
 from gerrit_clone.content_origin import NO_PUSH_URL
-from gerrit_clone.content_policy import ContentFilterSpec, FilterPolicy, add_policy
+from gerrit_clone.content_policy import FilterPolicy, add_policy
+from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.models import (
     CloneStatus,
     Config,
@@ -37,6 +38,7 @@ from gerrit_clone.refresh_filtered import SHALLOW_HISTORY_REFUSAL
 from gerrit_clone.refresh_git_env import run_git
 from gerrit_clone.refresh_manager import RefreshManager, refresh_repositories
 from gerrit_clone.refresh_worker import FILTERED_WORKING_COPY_REFUSAL, RefreshWorker
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -524,7 +526,8 @@ class TestStagedRefresh:
         ) -> subprocess.CompletedProcess[str]:
             if "--get-regexp" in cmd:
                 return subprocess.CompletedProcess(cmd, 128, "", "bad config line")
-            return run_git(cmd, *args, **kwargs)
+            ran: subprocess.CompletedProcess[str] = run_git(cmd, *args, **kwargs)
+            return ran
 
         with patch("gerrit_clone.refresh_filtered.run_git", unreadable):
             result = _worker(filters=_spec(tree)).refresh_repository(mirror)
@@ -562,7 +565,8 @@ class TestStagedRefresh:
         ) -> subprocess.CompletedProcess[str]:
             if cmd[1:3] == ["remote", "remove"]:
                 return subprocess.CompletedProcess(cmd, 1, "", "could not remove")
-            return run_git(cmd, *args, **kwargs)
+            ran: subprocess.CompletedProcess[str] = run_git(cmd, *args, **kwargs)
+            return ran
 
         with patch("gerrit_clone.refresh_filtered.run_git", stuck):
             result = _worker(filters=_spec(tree)).refresh_repository(mirror)
@@ -586,6 +590,40 @@ class TestStagedRefresh:
 
         [stage] = _stages_left(tree)
         assert result.status == RefreshStatus.FAILED
+        assert str(stage) in (result.error_message or "")
+        assert "unfiltered history" in (result.error_message or "")
+
+    @pytest.mark.parametrize(
+        ("raised", "reported"),
+        [
+            (ProcessAbandonedError("abandoned"), "Refresh abandoned"),
+            (RuntimeError("boom"), "Unexpected error: boom"),
+        ],
+        ids=["abandoned", "unexpected"],
+    )
+    def test_a_copy_left_behind_is_still_named_when_the_refresh_stops(
+        self, tree: Path, raised: BaseException, reported: str
+    ) -> None:
+        """Not overwritten by the reason the refresh stopped."""
+        mirror = _filtered_mirror(tree)
+        _advance(tree.parent / "up-parent")
+
+        def undeletable(path: Path, ignore_errors: bool = False) -> None:
+            if not ignore_errors:
+                raise PermissionError(13, "Permission denied", str(path))
+
+        with (
+            patch("gerrit_clone.refresh_filtered.shutil.rmtree", undeletable),
+            patch(
+                "gerrit_clone.refresh_filtered.apply_content_filters",
+                side_effect=raised,
+            ),
+        ):
+            result = _worker(filters=_spec(tree)).refresh_repository(mirror)
+
+        [stage] = _stages_left(tree)
+        assert result.status == RefreshStatus.FAILED
+        assert reported in (result.error_message or "")
         assert str(stage) in (result.error_message or "")
         assert "unfiltered history" in (result.error_message or "")
 
@@ -806,13 +844,13 @@ class TestReporting:
         assert "secret.txt" not in history.split()
         assert _git("config", "remote.origin.pushurl", cwd=mirror) == NO_PUSH_URL
 
-    def test_a_filtered_mirror_is_refused_a_refresh_without_filters(
+    def test_a_filtered_mirror_is_refreshed_without_restating_its_filters(
         self, tree: Path
     ) -> None:
-        """Fetching ``+refs/*:refs/*`` would force the original refs back.
+        """The tree recorded them; the run applies them as before.
 
-        The file the filter removed would return with them, and nothing
-        in the run would remove it again.
+        Fetching ``+refs/*:refs/*`` alone would force the original refs
+        back, the removed file with them.
         """
         upstream = tree.parent / "up-parent"
         (upstream / "secret.txt").write_text("hunter2\n")
@@ -822,15 +860,13 @@ class TestReporting:
         filtered = CliRunner().invoke(app, [*command, "--remove-files", "secret.txt"])
         assert filtered.exit_code == 0, filtered.output
         mirror = tree / "com/parent"
-        before = _git("rev-parse", "main", cwd=mirror)
         _advance(upstream)
 
         again = CliRunner().invoke(app, command)
 
-        # The child, which the filter left alone, is refreshed as usual.
         assert again.exit_code == 0, again.output
-        assert "1 of 2 repositories were not refreshed" in again.output
-        assert _git("rev-parse", "main", cwd=mirror) == before
+        assert "All repositories refreshed successfully" in again.output
+        assert _git("show", "main:file.txt", cwd=mirror) == "two"
         history = _git("log", "--all", "--name-only", "--format=", cwd=mirror)
         assert "secret.txt" not in history.split()
 

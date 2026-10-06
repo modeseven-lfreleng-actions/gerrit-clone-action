@@ -20,13 +20,10 @@ from gerrit_clone.cli_refresh_report import (
     show_refresh_results,
     write_refresh_manifest,
 )
-from gerrit_clone.content_filter import (
-    apply_content_filters,
-    is_shallow_repository,
-    normalize_file_patterns,
-    parse_git_filter_spec,
-)
-from gerrit_clone.content_policy import ContentFilterSpec
+from gerrit_clone.content_intent import IntentError
+from gerrit_clone.content_intent_resolve import resolve_filters
+from gerrit_clone.content_spec import ContentFilterSpec
+from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
@@ -34,7 +31,6 @@ from gerrit_clone.file_logging import (
     init_logging,
 )
 from gerrit_clone.models import normalize_project_list
-from gerrit_clone.refresh_discovery import project_name_for
 from gerrit_clone.refresh_manager import refresh_repositories
 
 if TYPE_CHECKING:
@@ -42,7 +38,7 @@ if TYPE_CHECKING:
 
     from rich.console import Console
 
-    from gerrit_clone.models import RefreshBatchResult, RefreshResult
+    from gerrit_clone.models import RefreshBatchResult
 
 
 @dataclass(frozen=True)
@@ -91,6 +87,7 @@ def prepare_refresh(request: RefreshRequest, console: Console) -> None:
 
 def run_refresh(request: RefreshRequest, console: Console) -> None:
     """Refresh the repositories found beneath the requested output path."""
+    spec = _resolve_filters(request, console)
     result = refresh_repositories(
         base_path=request.output_path,
         config=None,
@@ -111,15 +108,10 @@ def run_refresh(request: RefreshRequest, console: Console) -> None:
         exclude_projects=request.exclude_projects if request.exclude_projects else None,
         # Judged by what a real run with these options would do, a dry
         # run included: it predicts that run, filters and all.
-        content_filters=ContentFilterSpec.from_options(
-            request.remove_files,
-            request.git_filter,
-            request.redact_secrets,
-            request.output_path,
-        ),
+        content_filters=spec,
     )
 
-    _apply_content_filters(request, console, result)
+    _apply_content_filters(request, console, result, spec)
 
     # Display results
     show_refresh_results(console, result, request.dry_run)
@@ -207,137 +199,75 @@ def _show_configuration(request: RefreshRequest, console: Console) -> None:
     console.print()
 
 
-def _filters_requested(request: RefreshRequest) -> bool:
-    """Whether the run filters the content of what it refreshes."""
-    return bool(request.remove_files or request.git_filter or request.redact_secrets)
+def _resolve_filters(
+    request: RefreshRequest, console: Console
+) -> ContentFilterSpec | None:
+    """The run's filters: its options and the tree's recorded intent.
+
+    A dry run records nothing, and neither does a run whose output path
+    does not exist -- it has no tree to record for.
+    """
+    try:
+        return resolve_filters(
+            request.output_path,
+            ContentFilterSpec.from_options(
+                request.remove_files,
+                request.git_filter,
+                request.redact_secrets,
+                request.output_path,
+            ),
+            persist=not request.dry_run and request.output_path.is_dir(),
+        )
+    except IntentError as exc:
+        console.print(f"[red]❌ {exc}[/red]")
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR.value) from exc
 
 
 def _apply_content_filters(
-    request: RefreshRequest, console: Console, result: RefreshBatchResult
+    request: RefreshRequest,
+    console: Console,
+    result: RefreshBatchResult,
+    spec: ContentFilterSpec | None,
 ) -> None:
-    """Apply content filters to cleanly refreshed repositories, if requested."""
+    """Filter what refreshed cleanly, as each project's filters decide."""
+    if spec is None:
+        return
     if request.dry_run:
         # A dry run changes nothing, and filtering rewrites history.
-        if _filters_requested(request) and not request.quiet:
+        if not request.quiet:
             console.print("[cyan]Dry run: content filters not applied[/cyan]")
-        return
-    remove_file_patterns = (
-        normalize_file_patterns([request.remove_files])
-        if request.remove_files
-        else None
-    )
-    git_filter_projects = (
-        parse_git_filter_spec(request.git_filter) if request.git_filter else None
-    )
-    if not (remove_file_patterns or git_filter_projects or request.redact_secrets):
         return
 
     if not request.quiet:
         console.print("[cyan]🔧 Applying content filters...[/cyan]")
     filter_success = filter_fail = 0
     for rr in result.results:
-        # Only apply content filters to repositories that
-        # refreshed cleanly (SUCCESS / UP_TO_DATE).  Skipping
-        # merely FAILED results is not enough: statuses like
-        # SKIPPED, CONFLICTS, NOT_GIT_REPO, NOT_GERRIT_REPO,
-        # UNCOMMITTED_CHANGES and DETACHED_HEAD also leave the
-        # worktree in a state where rewriting history or
-        # removing files would be unsafe or raise.  The
-        # ``RefreshResult.success`` property captures exactly
-        # the SUCCESS / UP_TO_DATE set.
+        # Only what refreshed cleanly (SUCCESS / UP_TO_DATE): every other
+        # status leaves the repository in a state where rewriting its
+        # history or removing files would be unsafe or raise.
         if not rr.success:
             continue
         if rr.content_filtered:
             # Re-filtered as part of its staged refresh already.
             filter_success += 1
             continue
-        succeeded, failed = _filter_repository(
-            request, console, rr, remove_file_patterns, git_filter_projects
+        reason = filter_repository(
+            spec, rr.path, spec.project_name(rr.path), request.timeout
         )
-        filter_success += succeeded
-        filter_fail += failed
+        if reason is None:
+            filter_success += 1
+            continue
+        filter_fail += 1
+        if not request.quiet:
+            console.print(
+                f"[yellow]⚠️  Filter failed for {rr.project_name}: {reason}[/yellow]"
+            )
     if not request.quiet:
         console.print(
             f"[cyan]Content filtering: {filter_success} succeeded, {filter_fail} failed[/cyan]"
         )
     if filter_fail > 0:
         raise typer.Exit(ExitCode.GENERAL_ERROR)
-
-
-def _filter_repository(
-    request: RefreshRequest,
-    console: Console,
-    result: RefreshResult,
-    remove_file_patterns: list[str] | None,
-    git_filter_projects: dict[str, list[str]] | None,
-) -> tuple[int, int]:
-    """Filter one refreshed repository.
-
-    Returns:
-        Tuple of (successes, failures) to add to the run totals
-    """
-    # Fail closed on shallow repositories when history-
-    # dependent filters are requested: --git-filter /
-    # --redact-secrets rely on full history, so a shallow
-    # repo can hide older secrets (and a later unshallow
-    # fetch could reintroduce blocked content), giving a
-    # false sense of safety.  --remove-files targets file
-    # paths present at the branch tips and does not depend
-    # on full history being available (though it may still
-    # rewrite history via git filter-repo when that tool is
-    # present), so it is still applied below — we only drop
-    # the unsafe history-scanning filters for this repo.
-    # (clone applies the same guard up-front via
-    # config.depth; refresh operates on pre-existing local
-    # repos, so it must probe each repo for shallowness.)
-    repo_git_filter = git_filter_projects
-    repo_redact = request.redact_secrets
-    history_filters_skipped = False
-    if (git_filter_projects or request.redact_secrets) and (
-        is_shallow_repository(result.path)
-    ):
-        if not request.quiet:
-            console.print(
-                "[red]❌ Refusing to run --git-filter / "
-                "--redact-secrets on shallow repo "
-                f"{result.project_name}: truncated history can hide "
-                "older secrets. Re-clone without --depth.[/red]"
-            )
-        # The requested redaction/rewrite did not run, so
-        # this repo counts as a filtering failure even if
-        # the safe --remove-files step below succeeds.
-        history_filters_skipped = True
-        repo_git_filter = None
-        repo_redact = False
-        if not remove_file_patterns:
-            # Nothing history-independent left to do.
-            return 0, 1
-    success, error = apply_content_filters(
-        result.path,
-        # Matched against --git-filter patterns, which name projects
-        # hierarchically as clone-time filtering does: com/parent, not
-        # the parent the refresh result displays.
-        project_name_for(result.path, request.output_path.resolve()),
-        remove_patterns=remove_file_patterns,
-        git_filter_projects=repo_git_filter,
-        redact_secrets=repo_redact,
-        timeout=request.timeout,
-    )
-    if history_filters_skipped:
-        # Already counted as a failure above; don't also count
-        # the safe --remove-files step as a success.
-        if not success and not request.quiet:
-            console.print(
-                f"[yellow]⚠️  Filter failed for {result.project_name}: {error}[/yellow]"
-            )
-        return 0, 1
-    if success:
-        return 1, 0
-    if not request.quiet:
-        console.print(
-            f"[yellow]⚠️  Filter failed for {result.project_name}: {error}[/yellow]"
-        )
-    return 0, 1
 
 
 def _write_manifest(

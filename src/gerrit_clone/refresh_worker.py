@@ -45,7 +45,7 @@ from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from gerrit_clone.content_policy import ContentFilterSpec
+    from gerrit_clone.content_spec import ContentFilterSpec
 
 logger = get_logger(__name__)
 
@@ -64,6 +64,16 @@ __all__ = [
     "StashOutcome",
     "time",
 ]
+
+
+def _keeping_earlier(message: str, earlier: str | None) -> str:
+    """*message*, followed by any *earlier* error it would otherwise replace.
+
+    A staged refresh that could not remove its copy has said where it
+    is, and that it may hold unfiltered history; an abandon or error
+    after that must not lose it.
+    """
+    return f"{message}; {earlier}" if earlier else message
 
 
 class RefreshWorker(FilteredRefreshMixin):
@@ -176,7 +186,7 @@ class RefreshWorker(FilteredRefreshMixin):
                 logger.debug(f"⊘ {project_name}: Not a Gerrit repository")
                 return result
 
-            if not recorded.empty:
+            if self._needs_staging(repo_path, recorded, bare=bare):
                 return self._refresh_filtered(
                     repo_path, result, recorded, bare=bare, started_at=started_at
                 )
@@ -200,12 +210,16 @@ class RefreshWorker(FilteredRefreshMixin):
             # The batch gave up: no failure to log, and nothing more may be
             # launched -- a stash it made is left for `git stash list`.
             result.status = RefreshStatus.FAILED
-            result.error_message = "Refresh abandoned before it finished"
+            result.error_message = _keeping_earlier(
+                "Refresh abandoned before it finished", result.error_message
+            )
             logger.debug(f"⊘ {project_name}: refresh abandoned")
 
         except Exception as e:
             result.status = RefreshStatus.FAILED
-            result.error_message = f"Unexpected error: {e}"
+            result.error_message = _keeping_earlier(
+                f"Unexpected error: {e}", result.error_message
+            )
             self._stamp_completion(result, started_at)
             logger.error(f"❌ {project_name}: {e}")
             return result

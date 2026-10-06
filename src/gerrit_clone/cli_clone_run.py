@@ -21,12 +21,7 @@ from rich.text import Text
 from gerrit_clone import __version__, cli_hooks
 from gerrit_clone import cli_clone_setup as setup
 from gerrit_clone.cli_app import is_github_actions_context
-from gerrit_clone.content_filter import (
-    apply_content_filters,
-    is_shallow_repository,
-    normalize_file_patterns,
-    parse_git_filter_spec,
-)
+from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.error_codes import DiscoveryError, ExitCode
 from gerrit_clone.rich_status import (
     handle_crash_display,
@@ -37,7 +32,8 @@ from gerrit_clone.rich_status import (
 if TYPE_CHECKING:
     from gerrit_clone.cli_clone_models import CloneRequest
     from gerrit_clone.cli_session import CliSession
-    from gerrit_clone.models import BatchResult, CloneResult, Config
+    from gerrit_clone.content_spec import ContentFilterSpec
+    from gerrit_clone.models import BatchResult, Config
 
 
 def run_clone(request: CloneRequest, session: CliSession) -> None:
@@ -70,7 +66,7 @@ def run_clone(request: CloneRequest, session: CliSession) -> None:
         setup.show_startup_banner(console, config)
 
     batch_result = _clone_repositories(config)
-    _apply_content_filters(request, console, batch_result)
+    _apply_content_filters(request, console, batch_result, config.content_filters)
     _report_results(request, session, batch_result)
     exit_code = _determine_exit_code(session, batch_result)
 
@@ -105,116 +101,53 @@ def _clone_repositories(config: Config) -> BatchResult:
 
 
 def _apply_content_filters(
-    request: CloneRequest, console: Console, batch_result: BatchResult
+    request: CloneRequest,
+    console: Console,
+    batch_result: BatchResult,
+    spec: ContentFilterSpec | None,
 ) -> None:
-    """Apply content filters to successfully cloned repositories, if requested."""
-    remove_file_patterns = (
-        normalize_file_patterns([request.remove_files])
-        if request.remove_files
-        else None
-    )
-    git_filter_projects = (
-        parse_git_filter_spec(request.git_filter) if request.git_filter else None
-    )
-    if not (remove_file_patterns or git_filter_projects or request.redact_secrets):
+    """Filter every successful clone, as each project's filters decide."""
+    if spec is None:
         return
 
     if not request.quiet:
         console.print("[cyan]🔧 Applying content filters...[/cyan]")
     filter_success = filter_fail = 0
     for cr in batch_result.results:
+        if cr.skipped and cr.path and spec.missing_tokens(cr.path):
+            # The refresh pass refused it for the tokens, before any
+            # fetch.  Clone reports that as the filtering failure it is,
+            # whether or not upstream had moved on.
+            filter_fail += 1
+            if not request.quiet:
+                console.print(
+                    f"[yellow]⚠️  Filter failed for {cr.project.name}: "
+                    f"{cr.error_message}[/yellow]"
+                )
+            continue
         if not cr.success or not cr.path:
             continue
         if cr.content_filtered:
             # Re-filtered as part of its staged refresh already.
             filter_success += 1
             continue
-        succeeded, failed = _filter_repository(
-            request, console, cr, remove_file_patterns, git_filter_projects
+        reason = filter_repository(
+            spec, cr.path, spec.project_name(cr.path), request.clone_timeout
         )
-        filter_success += succeeded
-        filter_fail += failed
+        if reason is None:
+            filter_success += 1
+            continue
+        filter_fail += 1
+        if not request.quiet:
+            console.print(
+                f"[yellow]⚠️  Filter failed for {cr.project.name}: {reason}[/yellow]"
+            )
     if not request.quiet:
         console.print(
             f"[cyan]Content filtering: {filter_success} succeeded, {filter_fail} failed[/cyan]"
         )
     if filter_fail > 0:
         raise typer.Exit(ExitCode.GENERAL_ERROR)
-
-
-def _filter_repository(
-    request: CloneRequest,
-    console: Console,
-    result: CloneResult,
-    remove_file_patterns: list[str] | None,
-    git_filter_projects: dict[str, list[str]] | None,
-) -> tuple[int, int]:
-    """Filter one cloned repository.
-
-    Returns:
-        Tuple of (successes, failures) to add to the run totals
-    """
-    # Fail closed on shallow repositories when history-
-    # dependent filters are requested: --git-filter /
-    # --redact-secrets rely on the full commit history, so
-    # a shallow repo can hide older secrets (and a later
-    # unshallow fetch could reintroduce blocked content),
-    # giving a false sense of safety.  Probe each repo
-    # individually rather than only checking config.depth:
-    # a repo that already existed locally (e.g. cloned
-    # earlier with --depth) is shallow even when this run
-    # sets no --depth.  --remove-files targets file paths
-    # present at the branch tips and does not depend on
-    # full history being available (though it may still
-    # rewrite history via git filter-repo when that tool
-    # is present), so it is still applied; only the unsafe
-    # history-scanning filters are dropped for the shallow
-    # repo.
-    repo_git_filter = git_filter_projects
-    repo_redact = request.redact_secrets
-    history_filters_skipped = False
-    if (git_filter_projects or request.redact_secrets) and (
-        is_shallow_repository(result.path)
-    ):
-        if not request.quiet:
-            console.print(
-                "[red]❌ Refusing to run --git-filter / "
-                "--redact-secrets on shallow repo "
-                f"{result.project.name}: truncated history can hide "
-                "older secrets. Re-clone without --depth.[/red]"
-            )
-        # The requested redaction/rewrite did not run, so
-        # this repo counts as a filtering failure even if
-        # the safe --remove-files step below succeeds.
-        history_filters_skipped = True
-        repo_git_filter = None
-        repo_redact = False
-        if not remove_file_patterns:
-            # Nothing history-independent left to do.
-            return 0, 1
-    success, error = apply_content_filters(
-        result.path,
-        result.project.name,
-        remove_patterns=remove_file_patterns,
-        git_filter_projects=repo_git_filter,
-        redact_secrets=repo_redact,
-        timeout=request.clone_timeout,
-    )
-    if history_filters_skipped:
-        # Already counted as a failure above; don't also count
-        # the safe --remove-files step as a success.
-        if not success and not request.quiet:
-            console.print(
-                f"[yellow]⚠️  Filter failed for {result.project.name}: {error}[/yellow]"
-            )
-        return 0, 1
-    if success:
-        return 1, 0
-    if not request.quiet:
-        console.print(
-            f"[yellow]⚠️  Filter failed for {result.project.name}: {error}[/yellow]"
-        )
-    return 0, 1
 
 
 def _report_results(
