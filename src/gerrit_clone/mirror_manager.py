@@ -308,7 +308,10 @@ class MirrorManager:
         # decides for the projects a later run selects, and --overwrite
         # below deletes repositories that are then cloned and filtered again.
         spec = resolve_filters(
-            self.config.path, self.config.content_filters, persist=True
+            self.config.path,
+            self.config.content_filters,
+            persist=True,
+            command="mirror",
         )
         if not projects:
             logger.info("No projects to mirror")

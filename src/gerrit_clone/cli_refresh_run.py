@@ -295,6 +295,7 @@ def _resolve_filters(
                 request.output_path,
             ),
             persist=not request.dry_run and request.output_path.is_dir(),
+            command="refresh",
         )
     except IntentError as exc:
         console.print(f"[red]❌ {exc}[/red]")

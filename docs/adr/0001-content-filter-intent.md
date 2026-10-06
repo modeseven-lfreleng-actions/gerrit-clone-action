@@ -96,6 +96,38 @@ filters never rewrote pulls first and gets filtered after; a failed
 filter there exits non-zero and leaves the checkout for the operator,
 as before this decision.
 
+### Journal
+
+`<tree>/.gerrit-clone/filter-journal.jsonl` records the runs that
+carried the intent out. Each rewrite, through the one shared step,
+appends two JSON lines:
+
+- **Before it starts:** the command and release, the project and
+  repository, the method (`git filter-repo` or the worktree fallback),
+  the filters, with tokens as digests only, and a SHA-256 digest of every
+  ref. The tool flushes this line to disk first, and does not filter a
+  repository it cannot journal.
+- **Once it ends:** whether it worked, and the digest of the refs it
+  left.
+
+The intent stays the decision and the journal an audit trail, with one
+exception. A start without a successful end, from a crash or a rewrite
+that failed part-way, may have left its repository partly rewritten. Its
+filters stay in force, added to the intent at the next run, until a
+later rewrite of that project completes under filters that cover them.
+
+Every entry carries a `schema`, and one from another release stops the
+run. The ref digests are the journal's evidence, so the tool never
+leaves one out: if it cannot read the refs before a rewrite, it does
+not filter the repository, and if it cannot read them after, it writes
+no end, which leaves the start binding.
+
+Appends take the tree's lock, so lines from different runs never
+interleave. A crash while writing leaves a partial last line: readers
+skip it and the next append removes it, since no rewrite followed it.
+Any other line the tool cannot read stops the run, as an unreadable
+intent does.
+
 ### Tokens
 
 `--remove-files` and `--redact-secrets` re-apply from the intent alone.
@@ -145,9 +177,6 @@ clones it again with the filters it needs; that run then records them.
 Tracked in
 [#309](https://github.com/lfreleng-actions/gerrit-clone-action/issues/309):
 
-- **Per-run history.** The file records the accumulated decision, not a
-  log of the runs that made it, nor the refs before and after each
-  rewrite.
 - **Manifests.** The clone, refresh and mirror manifests do not yet
   summarise the tree's intent; the file itself is the auditable record.
 - **Staged working copies.** A working copy pulls before its filters

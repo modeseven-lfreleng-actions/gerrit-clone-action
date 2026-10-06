@@ -28,6 +28,7 @@ from gerrit_clone.content_filter import apply_content_filters, is_shallow_reposi
 from gerrit_clone.content_origin import block_pushes
 from gerrit_clone.content_policy import add_policy, mark_recorded, recorded_policy
 from gerrit_clone.content_spec import missing_tokens_refusal
+from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_force import ForceModeMixin
@@ -249,17 +250,15 @@ class FilteredRefreshMixin(ForceModeMixin):
             return False
         if not self._execute_adaptive_refresh(stage, result, bare=True):
             return False
-        project = spec.project_name(repo_path)
-        filters = spec.filters_for(project)
-        filtered, error = apply_content_filters(
+        # Looked up here, so a test patching this module's name sees it.
+        error = filter_repository(
+            spec,
             stage,
-            project,
-            remove_patterns=filters.remove_patterns,
-            git_filter_projects=filters.git_filter_projects,
-            redact_secrets=filters.redact_secrets,
-            timeout=self.timeout,
+            spec.project_name(repo_path),
+            self.timeout,
+            apply=apply_content_filters,
         )
-        if not filtered:
+        if error is not None:
             result.error_message = (
                 f"Re-filtering the refreshed copy failed, so the "
                 f"repository was left as it was: {error}"

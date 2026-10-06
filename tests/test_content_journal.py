@@ -18,6 +18,7 @@ import hashlib
 import json
 import subprocess
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -26,12 +27,10 @@ from gerrit_clone.cli import app
 from gerrit_clone.content_intent import IntentError, intent_path
 from gerrit_clone.content_intent_resolve import resolve_filters
 from gerrit_clone.content_spec import ContentFilterSpec
-from gerrit_clone.content_stage import filter_repository
+from gerrit_clone.content_stage import UNJOURNALLED_REFUSAL, filter_repository
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-_NO_JOURNAL = pytest.mark.xfail(strict=True, reason="#309: no journal yet")
 
 #: Built at runtime so that no credential-shaped literal sits in the
 #: source for secret scanners to flag.
@@ -99,13 +98,13 @@ def _spec(root: Path) -> ContentFilterSpec:
 
 
 class TestEntries:
-    @_NO_JOURNAL
     def test_a_rewrite_is_journalled_before_and_after(self, tree: Path) -> None:
         result = _refresh(tree, "--remove-files", "secret.txt")
         assert result.exit_code == 0, result.output
 
         start, end = _journal(tree)
 
+        assert start["schema"] == 1
         assert start["event"] == "start"
         assert start["command"] == "refresh"
         assert start["project"] == "com/parent"
@@ -114,6 +113,7 @@ class TestEntries:
         assert start["version"]
         assert start["time"]
         assert end == {
+            "schema": 1,
             "event": "end",
             "id": start["id"],
             "time": end["time"],
@@ -122,7 +122,6 @@ class TestEntries:
         }
         assert start["refs_sha256"] != end["refs_sha256"], "the rewrite changed refs"
 
-    @_NO_JOURNAL
     def test_each_run_appends(self, tree: Path) -> None:
         for _ in range(2):
             assert _refresh(tree, "--remove-files", "secret.txt").exit_code == 0
@@ -134,7 +133,6 @@ class TestEntries:
             "end",
         ]
 
-    @_NO_JOURNAL
     def test_a_failed_rewrite_is_journalled_as_failed(self, tree: Path) -> None:
         spec = _spec(tree)
         repo = tree / "com" / "parent"
@@ -146,7 +144,6 @@ class TestEntries:
         assert reason is not None
         assert _journal(tree)[-1]["ok"] is False
 
-    @_NO_JOURNAL
     def test_no_token_reaches_the_journal(self, tree: Path) -> None:
         result = _refresh(tree, "--git-filter", f"com/*:{TOKEN}")
         assert result.exit_code == 0, result.output
@@ -179,13 +176,11 @@ class TestInterruptedRewrites:
                 apply=_interrupted,
             )
 
-    @_NO_JOURNAL
     def test_it_leaves_a_start_without_an_end(self, tree: Path) -> None:
         self._crash(tree)
 
         assert [entry["event"] for entry in _journal(tree)] == ["start"]
 
-    @_NO_JOURNAL
     def test_its_filters_stay_in_force_without_the_intent(self, tree: Path) -> None:
         """Nothing else recorded them: the crash came before the rewrite
         could record them in the repository."""
@@ -211,7 +206,6 @@ class TestInterruptedRewrites:
 
         assert resolve_filters(tree, None, persist=False) is None
 
-    @_NO_JOURNAL
     def test_a_torn_last_line_is_ignored(self, tree: Path) -> None:
         """A crash while writing an entry: no rewrite followed it."""
         self._crash(tree)
@@ -233,7 +227,17 @@ class TestInterruptedRewrites:
             "end",
         ]
 
-    @_NO_JOURNAL
+    def test_an_entry_from_another_release_stops_the_run(self, tree: Path) -> None:
+        """Read by this release's rules, it could be misread."""
+        self._crash(tree)
+        journal = tree / ".gerrit-clone" / "filter-journal.jsonl"
+        entry = _journal(tree)[0]
+        with journal.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({**entry, "schema": 2, "id": "newer"}) + "\n")
+
+        with pytest.raises(IntentError, match="schema 2"):
+            resolve_filters(tree, None, persist=False)
+
     def test_a_garbled_entry_stops_the_run(self, tree: Path) -> None:
         self._crash(tree)
         journal = tree / ".gerrit-clone" / "filter-journal.jsonl"
@@ -249,7 +253,6 @@ def _unchanged(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
 
 
 class TestEveryCommand:
-    @_NO_JOURNAL
     def test_filtering_in_place_is_journalled(self, tree: Path) -> None:
         """Clone and mirror filter the repository itself, not a copy."""
         repo = tree / "com" / "parent"
@@ -260,3 +263,38 @@ class TestEveryCommand:
         assert start["path"] == "com/parent"
         assert end["ok"] is True
         assert start["refs_sha256"] != end["refs_sha256"]
+
+
+class TestUnreadableRefs:
+    """The digests are the journal's evidence, never left out."""
+
+    def test_without_refs_before_nothing_is_filtered(self, tree: Path) -> None:
+        applied: list[object] = []
+
+        def apply(*args: object, **kwargs: object) -> tuple[bool, str | None]:
+            applied.append(args)
+            return True, None
+
+        with patch("gerrit_clone.content_journal.refs_digest", return_value=None):
+            reason = filter_repository(
+                _spec(tree), tree / "com" / "parent", "com/parent", 60, apply=apply
+            )
+
+        assert reason == UNJOURNALLED_REFUSAL
+        assert applied == []
+        assert not (tree / ".gerrit-clone" / "filter-journal.jsonl").exists()
+
+    def test_without_refs_after_the_rewrite_stays_unfinished(self, tree: Path) -> None:
+        spec = _spec(tree)
+        with patch(
+            "gerrit_clone.content_journal.refs_digest", side_effect=["a" * 64, None]
+        ):
+            filter_repository(
+                spec, tree / "com" / "parent", "com/parent", 60, apply=_unchanged
+            )
+        intent_path(tree).unlink()
+
+        assert [entry["event"] for entry in _journal(tree)] == ["start"]
+        unfinished = resolve_filters(tree, None, persist=False)
+        assert unfinished is not None
+        assert unfinished.filters_for("com/parent").remove_patterns == ["secret.txt"]

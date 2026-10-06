@@ -15,6 +15,10 @@ anything:
   having seen only some of it.  They are dropped for that repository,
   which counts as failed; ``--remove-files``, which needs no history,
   still runs.
+
+Each rewrite is journalled before it starts and once it ends (see
+:mod:`gerrit_clone.content_journal`), and one that cannot be journalled
+does not start.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from gerrit_clone.content_filter import apply_content_filters, is_shallow_repository
+from gerrit_clone.content_policy import FilterPolicy, collect_filter_tokens
 from gerrit_clone.content_spec import missing_tokens_refusal
 
 if TYPE_CHECKING:
@@ -29,6 +34,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from gerrit_clone.content_spec import ContentFilterSpec
+
+UNJOURNALLED_REFUSAL = (
+    "Could not journal the rewrite in the tree's filter journal, so the "
+    "repository was not filtered; see the log for why"
+)
 
 SHALLOW_HISTORY_REFUSED = (
     "Refused --git-filter / --redact-secrets on a shallow repository: "
@@ -87,6 +97,14 @@ def filter_repository(
         if not filters.remove_patterns:
             return SHALLOW_HISTORY_REFUSED
         refused, git_filter, redact = SHALLOW_HISTORY_REFUSED, None, False
+    journal = spec.journal
+    entry = None
+    if journal is not None:
+        tokens = collect_filter_tokens(project, git_filter) if git_filter else []
+        policy = FilterPolicy.of(filters.remove_patterns, tokens, redact)
+        entry = journal.start(repo_path, project, policy)
+        if entry is None:
+            return UNJOURNALLED_REFUSAL
     ok, error = apply(
         repo_path,
         project,
@@ -95,5 +113,8 @@ def filter_repository(
         redact_secrets=redact,
         timeout=timeout,
     )
+    if journal is not None and entry is not None:
+        # Left without an end if apply raised: then the start stays binding.
+        journal.end(entry, repo_path, ok=ok)
     failure = None if ok else (error or "content filtering failed")
     return "; ".join(reason for reason in (refused, failure) if reason) or None

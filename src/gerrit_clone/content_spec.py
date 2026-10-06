@@ -30,6 +30,8 @@ from gerrit_clone.refresh_discovery import project_name_for
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from gerrit_clone.content_journal import Journal
+
 
 @dataclass(frozen=True)
 class ProjectFilters:
@@ -59,6 +61,8 @@ class ContentFilterSpec:
     redact_secrets: bool
     base_path: Path
     intent: FilterIntent = field(default_factory=FilterIntent)
+    #: Where rewrites are journalled; ``None`` for a run that writes nothing.
+    journal: Journal | None = None
 
     def project_name(self, repo_path: Path) -> str:
         """*repo_path*'s project name, relative to the run's base path.

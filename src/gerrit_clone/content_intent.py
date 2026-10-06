@@ -261,15 +261,36 @@ def _encode(intent: FilterIntent) -> dict[str, Any]:
     for (kind, value), policy in sorted(intent.scopes.items()):
         if policy.empty:
             continue
-        entry: dict[str, Any] = {kind: value}
-        if policy.remove_patterns:
-            entry["remove"] = sorted(policy.remove_patterns)
-        if policy.token_digests:
-            entry["token_sha256"] = sorted(policy.token_digests)
-        if policy.redact_secrets:
-            entry["redact_secrets"] = True
-        entries.append(entry)
+        entries.append({kind: value, **policy_fields(policy)})
     return {"schema": SCHEMA, "entries": entries}
+
+
+def policy_fields(policy: FilterPolicy) -> dict[str, Any]:
+    """*policy* as JSON fields: tokens only as digests, empty ones left out."""
+    fields: dict[str, Any] = {}
+    if policy.remove_patterns:
+        fields["remove"] = sorted(policy.remove_patterns)
+    if policy.token_digests:
+        fields["token_sha256"] = sorted(policy.token_digests)
+    if policy.redact_secrets:
+        fields["redact_secrets"] = True
+    return fields
+
+
+def policy_from_fields(fields: Mapping[str, Any]) -> FilterPolicy:
+    """The policy :func:`policy_fields` wrote.
+
+    Raises:
+        TypeError: If a field holds the wrong kind of value.
+    """
+    redact = fields.get("redact_secrets", False)
+    if not isinstance(redact, bool):
+        raise TypeError(f"redact_secrets is not true or false: {redact!r}")
+    return FilterPolicy(
+        frozenset(_strings(fields, "remove")),
+        frozenset(_strings(fields, "token_sha256")),
+        redact,
+    )
 
 
 def _decode(data: Any) -> FilterIntent:
@@ -291,14 +312,7 @@ def _decode(data: Any) -> FilterIntent:
         kinds = [kind for kind in ("projects", "project") if kind in entry]
         if len(kinds) != 1 or not isinstance(entry[kinds[0]], str):
             raise ValueError(f"entry without exactly one scope: {entry!r}")
-        redact = entry.get("redact_secrets", False)
-        if not isinstance(redact, bool):
-            raise TypeError(f"redact_secrets is not true or false: {redact!r}")
-        policy = FilterPolicy(
-            frozenset(_strings(entry, "remove")),
-            frozenset(_strings(entry, "token_sha256")),
-            redact,
-        )
+        policy = policy_from_fields(entry)
         scope = (kinds[0], entry[kinds[0]])
         scopes[scope] = scopes.get(scope, FilterPolicy()).union(policy)
     return FilterIntent(scopes)
