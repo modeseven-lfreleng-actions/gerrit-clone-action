@@ -218,8 +218,15 @@ filters reports `"content_filters": null`.
 Each repository also records which filters rewrote it. Fetching would force
 the original history back, filtered content included, so refresh copies each
 mirror it filters, fetches and filters the copy, and publishes its refs only
-when every step succeeds; a failure leaves the mirror unchanged. A filtered
-working copy (`--no-mirror`) always gets skipped: re-clone it to update it.
+when every step succeeds; a failure leaves the mirror unchanged. Refresh
+treats a working copy (`--no-mirror`) it filters the same way. It fetches and
+filters a copy, kept inside the checkout's git directory. The checkout takes
+the result, fast-forwarding or rebasing as a pull would, only when every step
+succeeds and the filtered history extends what the checkout holds; otherwise
+the checkout stays unchanged, with any stash put back. A working copy that
+content filtering rewrote in place, as `clone --no-mirror` does, has lost the
+remote-tracking branch a refresh follows, and gets skipped
+([#317](https://github.com/lfreleng-actions/gerrit-clone-action/issues/317)).
 Every remote of a filtered repository refuses pushes. A tree filtered before
 the tree-level file existed gains one from these per-repository records on
 its next run. Releases up to v2.2.4 recorded no filters at all, so refresh

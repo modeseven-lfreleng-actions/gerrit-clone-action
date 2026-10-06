@@ -90,11 +90,26 @@ the intent for that project, through one shared step
 all use. A refresh stages every mirror the run filters, including ones
 the filters have not rewritten yet: it fetches into a copy, filters the
 copy, and publishes only if both succeed, so a failed filter never
-leaves new unfiltered content in the mirror. A working copy
-(`--no-mirror`) has no bare copy to publish atomically, so one the
-filters never rewrote pulls first and gets filtered after; a failed
-filter there exits non-zero and leaves the checkout for the operator,
-as before this decision.
+leaves new unfiltered content in the mirror.
+
+A working copy (`--no-mirror`) the run filters gets the same treatment,
+after the usual working-copy preparation. Its copy, kept inside the
+checkout's git directory, holds the checkout's remote-tracking refs as
+branches, so both filter methods rewrite them and `git filter-repo` has
+no `origin` refs to fold into local branches. The copy fetches and gets
+filtered. The checkout then takes the copy's refs as its remote-tracking
+refs and tags, in one atomic fetch, and fast-forwards or rebases as a
+pull would, without fetching again. It does so only if the filtered
+upstream extends what the checkout holds: filtering the same content
+gives the same commits, so a checkout a staged refresh rewrote follows
+it, while one whose own history the filters would now rewrite gets
+refused. Any failure before that leaves the checkout unchanged, with any
+stash put back, and the refresh never filters the checkout in place.
+
+A working copy filtered in place, as `clone --no-mirror` does, has lost
+its remote-tracking refs to `git filter-repo`, and stays refused;
+[#317](https://github.com/lfreleng-actions/gerrit-clone-action/issues/317)
+tracks filtering new working copies through a copy too.
 
 ### Journal
 
@@ -184,9 +199,8 @@ filters reports `null`.
 
 ### Deferred
 
-Tracked in
-[#309](https://github.com/lfreleng-actions/gerrit-clone-action/issues/309):
-
-- **Staged working copies.** A working copy pulls before its filters
-  run, as described above. Staging it would mean filtering a copy and
-  then resetting the checkout to the result.
+Nothing from
+[#309](https://github.com/lfreleng-actions/gerrit-clone-action/issues/309)
+remains deferred.
+[#317](https://github.com/lfreleng-actions/gerrit-clone-action/issues/317)
+tracks filtering new working copies through a copy.

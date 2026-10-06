@@ -12,9 +12,11 @@ transaction: the mirror is copied, the copy is fetched and filtered, and
 its refs reach the mirror only once all of that has succeeded.  A fetch
 or filter that fails leaves the mirror exactly as it was.
 
-A working copy is refused outright.  Its rewritten history cannot
-fast-forward, and resetting it to upstream would expose the filtered
-content in its working tree, so it is left for re-cloning.
+A working copy is refreshed through a filtered copy too, once it has
+been prepared as any working copy is: see
+:mod:`gerrit_clone.refresh_checkout_stage`.  Here it meets the same
+refusals as a mirror, and one more: filtered where it stands, it has
+lost the remote-tracking branch a refresh follows, and is refused.
 """
 
 from __future__ import annotations
@@ -50,10 +52,11 @@ FILTERED_REFRESH_REFUSAL = (
     "--remove-files, --git-filter or --redact-secrets as before"
 )
 
-#: Why a content-filtered working copy is refused a refresh at all.
+#: Why a working copy filtered where it stands is refused a refresh.
 FILTERED_WORKING_COPY_REFUSAL = (
-    "Content filtering rewrote this working copy; it cannot be refreshed "
-    "without bringing the filtered content back. Re-clone it to update it"
+    "Content filtering rewrote this working copy in place, which removed "
+    "the remote-tracking branch a refresh follows, so it cannot be "
+    "refreshed"
 )
 
 #: Why a repository an earlier release filtered is refused a refresh.
@@ -96,7 +99,7 @@ class FilteredRefreshMixin(ForceModeMixin):
         """
         if recorded.earlier_release:
             return EARLIER_RELEASE_REFUSAL
-        if not bare:
+        if not bare and not self._follows_upstream(repo_path):
             return FILTERED_WORKING_COPY_REFUSAL
         if self.content_filters is None:
             return FILTERED_REFRESH_REFUSAL
@@ -170,7 +173,7 @@ class FilteredRefreshMixin(ForceModeMixin):
             # After the refusals no option can lift: passing the tokens
             # would only meet them next.
             refusal = self._missing_tokens_refusal(repo_path)
-        if refusal is None:
+        if refusal is None and bare:
             refusal = self._bare_refresh_obstacle(repo_path)
         if refusal is None and self._shallow_history_filtered(repo_path):
             refusal = SHALLOW_HISTORY_REFUSAL
@@ -185,14 +188,33 @@ class FilteredRefreshMixin(ForceModeMixin):
         filters, though nothing rewrote it yet: fetched in place, it would
         hold whatever arrived until the filters ran, and keep it if they
         then failed.  One lacking tokens its intent replaces is refused.
-        A working copy cannot be staged; it is filtered after it pulls.
+        A working copy is staged only after it is prepared (see
+        :mod:`gerrit_clone.refresh_checkout_stage`), so here it only meets
+        its refusals.
         """
+        if not bare:
+            # Its refusals, the dry run's prediction included, whatever
+            # filtered it before and whatever this run filters.
+            return self._staged_refusal(repo_path, recorded, bare=False) is not None
         if not recorded.empty or self._missing_tokens_refusal(repo_path):
             return True
         spec = self.content_filters
-        if not bare or spec is None:
+        if spec is None:
             return False
         return not spec.filters_for(spec.project_name(repo_path)).empty
+
+    @staticmethod
+    def _follows_upstream(repo_path: Path) -> bool:
+        """Whether working copy *repo_path*'s branch has a remote-tracking ref.
+
+        Filtered where it stands, a working copy loses them: ``git
+        filter-repo`` folds ``origin``'s into local branches.  One a staged
+        refresh filtered keeps them, and can follow upstream again.
+        """
+        found = run_git(
+            ["git", "rev-parse", "--abbrev-ref", "@{upstream}"], repo_path, timeout=10
+        )
+        return found.returncode == 0
 
     def _missing_tokens_refusal(self, repo_path: Path) -> str | None:
         """Why *repo_path* is refused for lacking tokens its intent replaces.

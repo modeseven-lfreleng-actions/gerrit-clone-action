@@ -26,14 +26,12 @@ from typer.testing import CliRunner
 from gerrit_clone.cli import app
 from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.models import RefreshStatus, RetryPolicy
+from gerrit_clone.refresh_filtered import SHALLOW_HISTORY_REFUSAL
+from gerrit_clone.refresh_manager import RefreshManager
 from gerrit_clone.refresh_worker import FILTERED_REFRESH_REFUSAL, RefreshWorker
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-_UNSTAGED = pytest.mark.xfail(
-    strict=True, reason="#309: working copies are filtered after they pull"
-)
 
 
 def _git(*args: str, cwd: Path | None = None) -> str:
@@ -118,7 +116,6 @@ def _failing(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
 
 
 class TestArrivingContent:
-    @_UNSTAGED
     def test_it_is_filtered_before_it_lands(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -134,7 +131,6 @@ class TestArrivingContent:
         assert _stages_left(checkout) == []
         assert _git("status", "--porcelain", cwd=checkout) == ""
 
-    @_UNSTAGED
     def test_the_checkout_keeps_its_layout(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -150,7 +146,6 @@ class TestArrivingContent:
             "origin/main"
         )
 
-    @_UNSTAGED
     def test_later_content_is_followed_too(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -167,7 +162,6 @@ class TestArrivingContent:
         assert (checkout / "file.txt").read_text() == "three\n"
         assert "secret.txt" not in _history(checkout)
 
-    @_UNSTAGED
     def test_a_fetch_only_refresh_updates_remote_tracking_refs(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -182,7 +176,6 @@ class TestArrivingContent:
         assert _git("rev-parse", "origin/main", cwd=checkout) != head
         assert "secret.txt" not in _history(checkout)
 
-    @_UNSTAGED
     def test_a_rebase_puts_local_commits_on_the_filtered_history(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -202,8 +195,22 @@ class TestArrivingContent:
         )
 
 
+class TestConflicts:
+    def test_a_rebase_conflict_is_reported_as_one(
+        self, upstream: Path, checkout: Path
+    ) -> None:
+        _commit(checkout, "file.txt", "mine\n")
+        _commit(upstream, "file.txt", "theirs\n")
+
+        result = _worker(_spec(checkout), strategy="rebase").refresh_repository(
+            checkout
+        )
+
+        assert result.status == RefreshStatus.CONFLICTS, result.error_message
+        assert "CONFLICT" in (result.error_message or "")
+
+
 class TestLeftAsItWas:
-    @_UNSTAGED
     def test_when_filtering_fails(self, upstream: Path, checkout: Path) -> None:
         before = _refs(checkout)
         _commit(upstream, "secret.txt", "hunter2\n")
@@ -219,7 +226,6 @@ class TestLeftAsItWas:
         assert "secret.txt" not in _history(checkout)
         assert _stages_left(checkout) == []
 
-    @_UNSTAGED
     def test_a_stash_it_made_is_put_back(self, upstream: Path, checkout: Path) -> None:
         (checkout / "file.txt").write_text("local edit\n")
         _commit(upstream, "secret.txt", "hunter2\n")
@@ -235,7 +241,25 @@ class TestLeftAsItWas:
         assert (checkout / "file.txt").read_text() == "local edit\n"
         assert _git("stash", "list", cwd=checkout) == ""
 
-    @_UNSTAGED
+    def test_a_stash_is_put_back_when_only_cleaning_up_fails(
+        self, upstream: Path, checkout: Path
+    ) -> None:
+        """Brought up to date, the refresh still fails, and keeps no stash."""
+        _commit(upstream, "notes.txt", "n\n")
+        _git("pull", "-q", cwd=checkout)
+        (checkout / "notes.txt").write_text("local edit\n")
+        _commit(upstream, "file.txt", "two\n")
+
+        with patch.object(RefreshWorker, "_remove_stage", return_value=False):
+            result = _worker(_spec(checkout), auto_stash=True).refresh_repository(
+                checkout
+            )
+
+        assert result.status == RefreshStatus.FAILED
+        assert (checkout / "file.txt").read_text() == "two\n"
+        assert (checkout / "notes.txt").read_text() == "local edit\n"
+        assert _git("stash", "list", cwd=checkout) == ""
+
     def test_when_a_remote_fetches_where_no_copy_can(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -256,7 +280,6 @@ class TestLeftAsItWas:
         assert _refs(checkout) == before
         assert _stages_left(checkout) == []
 
-    @_UNSTAGED
     def test_when_the_filters_rewrite_history_it_holds(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -277,7 +300,6 @@ class TestLeftAsItWas:
 class TestRewrittenThroughACopy:
     """A working copy a staged refresh rewrote keeps its layout."""
 
-    @_UNSTAGED
     def test_without_the_filters_it_is_refused(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -302,7 +324,6 @@ def _refresh(tree: Path, *options: str) -> Any:
 
 
 class TestTheCommand:
-    @_UNSTAGED
     def test_a_filter_matching_nothing_leaves_it_refreshable(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -318,3 +339,28 @@ class TestTheCommand:
         assert _git("rev-parse", "--abbrev-ref", "main@{upstream}", cwd=checkout) == (
             "origin/main"
         )
+
+
+class TestDryRun:
+    def test_it_predicts_the_refusal_of_a_shallow_checkout(
+        self, tmp_path: Path, upstream: Path
+    ) -> None:
+        """History filters cannot be trusted on truncated history."""
+        _commit(upstream, "file.txt", "two\n")
+        shallow = tmp_path / "shallow" / "proj"
+        _git("clone", "-q", "--depth", "1", upstream.as_uri(), str(shallow))
+        filters = ContentFilterSpec(None, None, True, shallow.parent)
+
+        [predicted] = (
+            RefreshManager(
+                dry_run=True, filter_gerrit_only=False, content_filters=filters
+            )
+            .refresh_repositories(shallow.parent)
+            .results
+        )
+        actual = _worker(filters).refresh_repository(shallow)
+
+        assert predicted.status == RefreshStatus.SKIPPED
+        assert predicted.error_message == SHALLOW_HISTORY_REFUSAL
+        assert actual.status == RefreshStatus.SKIPPED
+        assert actual.error_message == SHALLOW_HISTORY_REFUSAL
