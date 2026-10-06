@@ -31,10 +31,6 @@ from gerrit_clone.models import BatchResult, Config, Project, ProjectState
 if TYPE_CHECKING:
     from pathlib import Path
 
-_NO_SUMMARY = pytest.mark.xfail(
-    strict=True, reason="#309: manifests do not summarise the intent yet"
-)
-
 
 #: Built at runtime so that no credential-shaped literal sits in the
 #: source for secret scanners to flag.
@@ -84,7 +80,6 @@ def _assert_no_token(text: str) -> None:
 
 
 class TestRefreshManifest:
-    @_NO_SUMMARY
     def test_it_summarises_the_intent(self, tree: Path) -> None:
         result = CliRunner().invoke(
             app,
@@ -114,7 +109,6 @@ class TestRefreshManifest:
         }
         _assert_no_token(text)
 
-    @_NO_SUMMARY
     def test_a_tree_without_filters_says_so(self, tree: Path) -> None:
         result = CliRunner().invoke(
             app,
@@ -133,7 +127,6 @@ class TestRefreshManifest:
 
         assert manifest["content_filters"] is None
 
-    @_NO_SUMMARY
     def test_a_dry_run_shows_what_it_would_record(self, tree: Path) -> None:
         CliRunner().invoke(
             app,
@@ -157,7 +150,6 @@ class TestRefreshManifest:
 
 
 class TestCloneManifest:
-    @_NO_SUMMARY
     def test_it_summarises_the_intent(self, tree: Path) -> None:
         options = ContentFilterSpec.from_options(
             "secret.txt", f"com/*:{TOKEN}", False, tree
@@ -188,7 +180,6 @@ def _github_api() -> Mock:
 
 
 class TestMirrorManifest:
-    @_NO_SUMMARY
     def test_it_summarises_the_intent(self, tree: Path) -> None:
         with (
             patch(

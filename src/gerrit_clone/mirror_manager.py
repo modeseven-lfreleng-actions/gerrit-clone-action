@@ -145,6 +145,8 @@ class MirrorManager:
         self.remove_file_patterns = remove_file_patterns
         self.git_filter_projects = git_filter_projects
         self.redact_secrets = redact_secrets
+        #: The filters :meth:`mirror_projects` resolved, for the manifest.
+        self.resolved_filters: ContentFilterSpec | None = None
         self.config = config = with_content_filters(
             config, remove_file_patterns, git_filter_projects, redact_secrets
         )
@@ -307,7 +309,7 @@ class MirrorManager:
         # Settled, and written down, first: even a run that selects nothing
         # decides for the projects a later run selects, and --overwrite
         # below deletes repositories that are then cloned and filtered again.
-        spec = resolve_filters(
+        spec = self.resolved_filters = resolve_filters(
             self.config.path,
             self.config.content_filters,
             persist=True,

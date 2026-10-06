@@ -160,6 +160,16 @@ filters nor pushes it, leaves its GitHub repository alone, and reports
 it as skipped with the reason, until the operator deletes it by hand and
 clones it again with the filters it needs; that run then records them.
 
+### Manifests
+
+The `clone`, `refresh` and `mirror` manifests carry a top-level
+`content_filters` block summarising the intent the run resolved: the
+intent file's path, and for each scope its removal patterns, whether it
+redacts secrets, and the number of tokens it replaces. It carries no
+digest, since manifests often end up as public CI artifacts, and a
+digest lets anyone confirm a guessed token offline. A tree without
+filters reports `null`.
+
 ## Consequences
 
 - A later run without filter options filters as the tree decided,
@@ -177,8 +187,6 @@ clones it again with the filters it needs; that run then records them.
 Tracked in
 [#309](https://github.com/lfreleng-actions/gerrit-clone-action/issues/309):
 
-- **Manifests.** The clone, refresh and mirror manifests do not yet
-  summarise the tree's intent; the file itself is the auditable record.
 - **Staged working copies.** A working copy pulls before its filters
   run, as described above. Staging it would mean filtering a copy and
   then resetting the checkout to the result.

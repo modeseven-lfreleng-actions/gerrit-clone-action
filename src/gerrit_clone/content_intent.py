@@ -265,6 +265,27 @@ def _encode(intent: FilterIntent) -> dict[str, Any]:
     return {"schema": SCHEMA, "entries": entries}
 
 
+def manifest_summary(root: Path, intent: FilterIntent) -> dict[str, Any]:
+    """*intent*, for a run's manifest: tokens counted, never their digests.
+
+    Manifests often end up as public CI artifacts, and a digest lets
+    anyone confirm a guessed token offline.
+    """
+    scopes = []
+    for (kind, value), policy in sorted(intent.scopes.items()):
+        if policy.empty:
+            continue
+        scope: dict[str, Any] = {kind: value}
+        if policy.remove_patterns:
+            scope["remove"] = sorted(policy.remove_patterns)
+        if policy.token_digests:
+            scope["tokens"] = len(policy.token_digests)
+        if policy.redact_secrets:
+            scope["redact_secrets"] = True
+        scopes.append(scope)
+    return {"intent_file": str(intent_path(root)), "scopes": scopes}
+
+
 def policy_fields(policy: FilterPolicy) -> dict[str, Any]:
     """*policy* as JSON fields: tokens only as digests, empty ones left out."""
     fields: dict[str, Any] = {}

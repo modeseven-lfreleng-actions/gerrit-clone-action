@@ -17,9 +17,9 @@ says so for the caller to refuse it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from gerrit_clone.content_intent import FilterIntent
+from gerrit_clone.content_intent import FilterIntent, manifest_summary
 from gerrit_clone.content_patterns import (
     normalize_file_patterns,
     parse_git_filter_spec,
@@ -123,6 +123,17 @@ class ContentFilterSpec:
             redact_secrets,
             base_path,
         )
+
+
+def manifest_entry(spec: ContentFilterSpec | None) -> dict[str, Any] | None:
+    """A manifest's ``content_filters`` block: the tree's intent, or null.
+
+    It summarises the intent the run resolved, its own options included,
+    with each scope's patterns and a count of its tokens.
+    """
+    if spec is None:
+        return None
+    return manifest_summary(spec.base_path, spec.intent)
 
 
 def missing_tokens_refusal(count: int) -> str:

@@ -208,6 +208,13 @@ project, `clone` exits with a filtering failure, and `mirror` aborts the
 whole batch before it pushes anything; each gives the number of tokens the
 project needs. A file the tool cannot read stops the run.
 
+Each `clone`, `refresh` and `mirror` manifest summarises that decision in a
+`content_filters` block: the path of the intent file, and for each scope its
+removal patterns, whether it redacts secrets, and the number of
+`--git-filter` tokens it replaces. It never includes a token or a token's
+digest, since manifests often end up as public CI artifacts. A tree without
+filters reports `"content_filters": null`.
+
 Each repository also records which filters rewrote it. Fetching would force
 the original history back, filtered content included, so refresh copies each
 mirror it filters, fetches and filters the copy, and publishes its refs only
@@ -1397,6 +1404,10 @@ Each run generates a detailed JSON manifest (`clone-manifest.json`):
     "branch": null,
     "strict_host_checking": true,
     "path": "/workspace/repos"
+  },
+  "content_filters": {
+    "intent_file": "/workspace/repos/.gerrit-clone/filter-policy.json",
+    "scopes": [{ "projects": "*", "remove": [".github/dependabot.yml"] }]
   },
   "results": [
     {
