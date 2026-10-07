@@ -23,9 +23,6 @@ from gerrit_clone.cli import app
 if TYPE_CHECKING:
     from pathlib import Path
 
-#: The run's own log and manifest dirty the checkout it refreshes (#310).
-_DIRTIED = pytest.mark.xfail(strict=True, reason="#310: run files dirty the checkout")
-
 
 def _git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.run(
@@ -76,7 +73,6 @@ def _refresh(checkout: Path, *options: str) -> Any:
 
 
 class TestRefreshAtACheckout:
-    @_DIRTIED
     def test_the_checkout_is_refreshed(self, upstream: Path, checkout: Path) -> None:
         _commit(upstream, "two\n")
 
@@ -85,7 +81,6 @@ class TestRefreshAtACheckout:
         assert result.exit_code == 0, result.output
         assert (checkout / "file.txt").read_text() == "two\n"
 
-    @_DIRTIED
     def test_every_later_run_refreshes_it_too(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -101,7 +96,6 @@ class TestRefreshAtACheckout:
         assert (checkout / "refresh.log").is_file()
         assert list(checkout.glob("refresh-manifest-*.json"))
 
-    @_DIRTIED
     def test_a_named_manifest_is_hidden_too(
         self, upstream: Path, checkout: Path
     ) -> None:
@@ -129,7 +123,6 @@ class TestRefreshAtACheckout:
 class TestTrackedNames:
     """A checkout that tracks a file the run would write keeps it."""
 
-    @pytest.mark.xfail(strict=True, reason="#310: refresh overwrites a tracked file")
     @pytest.mark.parametrize(
         ("name", "options"),
         [
@@ -154,7 +147,6 @@ class TestTrackedNames:
 
 
 class TestUnclassifiableCheckouts:
-    @pytest.mark.xfail(strict=True, reason="#310: refresh writes into it")
     def test_a_checkout_git_refuses_is_left_alone(self, tmp_path: Path) -> None:
         """Git cannot read it, so it cannot say what the checkout tracks."""
         broken = tmp_path / "broken"
@@ -166,7 +158,6 @@ class TestUnclassifiableCheckouts:
         assert result.exit_code != 0
         assert not (broken / "refresh.log").exists()
 
-    @pytest.mark.xfail(strict=True, reason="#310: refresh writes into it")
     def test_a_manifest_name_git_cannot_exclude_is_refused(
         self, checkout: Path
     ) -> None:
@@ -178,7 +169,6 @@ class TestUnclassifiableCheckouts:
 
 
 class TestExcludeFailures:
-    @pytest.mark.xfail(strict=True, reason="#310: refresh writes into it")
     def test_an_exclude_it_cannot_write_stops_the_run(self, checkout: Path) -> None:
         """Unhidden, the log would make the worker skip the checkout."""
         exclude = checkout / ".git" / "info" / "exclude"
@@ -201,7 +191,6 @@ class TestLinkedNames:
             ("notes.json", ("--manifest-filename", "notes.json")),
         ],
     )
-    @pytest.mark.xfail(strict=True, reason="#310: refresh writes through it")
     def test_the_run_stops_before_writing_through_it(
         self, checkout: Path, name: str, options: tuple[str, ...]
     ) -> None:
