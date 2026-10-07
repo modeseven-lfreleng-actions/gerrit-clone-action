@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -26,6 +28,7 @@ from typer.testing import CliRunner
 from gerrit_clone.cli import app
 from gerrit_clone.content_intent import IntentError, intent_path
 from gerrit_clone.content_intent_resolve import resolve_filters
+from gerrit_clone.content_journal import sources
 from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.content_stage import UNJOURNALLED_REFUSAL, filter_repository
 
@@ -206,6 +209,43 @@ class TestInterruptedRewrites:
 
         assert resolve_filters(tree, None, persist=False) is None
 
+    def test_an_end_releases_no_start_that_came_after_it(self, tree: Path) -> None:
+        """Run B started while run A filtered; A finishing says nothing of B."""
+        self._crash(tree)
+        journal = tree / ".gerrit-clone" / "filter-journal.jsonl"
+        crashed = _journal(tree)[0]
+        journal.unlink()
+        first = {**crashed, "id": "a"}
+        second = {**crashed, "id": "b"}
+        end = {
+            "schema": 1,
+            "event": "end",
+            "id": "a",
+            "time": crashed["time"],
+            "ok": True,
+            "refs_sha256": crashed["refs_sha256"],
+        }
+        journal.write_text(
+            "".join(json.dumps(entry) + "\n" for entry in (first, second, end))
+        )
+        intent_path(tree).unlink()
+
+        spec = resolve_filters(tree, None, persist=False)
+
+        assert spec is not None
+        assert spec.filters_for("com/parent").remove_patterns == ["secret.txt"]
+
+    def test_a_run_below_the_root_still_finds_them(self, tree: Path) -> None:
+        """With the intent file gone, the journal marks the tree's root."""
+        self._crash(tree)
+        intent_path(tree).unlink()
+
+        spec = resolve_filters(tree / "com", None, persist=False)
+
+        assert spec is not None
+        assert spec.base_path == tree.resolve()
+        assert spec.filters_for("com/parent").remove_patterns == ["secret.txt"]
+
     def test_a_torn_last_line_is_ignored(self, tree: Path) -> None:
         """A crash while writing an entry: no rewrite followed it."""
         self._crash(tree)
@@ -236,6 +276,23 @@ class TestInterruptedRewrites:
             stream.write(json.dumps({**entry, "schema": 2, "id": "newer"}) + "\n")
 
         with pytest.raises(IntentError, match="schema 2"):
+            resolve_filters(tree, None, persist=False)
+
+    @pytest.mark.parametrize("digest", [None, "", "not-a-digest", "A" * 64])
+    def test_an_end_without_its_digest_stops_the_run(
+        self, tree: Path, digest: str | None
+    ) -> None:
+        """Read as a completed rewrite, it would release the start's filters."""
+        self._crash(tree)
+        journal = tree / ".gerrit-clone" / "filter-journal.jsonl"
+        start = _journal(tree)[0]
+        end = {"schema": 1, "event": "end", "id": start["id"], "ok": True}
+        if digest is not None:
+            end["refs_sha256"] = digest
+        with journal.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(end) + "\n")
+
+        with pytest.raises(IntentError, match="refs_sha256"):
             resolve_filters(tree, None, persist=False)
 
     def test_a_garbled_entry_stops_the_run(self, tree: Path) -> None:
@@ -298,3 +355,125 @@ class TestUnreadableRefs:
         unfinished = resolve_filters(tree, None, persist=False)
         assert unfinished is not None
         assert unfinished.filters_for("com/parent").remove_patterns == ["secret.txt"]
+
+
+class TestDurability:
+    def test_creating_the_journal_syncs_its_directory(self, tree: Path) -> None:
+        """Else a crash could lose the file, start and all; the first run
+        may have made .gerrit-clone/ itself just before."""
+        synced: list[Path] = []
+        spec = _spec(tree)
+
+        with patch(
+            "gerrit_clone.content_journal._sync_directory", side_effect=synced.append
+        ):
+            for _ in range(2):
+                filter_repository(
+                    spec, tree / "com" / "parent", "com/parent", 60, apply=_unchanged
+                )
+
+        assert synced == [tree / ".gerrit-clone", tree]
+
+
+class TestSources:
+    """A staging copy's path is temporary: the entry names the upstream."""
+
+    def test_a_refreshed_mirror_names_its_upstream(self, tree: Path) -> None:
+        result = _refresh(tree, "--remove-files", "secret.txt")
+        assert result.exit_code == 0, result.output
+
+        start = _journal(tree)[0]
+
+        assert start["sources"] == {"origin": (tree.parent / "up").as_uri()}
+
+    def test_credentials_never_reach_the_journal(self, tree: Path) -> None:
+        repo = tree / "com" / "parent"
+        _git(
+            repo,
+            "config",
+            "remote.origin.url",
+            f"https://user:{TOKEN}@gerrit.example.org/com/parent?t={TOKEN}#{TOKEN}",
+        )
+        _git(repo, "remote", "add", "ssh", "builder@gerrit.example.org:com/parent")
+        _git(repo, "remote", "add", "local", "/srv/git/com/parent.git")
+        _git(repo, "remote", "add", "v6", f"{TOKEN}@[2001:db8::1]:com/parent")
+        _git(repo, "remote", "add", "pair", f"user:{TOKEN}@gerrit.example.org:x")
+
+        filter_repository(_spec(tree), repo, "com/parent", 60, apply=_unchanged)
+
+        text = (tree / ".gerrit-clone" / "filter-journal.jsonl").read_text()
+        assert TOKEN not in text
+        assert "builder@" not in text
+        assert _journal(tree)[0]["sources"] == {
+            "local": "/srv/git/com/parent.git",
+            "origin": "https://gerrit.example.org/com/parent",
+            "pair": "gerrit.example.org:x",
+            "ssh": "gerrit.example.org:com/parent",
+            "v6": "[2001:db8::1]:com/parent",
+        }
+
+    def test_a_remote_is_named_by_the_url_git_fetches_from(self, tree: Path) -> None:
+        """Git fetches from a remote's first URL; later ones only push."""
+        repo = tree / "com" / "parent"
+        first = _git(repo, "config", "remote.origin.url")
+        _git(
+            repo, "config", "--add", "remote.origin.url", "https://elsewhere.example/x"
+        )
+
+        assert sources(repo) == {"origin": first}
+
+    def test_remotes_it_cannot_read_refuse_the_rewrite(self, tree: Path) -> None:
+        with patch("gerrit_clone.content_journal.sources", return_value=None):
+            reason = filter_repository(
+                _spec(tree), tree / "com" / "parent", "com/parent", 60, apply=_unchanged
+            )
+
+        assert reason == UNJOURNALLED_REFUSAL
+
+    @pytest.mark.parametrize(("status", "found"), [(1, {}), (128, None), (None, None)])
+    def test_no_remotes_differs_from_unreadable_ones(
+        self, tree: Path, status: int | None, found: dict[str, str] | None
+    ) -> None:
+        """git exits 1 for no match; anything else, or not running, fails."""
+        ran = (
+            None
+            if status is None
+            else subprocess.CompletedProcess([], status, stdout="", stderr="")
+        )
+        with patch("gerrit_clone.content_journal.git", return_value=ran):
+            assert sources(tree / "com" / "parent") == found
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+    def test_one_already_there_is_made_owner_only(self, tree: Path) -> None:
+        """A checkout can track it, as 0644; its mode is not kept."""
+        journal = tree / ".gerrit-clone" / "filter-journal.jsonl"
+        journal.parent.mkdir()
+        journal.write_text("")
+        journal.chmod(0o644)
+
+        filter_repository(
+            _spec(tree), tree / "com" / "parent", "com/parent", 60, apply=_unchanged
+        )
+
+        assert stat.S_IMODE(journal.stat().st_mode) & 0o077 == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+    def test_only_its_owner_can_read_it(self, tree: Path) -> None:
+        """It holds token digests, which confirm a guessed token offline."""
+        filter_repository(
+            _spec(tree), tree / "com" / "parent", "com/parent", 60, apply=_unchanged
+        )
+
+        mode = (tree / ".gerrit-clone" / "filter-journal.jsonl").stat().st_mode
+        assert stat.S_IMODE(mode) & 0o077 == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need privileges")
+def test_a_journal_linked_to_nothing_stops_the_run(tree: Path) -> None:
+    """It marks the root; read as no journal, a parent's intent would be
+    set aside by a run in that subtree."""
+    (tree / ".gerrit-clone").mkdir()
+    (tree / ".gerrit-clone" / "filter-journal.jsonl").symlink_to(tree / "missing")
+
+    with pytest.raises(IntentError, match="link to nothing"):
+        resolve_filters(tree / "com", None, persist=False)

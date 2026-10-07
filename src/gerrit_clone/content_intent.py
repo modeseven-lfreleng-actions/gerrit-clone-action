@@ -26,6 +26,7 @@ ADR 0001 records the design: ``docs/adr/0001-content-filter-intent.md``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -44,11 +45,18 @@ if TYPE_CHECKING:
 
 INTENT_DIR = ".gerrit-clone"
 INTENT_FILE = "filter-policy.json"
+#: Kept beside the intent: see :mod:`gerrit_clone.content_journal`.
+JOURNAL_FILE = "filter-journal.jsonl"
 LOCK_FILE = "filter-policy.lock"
+#: Per-project rewrite locks: see :func:`project_locked`.
+LOCKS_DIR = "locks"
 SCHEMA = 1
 
 #: Seconds a run waits for another to finish extending the intent.
 LOCK_WAIT = 120.0
+
+#: Opens a file without following a symbolic link, where the OS can.
+NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 #: Scope of every project in the tree.
 ALL_PROJECTS = ("projects", "*")
@@ -67,17 +75,20 @@ def intent_path(root: Path) -> Path:
 
 
 def find_root(start: Path) -> Path | None:
-    """The nearest of *start* and its parents holding an intent file.
+    """The nearest of *start* and its parents holding an intent or journal.
 
-    Anything at that path counts, a directory or a broken link included:
-    passed over, it would let a run in a subtree choose a weaker root,
-    where reading it fails closed.
+    The journal counts too: with the intent file gone, its unfinished
+    rewrites still bind, and a run in a subtree must find them.  Anything
+    at either path counts, a directory or a broken link included: passed
+    over, it would let a run in a subtree choose a weaker root, where
+    reading it fails closed.
     """
     here = start.resolve()
     for candidate in (here, *here.parents):
-        found = intent_path(candidate)
-        if found.exists() or found.is_symlink():
-            return candidate
+        for name in (INTENT_FILE, JOURNAL_FILE):
+            found = candidate / INTENT_DIR / name
+            if found.exists() or found.is_symlink():
+                return candidate
     return None
 
 
@@ -192,27 +203,58 @@ def intent_locked(root: Path) -> Generator[None, None, None]:
     Every run reads the intent, adds to it and writes it back.  Two at
     once would each write what they read, and the last write would undo
     the other's additions -- filtering that run had just decided on.
-    The lock file stays in place: deleting it would let a run lock a
-    file another had already replaced.
 
     Raises:
         IntentError: If the lock could not be taken within
             :data:`LOCK_WAIT` seconds, or not at all.
     """
-    path = root / INTENT_DIR / LOCK_FILE
+    with _held(root, root / INTENT_DIR / LOCK_FILE, LOCK_WAIT):
+        yield
+
+
+@contextmanager
+def project_locked(
+    root: Path, project: str, wait: float
+) -> Generator[None, None, None]:
+    """Hold *project*'s rewrite lock, so its rewrites run one at a time.
+
+    Then a journal start without an end, earlier than one that ended,
+    belongs to a rewrite that crashed, never to one still running.
+
+    Raises:
+        IntentError: If the lock could not be taken within *wait*
+            seconds, or not at all.
+    """
+    name = hashlib.sha256(project.encode("utf-8")).hexdigest()
+    with _held(root, root / INTENT_DIR / LOCKS_DIR / f"{name}.lock", wait):
+        yield
+
+
+@contextmanager
+def _held(root: Path, path: Path, wait: float) -> Generator[None, None, None]:
+    """Hold the lock file *path*, under *root*'s ``.gerrit-clone/``.
+
+    The file stays in place: deleting it would let a run lock a file
+    another had already replaced.  Neither it nor a directory above it
+    in ``.gerrit-clone/`` may be a symbolic link: a checkout can track
+    one, and writes through it would land outside the tree.  Everything
+    written there happens under one of these locks.
+    """
+    # Checked as well as opened without following: not every OS can.
+    for linked in (root / INTENT_DIR, path.parent, path):
+        if linked.is_symlink():
+            raise IntentError(f"{linked} is a symbolic link; not writing through it")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        handle = os.open(path, os.O_RDWR | os.O_CREAT | NO_FOLLOW, 0o644)
     except OSError as exc:
-        raise IntentError(
-            f"Could not open the filter-intent lock {path}: {exc}"
-        ) from exc
+        raise IntentError(f"Could not open the lock {path}: {exc}") from exc
     try:
-        deadline = time.monotonic() + LOCK_WAIT
+        deadline = time.monotonic() + wait
         while not _try_lock(handle):
             if time.monotonic() >= deadline:
                 raise IntentError(
-                    f"Gave up after {LOCK_WAIT:.0f}s waiting for another "
+                    f"Gave up after {wait:.0f}s waiting for another "
                     f"gerrit-clone run on this tree to release {path}; run "
                     f"again once it finishes"
                 )

@@ -19,18 +19,30 @@ anything:
 Each rewrite is journalled before it starts and once it ends (see
 :mod:`gerrit_clone.content_journal`), and one that cannot be journalled
 does not start.
+
+Another run may extend the tree's intent while this one filters.  A
+result filtered under less than the intent now holds must not be
+published, or it would undo that run's decision: see :func:`publishing`.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Protocol
 
 from gerrit_clone.content_filter import apply_content_filters, is_shallow_repository
+from gerrit_clone.content_intent import (
+    LOCK_WAIT,
+    IntentError,
+    intent_locked,
+    load_intent,
+    project_locked,
+)
 from gerrit_clone.content_policy import FilterPolicy, collect_filter_tokens
 from gerrit_clone.content_spec import missing_tokens_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
     from gerrit_clone.content_spec import ContentFilterSpec
@@ -38,6 +50,12 @@ if TYPE_CHECKING:
 UNJOURNALLED_REFUSAL = (
     "Could not journal the rewrite in the tree's filter journal, so the "
     "repository was not filtered; see the log for why"
+)
+
+STALE_INTENT_REFUSAL = (
+    "Another run extended the tree's filter intent while this one filtered "
+    "the repository, so it was not published filtered under less than the "
+    "tree now decides. Run again"
 )
 
 SHALLOW_HISTORY_REFUSED = (
@@ -98,17 +116,52 @@ def filter_repository(
             return SHALLOW_HISTORY_REFUSED
         refused, git_filter, redact = SHALLOW_HISTORY_REFUSED, None, False
     journal = spec.journal
+    try:
+        with (
+            project_locked(journal.root, project, max(timeout, LOCK_WAIT))
+            if journal is not None
+            else nullcontext()
+        ):
+            failure = _rewrite(
+                spec,
+                repo_path,
+                project,
+                (filters.remove_patterns, git_filter, redact),
+                timeout,
+                apply,
+            )
+    except IntentError as exc:
+        failure = str(exc)
+    return "; ".join(reason for reason in (refused, failure) if reason) or None
+
+
+def _rewrite(
+    spec: ContentFilterSpec,
+    repo_path: Path,
+    project: str,
+    filters: tuple[list[str] | None, dict[str, list[str]] | None, bool],
+    timeout: int,
+    apply: ApplyContentFilters,
+) -> str | None:
+    """Journal, apply and check one rewrite; why it failed, or ``None``.
+
+    Held under the project's rewrite lock by the caller, so no two
+    rewrites of one project overlap (see
+    :func:`gerrit_clone.content_intent.project_locked`).
+    """
+    remove_patterns, git_filter, redact = filters
+    journal = spec.journal
     entry = None
     if journal is not None:
         tokens = collect_filter_tokens(project, git_filter) if git_filter else []
-        policy = FilterPolicy.of(filters.remove_patterns, tokens, redact)
+        policy = FilterPolicy.of(remove_patterns, tokens, redact)
         entry = journal.start(repo_path, project, policy)
         if entry is None:
             return UNJOURNALLED_REFUSAL
     ok, error = apply(
         repo_path,
         project,
-        remove_patterns=filters.remove_patterns,
+        remove_patterns=remove_patterns,
         git_filter_projects=git_filter,
         redact_secrets=redact,
         timeout=timeout,
@@ -116,5 +169,36 @@ def filter_repository(
     if journal is not None and entry is not None:
         # Left without an end if apply raised: then the start stays binding.
         journal.end(entry, repo_path, ok=ok)
-    failure = None if ok else (error or "content filtering failed")
-    return "; ".join(reason for reason in (refused, failure) if reason) or None
+    if ok:
+        # Clone and mirror filter in place: this is where they publish.
+        with publishing(spec, project) as stale:
+            if stale is not None:
+                ok, error = False, stale
+    return None if ok else (error or "content filtering failed")
+
+
+@contextmanager
+def publishing(spec: ContentFilterSpec, project: str) -> Generator[str | None]:
+    """Hold the tree's intent lock while *project*'s filtered result goes out.
+
+    Yields:
+        Why it must not go out -- the intent now asks more of *project*
+        than this run filtered it with -- or ``None``.  Holding the lock
+        until publishing ends stops another run extending the intent
+        meanwhile.  A run that writes nothing, such as a dry run, takes
+        no lock and is never stale.
+
+    Raises:
+        IntentError: If the lock could not be taken, or the intent read.
+    """
+    journal = spec.journal
+    if journal is None:
+        yield None
+        return
+    with intent_locked(journal.root):
+        decided = load_intent(journal.root).for_project(project)
+        yield (
+            None
+            if spec.project_policy(project).covers(decided)
+            else (STALE_INTENT_REFUSAL)
+        )

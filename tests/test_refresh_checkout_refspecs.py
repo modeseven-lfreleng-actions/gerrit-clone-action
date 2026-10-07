@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from gerrit_clone.refresh_checkout_stage import _staged_refspec
+from gerrit_clone.refresh_checkout_refs import staged_refspec
 
 
 @pytest.mark.parametrize(
@@ -20,17 +20,22 @@ from gerrit_clone.refresh_checkout_stage import _staged_refspec
         ),
         ("+refs/tags/*:refs/tags/*", "+refs/tags/*:refs/tags/*"),
         ("^refs/heads/wip/*", "^refs/heads/wip/*"),
-        ("refs/heads/main", "refs/heads/main"),
-        ("refs/heads/main:", "refs/heads/main:"),
     ],
 )
 def test_remote_tracking_refs_become_branches(refspec: str, staged: str) -> None:
-    assert _staged_refspec(refspec) == staged
+    assert staged_refspec(refspec) == staged
 
 
 @pytest.mark.parametrize(
     "refspec",
-    ["+refs/*:refs/other/*", "+refs/heads/*:refs/heads/*", "refs/notes/*:refs/notes/*"],
+    [
+        "+refs/*:refs/other/*",
+        "+refs/heads/*:refs/heads/*",
+        "refs/notes/*:refs/notes/*",
+        # Only FETCH_HEAD: the copy's branch would stay stale.
+        "refs/heads/main",
+        "refs/heads/main:",
+    ],
 )
 def test_anything_else_cannot_be_staged(refspec: str) -> None:
-    assert _staged_refspec(refspec) is None
+    assert staged_refspec(refspec) is None

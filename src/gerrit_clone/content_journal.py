@@ -9,8 +9,9 @@ for a tree.  This records the runs that carried it out:
 each rewrite starts and another once it ends.  The start names the
 command and release, the project and repository, the method --
 ``git filter-repo`` or the worktree fallback -- the filters, and a digest
-of every ref; the end says whether the rewrite worked, with the digest
-of the refs it left.  Like the intent, it holds a token's digest only.
+of every ref, and the remotes it fetches from, without credentials; the
+end says whether the rewrite worked, with the digest of the refs it
+left.  Like the intent, it holds a token's digest only.
 
 It is an audit trail, with one exception: a start without a successful
 end.  A crash, or a rewrite that failed part-way, may have left the
@@ -24,7 +25,8 @@ lock, so a line from one process never lands inside another's.  A last
 line a crash cut short is a start or an end whose rewrite never began or
 whose start already counts, so readers skip it and the next append
 removes it.  Any other line that cannot be understood stops the run, as
-an unreadable intent does.
+an unreadable intent does.  The journal is never written through a
+symbolic link, which a checkout could track to aim it outside the tree.
 """
 
 from __future__ import annotations
@@ -32,14 +34,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from gerrit_clone import __version__
 from gerrit_clone.content_intent import (
     INTENT_DIR,
+    JOURNAL_FILE,
+    NO_FOLLOW,
     FilterIntent,
     IntentError,
     intent_locked,
@@ -57,9 +63,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-JOURNAL_FILE = "filter-journal.jsonl"
 #: Every entry's ``schema``; one written by another release stops the run.
 JOURNAL_SCHEMA = 1
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+#: ``user@host:path``, git's scp-like form, as opposed to a local path;
+#: the host may be a bracketed IPv6 address, and the user hold a token.
+_SCP_LIKE = re.compile(r"^[^/@]+@(?P<rest>(?:\[[^\]/]+\]|[^/:\[\]]+):.*)$")
 
 
 @dataclass(frozen=True)
@@ -78,12 +88,13 @@ class Journal:
 
         Returns:
             The entry's id, for :meth:`end`; ``None`` if it could not be
-            written, or the refs could not be read for it, in which case
-            the rewrite must not begin.
+            written, or the refs or remotes could not be read for it, in
+            which case the rewrite must not begin.
         """
         refs = refs_digest(repo_path)
-        if refs is None:
-            logger.error(f"Could not read the refs of {repo_path} to journal them")
+        remotes = sources(repo_path)
+        if refs is None or remotes is None:
+            logger.error(f"Could not read the refs or remotes of {repo_path}")
             return None
         entry_id = uuid.uuid4().hex
         written = self._append(
@@ -96,6 +107,7 @@ class Journal:
                 "command": self.command,
                 "project": project,
                 "path": _relative(repo_path, self.root),
+                "sources": remotes,
                 "method": "filter-repo" if _check_git_filter_repo() else "worktree",
                 "policy": policy_fields(policy),
                 "refs_sha256": refs,
@@ -132,27 +144,78 @@ class Journal:
         try:
             with intent_locked(self.root):
                 _drop_torn_line(self.path)
+                created = not self.path.exists()
+                # Owner-only, as the intent is: a token's digest lets anyone
+                # who can read it confirm a guessed token offline.
                 handle = os.open(
-                    self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644
+                    self.path,
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | NO_FOLLOW,
+                    0o600,
                 )
                 try:
+                    # A file already there keeps its mode: a checkout can
+                    # track one, as 0644.
+                    if os.name != "nt":
+                        os.fchmod(handle, 0o600)
                     written = os.write(handle, line)
                     os.fsync(handle)
                 finally:
                     os.close(handle)
+                if created:
+                    # Without their entries on disk, a start could be lost
+                    # to a crash with the rewrite already under way; the
+                    # first run may have made .gerrit-clone/ just now.
+                    _sync_directory(self.path.parent)
+                    _sync_directory(self.root)
         except (IntentError, OSError) as exc:
             logger.error(f"Could not write the filter journal {self.path}: {exc}")
             return False
         return written == len(line)
 
 
+def sources(repo_path: Path) -> dict[str, str] | None:
+    """Where *repo_path* fetches from: each remote's URL, without secrets.
+
+    A staging copy's own path is a temporary directory, so the journal
+    names the upstream by these.  User information, which can hold a
+    token, is dropped, and so are a URL's query and fragment.
+
+    Returns:
+        ``None`` if the remotes could not be read; empty if it has none.
+    """
+    listed = git(repo_path, "config", "--get-regexp", r"^remote\..*\.url$")
+    # Exit status 1 is git finding no remote; anything else is a failure.
+    if listed is None or listed.returncode not in (0, 1):
+        return None
+    found: dict[str, str] = {}
+    for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
+        key, _, url = line.partition(" ")
+        # Git fetches from a remote's first URL, so that one names it.
+        found.setdefault(
+            key.removeprefix("remote.").removesuffix(".url"), _without_secrets(url)
+        )
+    return dict(sorted(found.items()))
+
+
+def _without_secrets(url: str) -> str:
+    if "://" in url:
+        parts = urlsplit(url)
+        host = parts.netloc.rpartition("@")[2]
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    scp_like = _SCP_LIKE.match(url)
+    return scp_like.group("rest") if scp_like else url
+
+
 def journal_path(root: Path) -> Path:
     return root / INTENT_DIR / JOURNAL_FILE
 
 
-def refs_digest(repo_path: Path) -> str | None:
-    """SHA-256 of every ref and what it points to; ``None`` if unread."""
-    listed = git(repo_path, "for-each-ref", "--format=%(objectname) %(refname)")
+def refs_digest(repo_path: Path, *prefixes: str) -> str | None:
+    """SHA-256 of every ref, or those under *prefixes*, and what each
+    points to; ``None`` if they could not be read."""
+    listed = git(
+        repo_path, "for-each-ref", "--format=%(objectname) %(refname)", *prefixes
+    )
     if listed is None or listed.returncode != 0:
         return None
     return hashlib.sha256(listed.stdout.encode("utf-8")).hexdigest()
@@ -161,8 +224,11 @@ def refs_digest(repo_path: Path) -> str | None:
 def unfinished_intent(root: Path) -> FilterIntent:
     """The filters of every rewrite the journal shows not completed.
 
-    Each is scoped to its project, and released once a later rewrite of
-    that project completes under filters covering it.
+    Each is scoped to its project, and released once it, or a rewrite of
+    that project that started after it, completes under filters covering
+    it.  Rewrites of one project never overlap -- each holds the
+    project's rewrite lock from its start to its end -- so a start left
+    without an end before a later one began is one that crashed.
 
     Raises:
         IntentError: If the journal could not be read, or holds an entry
@@ -172,6 +238,12 @@ def unfinished_intent(root: Path) -> FilterIntent:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        if path.is_symlink():
+            # It marks the tree's root (see find_root): read as no journal,
+            # a run in a subtree would set a parent's intent aside.
+            raise IntentError(
+                f"The filter journal {path} is a link to nothing"
+            ) from None
         return FilterIntent()
     except (OSError, UnicodeError) as exc:
         raise IntentError(f"Could not read the filter journal {path}: {exc}") from exc
@@ -203,6 +275,10 @@ def _apply_entry(pending: dict[str, tuple[str, FilterPolicy]], entry: Any) -> No
         raise ValueError(
             f"schema {schema!r} is not {JOURNAL_SCHEMA}; written by another release"
         )
+    digest = entry.get("refs_sha256")
+    # The refs' digest is each entry's evidence; none is written without.
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ValueError(f"refs_sha256 is not a SHA-256 digest: {digest!r}")
     event, entry_id = entry["event"], entry["id"]
     if event == "start":
         project = entry["project"]
@@ -213,15 +289,22 @@ def _apply_entry(pending: dict[str, tuple[str, FilterPolicy]], entry: Any) -> No
         raise ValueError(f"unknown event {event!r}")
     elif entry["ok"] is True and entry_id in pending:
         project, policy = pending[entry_id]
-        for other, (other_project, other_policy) in list(pending.items()):
+        # Starts in journal order, up to this one: a rewrite that started
+        # later, in another run, may yet be cut short.
+        for other in list(pending):
+            other_project, other_policy = pending[other]
             if other_project == project and policy.covers(other_policy):
                 del pending[other]
+            if other == entry_id:
+                break
 
 
 def _drop_torn_line(path: Path) -> None:
     """Remove a last line a crash cut short, so the next one starts clean."""
+    if path.is_symlink():
+        raise OSError(f"{path} is a symbolic link; not writing through it")
     try:
-        with path.open("rb+") as stream:
+        with os.fdopen(os.open(path, os.O_RDWR | NO_FOLLOW), "rb+") as stream:
             size = stream.seek(0, os.SEEK_END)
             if size == 0:
                 return
@@ -233,6 +316,17 @@ def _drop_torn_line(path: Path) -> None:
             stream.truncate(kept)
     except FileNotFoundError:
         return
+
+
+def _sync_directory(path: Path) -> None:
+    """Flush *path*'s entries to disk, where the OS can sync a directory."""
+    if os.name == "nt":
+        return
+    handle = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
 
 
 def _relative(repo_path: Path, root: Path) -> str:

@@ -18,8 +18,9 @@ Instead, as for a mirror (see :mod:`gerrit_clone.refresh_filtered`):
    tags.  Both filter methods rewrite branches, and ``filter-repo`` has
    no ``origin`` refs to fold.
 2. The copy fetches from the checkout's own remotes, and is filtered.
-3. If the filtered upstream does not extend what the checkout holds,
-   the checkout cannot follow it, and is refused.
+3. Under the tree's intent lock, so no other refresh publishes in
+   between: if the filtered upstream does not extend what the checkout
+   holds, or its branch's upstream is gone, it is refused.
 4. Otherwise any filters that rewrote the copy are recorded in the
    checkout, and pushing from it blocked; its remote-tracking refs and
    tags then take the copy's, in one atomic fetch.
@@ -28,32 +29,59 @@ Instead, as for a mirror (see :mod:`gerrit_clone.refresh_filtered`):
 
 Anything failing before step 4 leaves the checkout as it was, and puts
 back any stash the refresh made.  Filtering upstream content the same
-way gives the same commits each time, so a checkout an earlier filter
-rewrote, in place or through a copy, follows it in the same way.
+way gives the same commits each time, so a checkout an earlier staged
+refresh rewrote follows it the same way.  One filtered in place has
+lost its remote-tracking refs, and is refused.
 """
 
 from __future__ import annotations
 
 import tempfile
+from contextlib import nullcontext
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gerrit_clone.content_filter import apply_content_filters
-from gerrit_clone.content_origin import block_pushes
-from gerrit_clone.content_policy import PolicyReadError, add_policy, recorded_policy
-from gerrit_clone.content_stage import filter_repository
+from gerrit_clone.content_filter import _check_git_filter_repo, apply_content_filters
+from gerrit_clone.content_intent import IntentError
+from gerrit_clone.content_journal import refs_digest
+from gerrit_clone.content_policy import (
+    PolicyRecordError,
+    recorded_policy,
+    recorded_until_published,
+    stored_policy,
+)
+from gerrit_clone.content_stage import filter_repository, publishing
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
-from gerrit_clone.refresh_filtered import FilteredRefreshMixin
+from gerrit_clone.refresh_checkout_refs import (
+    PUBLISHED,
+    TRACKING,
+    configured_upstream,
+    drop_tags,
+    staged_refspec,
+)
+from gerrit_clone.refresh_filtered import OVERTAKEN_REFUSAL, FilteredRefreshMixin
 from gerrit_clone.refresh_git_env import run_git
+from gerrit_clone.subprocess_tracking import ProcessAbandonedError
 
 if TYPE_CHECKING:
     from gerrit_clone.models import RefreshResult
 
 logger = get_logger(__name__)
 
-_TRACKING = "refs/remotes/"
+#: Why a working copy is refused a rewrite only the worktree fallback can do.
+NO_FILTER_REPO_REFUSAL = (
+    "Without git filter-repo, content filtering adds a removal commit that "
+    "no later refresh could follow, so the working copy was left as it "
+    "was. Install git-filter-repo to refresh it"
+)
+
+#: Why a working copy is refused a refresh when its branch's upstream went.
+UPSTREAM_GONE_REFUSAL = (
+    "The branch this working copy's branch tracks no longer exists upstream, "
+    "so there is nothing for it to follow; it was left as it was"
+)
 
 #: Why a working copy is refused upstream history its filters rewrote.
 CANNOT_FOLLOW_REFUSAL = (
@@ -93,15 +121,24 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             result.error_message = f"Could not find its git directory: {git_dir.stderr}"
             self._restore_stash(repo_path, result)
             return False
-        stage_parent = Path(
-            tempfile.mkdtemp(prefix="gerrit-clone-stage-", dir=git_dir.stdout.strip())
-        )
         try:
-            outcome = self._refresh_checkout_stage(
-                repo_path, stage_parent / "repo.git", result
+            stage_parent = Path(
+                tempfile.mkdtemp(
+                    prefix="gerrit-clone-stage-", dir=git_dir.stdout.strip()
+                )
             )
-        finally:
-            removed = self._remove_stage(stage_parent, result)
+            try:
+                outcome = self._refresh_checkout_stage(
+                    repo_path, stage_parent / "repo.git", result
+                )
+            finally:
+                removed = self._remove_stage(stage_parent, result)
+        except ProcessAbandonedError:
+            raise  # A stash an abandoned refresh made stays for git stash list.
+        except Exception:
+            if not result.content_filtered:  # Nothing published yet.
+                self._restore_stash(repo_path, result)
+            raise
         # Brought up to date but for the copy's removal, the refresh still
         # fails, and the outcome step never restores a failure's stash.
         if outcome in (_Staged.FAILED, _Staged.REFUSED) or (
@@ -117,11 +154,13 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
         self, repo_path: Path, stage: Path, result: RefreshResult
     ) -> _Staged:
         """Steps 1 to 5 of the module docstring, with *stage* as the copy."""
+        # What publishing replaces, as it stood when the copy was made.
+        base = refs_digest(repo_path, *PUBLISHED)
         stopped = self._stage_and_filter(repo_path, stage, result)
+        if stopped is None:
+            stopped = self._record_and_publish(repo_path, stage, result, base)
         if stopped is not None:
             return stopped
-        if not self._record_and_publish(repo_path, stage, result):
-            return _Staged.FAILED
         result.content_filtered = True
         if self._bring_branch_up_to_date(repo_path, result):
             return _Staged.DONE
@@ -130,7 +169,7 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
     def _stage_and_filter(
         self, repo_path: Path, stage: Path, result: RefreshResult
     ) -> _Staged | None:
-        """Steps 1 to 3: ``None`` if the checkout may take what arrived."""
+        """Steps 1 and 2: ``None`` if the copy fetched and was filtered."""
         spec = self.content_filters
         assert spec is not None  # Checked by _refresh_in_place.
         if not (
@@ -153,29 +192,59 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
                 f"left as it was: {reason}"
             )
             return _Staged.FAILED
-        if not self.fetch_only and not self._can_follow(repo_path, stage):
-            result.error_message = CANNOT_FOLLOW_REFUSAL
+        # The worktree fallback's removal commit sits on upstream's tip, not
+        # on the last one: the next refresh's could never extend this one.
+        if not _check_git_filter_repo() and not stored_policy(stage).empty:
+            result.error_message = NO_FILTER_REPO_REFUSAL
             return _Staged.REFUSED
         return None
 
     def _record_and_publish(
-        self, repo_path: Path, stage: Path, result: RefreshResult
-    ) -> bool:
-        """Step 4: record what rewrote the copy, then publish its refs."""
+        self,
+        repo_path: Path,
+        stage: Path,
+        result: RefreshResult,
+        base: str | None,
+    ) -> _Staged | None:
+        """Steps 3 and 4, under the tree's intent lock (see :func:`publishing`).
+
+        Checked under the lock, so another refresh of the checkout cannot
+        publish in between: the refs publishing replaces must still be
+        as *base* saw them, or a copy staged before another run's would
+        roll any of them back.  ``None`` once published.
+        """
+        spec = self.content_filters
+        assert spec is not None  # Checked by _refresh_in_place.
         try:
             policy = recorded_policy(stage)
-        except PolicyReadError as exc:
-            result.error_message = str(exc)
-            return False
-        if not policy.empty and not (
-            add_policy(repo_path, policy) and block_pushes(repo_path)
-        ):
+            with publishing(spec, spec.project_name(repo_path)) as stale:
+                moved = base is None or refs_digest(repo_path, *PUBLISHED) != base
+                reason = stale or (OVERTAKEN_REFUSAL if moved else None)
+                if reason is not None:
+                    result.error_message = reason
+                    return _Staged.FAILED
+                # Fetch-only too: the checkout is recorded as filtered.
+                refusal = self._follow_refusal(repo_path, stage)
+                if refusal is not None:
+                    result.error_message = refusal
+                    return _Staged.REFUSED
+                # Undone unless the refs are published too.
+                guard = (
+                    recorded_until_published(repo_path, policy)
+                    if not policy.empty
+                    else nullcontext(lambda: None)
+                )
+                with guard as published:
+                    if not self._publish_to_checkout(repo_path, stage, result):
+                        return _Staged.FAILED
+                    published()
+                return None
+        except (IntentError, PolicyRecordError) as exc:
             result.error_message = (
-                "Could not record the content-filter policy, or block pushing, "
-                "so the working copy was left as it was"
+                f"Could not publish the refreshed refs, so the working copy "
+                f"was left as it was: {exc}"
             )
-            return False
-        return self._publish_to_checkout(repo_path, stage, result)
+            return _Staged.FAILED
 
     def _as_upstream_copy(
         self, repo_path: Path, stage: Path, result: RefreshResult
@@ -184,7 +253,8 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
 
         It holds the checkout's remote-tracking refs as its branches,
         ``refs/remotes/X`` as ``refs/heads/X``, and fetches there; the
-        checkout's own branches, and its remotes' ``HEAD`` refs, go.
+        checkout's own branches and tags, and its remotes' ``HEAD`` refs,
+        go (see :mod:`gerrit_clone.refresh_checkout_refs`).
         """
         moved = run_git(
             [
@@ -194,14 +264,19 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
                 "--prune",
                 "--no-tags",
                 str(repo_path),
-                f"+{_TRACKING}*:refs/heads/*",
-                f"^{_TRACKING}*/HEAD",
+                f"+{TRACKING}*:refs/heads/*",
+                f"^{TRACKING}*/HEAD",
             ],
             stage,
             timeout=self.timeout,
         )
-        if moved.returncode != 0:
-            result.error_message = f"Could not stage a copy: {moved.stderr.strip()}"
+        failure = (
+            f"Could not stage a copy: {moved.stderr.strip()}"
+            if moved.returncode != 0
+            else drop_tags(stage, self.timeout)
+        )
+        if failure is not None:
+            result.error_message = failure
             return False
         listed = run_git(
             ["git", "config", "--get-regexp", r"^remote\..*\.fetch$"], stage, timeout=10
@@ -210,16 +285,28 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
         for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
             key, _, value = line.partition(" ")
             refspecs.setdefault(key, []).append(value)
+        if not any(
+            refspec.partition(":")[2].startswith(TRACKING)
+            for values in refspecs.values()
+            for refspec in values
+        ):
+            # Fetching would update FETCH_HEAD alone, and leave the copy's
+            # branches where they were: a refresh that took nothing.
+            result.error_message = (
+                "Could not stage a copy: no remote has a fetch refspec that "
+                "updates a remote-tracking branch"
+            )
+            return False
         for key, values in refspecs.items():
             staged = [
                 refspec
-                for refspec in map(_staged_refspec, values)
+                for refspec in map(staged_refspec, values)
                 if refspec is not None
             ]
             if len(staged) != len(values):
                 result.error_message = (
                     f"Could not stage a copy: {key} fetches outside "
-                    f"{_TRACKING} and refs/tags/"
+                    f"{TRACKING} and refs/tags/"
                 )
                 return False
             run_git(["git", "config", "--unset-all", key], stage, timeout=10)
@@ -234,13 +321,14 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
                     return False
         return True
 
-    def _can_follow(self, repo_path: Path, stage: Path) -> bool:
-        """Whether the filtered upstream extends what *repo_path* holds.
+    def _follow_refusal(self, repo_path: Path, stage: Path) -> str | None:
+        """Why *repo_path* cannot follow the filtered upstream, if it cannot.
 
         Its upstream's old tip, or the branch itself if that ref has gone,
         must be an ancestor of the new one: an earlier filter's rewrite,
         repeated, gives the same commits, while one that now rewrites
-        history the checkout already holds does not.
+        history the checkout already holds does not.  An upstream branch
+        deleted upstream leaves nothing to follow, unless only fetching.
         """
         upstream = run_git(
             ["git", "rev-parse", "--symbolic-full-name", "@{upstream}"],
@@ -248,23 +336,23 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             timeout=10,
         )
         ref = upstream.stdout.strip()
-        if upstream.returncode != 0 or not ref.startswith(_TRACKING):
-            ref = self._configured_upstream(repo_path)
-        if not ref.startswith(_TRACKING):
-            return True  # No remote upstream: bringing it up to date fails.
+        if upstream.returncode != 0 or not ref.startswith(TRACKING):
+            ref = configured_upstream(repo_path)
+        if not ref.startswith(TRACKING):
+            return None  # Tracks a local branch, as a pull would take.
         new = run_git(
             [
                 "git",
                 "rev-parse",
                 "-q",
                 "--verify",
-                "refs/heads/" + ref[len(_TRACKING) :],
+                "refs/heads/" + ref[len(TRACKING) :],
             ],
             stage,
             timeout=10,
         )
         if new.returncode != 0:
-            return True  # Gone upstream: bringing it up to date fails.
+            return None if self.fetch_only else UPSTREAM_GONE_REFUSAL
         old = run_git(
             ["git", "rev-parse", "-q", "--verify", ref], repo_path, timeout=10
         )
@@ -281,34 +369,31 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             stage,
             timeout=self.timeout,
         )
-        return ancestor.returncode == 0
-
-    @staticmethod
-    def _configured_upstream(repo_path: Path) -> str:
-        """The current branch's upstream ref, from config, even if it is gone."""
-        branch = run_git(["git", "symbolic-ref", "-q", "HEAD"], repo_path, timeout=10)
-        if branch.returncode != 0:
-            return ""
-        found = run_git(
-            ["git", "for-each-ref", "--format=%(upstream)", branch.stdout.strip()],
-            repo_path,
-            timeout=10,
-        )
-        return found.stdout.strip() if found.returncode == 0 else ""
+        return None if ancestor.returncode == 0 else CANNOT_FOLLOW_REFUSAL
 
     def _publish_to_checkout(
         self, repo_path: Path, stage: Path, result: RefreshResult
     ) -> bool:
-        """Give *repo_path* the copy's refs, as remote-tracking refs and tags."""
+        """Give *repo_path* the copy's refs, as remote-tracking refs and tags.
+
+        With ``--prune``, remote-tracking refs the copy no longer has go in
+        the same atomic transaction, so a failure leaves every ref as it
+        was.  Left behind, one would keep history the filters now remove,
+        in a checkout recorded as filtered.
+        """
+        prune = ["--prune"] if self.prune else []
         published = run_git(
             [
                 "git",
                 "fetch",
                 "--atomic",
-                "--no-tags",
+                *prune,
+                # Rewritten tags replace their originals; through --tags
+                # rather than a refspec, --prune spares local-only tags.
+                "--force",
+                "--tags",
                 str(stage),
                 "+refs/heads/*:refs/remotes/*",
-                "+refs/tags/*:refs/tags/*",
             ],
             repo_path,
             timeout=self.timeout,
@@ -320,30 +405,7 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             )
             return False
         result.commits_pulled = self._count_fetched_commits(published.stderr)
-        if self.prune:
-            self._prune_checkout(repo_path, stage)
         return True
-
-    @staticmethod
-    def _prune_checkout(repo_path: Path, stage: Path) -> None:
-        """Delete remote-tracking refs the copy no longer has, as --prune would."""
-        kept = run_git(
-            ["git", "for-each-ref", "--format=%(refname)"], stage, timeout=30
-        )
-        tracking = run_git(
-            ["git", "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/"],
-            repo_path,
-            timeout=30,
-        )
-        if kept.returncode != 0 or tracking.returncode != 0:
-            logger.warning(f"Could not prune the remote-tracking refs of {repo_path}")
-            return
-        present = set(kept.stdout.split())
-        for line in tracking.stdout.splitlines():
-            ref, _, symref = line.partition(" ")
-            if symref or "refs/heads/" + ref[len(_TRACKING) :] in present:
-                continue
-            run_git(["git", "update-ref", "-d", ref], repo_path, timeout=10)
 
     def _bring_branch_up_to_date(self, repo_path: Path, result: RefreshResult) -> bool:
         """Fast-forward or rebase onto the published upstream, as a pull would."""
@@ -376,49 +438,3 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
         )
         result.files_changed = self._count_changed_files(diff.stdout)
         return True
-
-    def _restore_stash(self, repo_path: Path, result: RefreshResult) -> None:
-        """Pop a stash the refresh made, onto the branch it came from.
-
-        In force mode the stash may have been taken on a feature branch
-        before switching to the default branch; popping it there would
-        apply that work to the wrong branch, and drop the stash entry.
-        It is then left for ``git stash list``.
-        """
-        if not result.stash_created or result.stash_popped:
-            return
-        if (
-            result.stash_branch is not None
-            and result.current_branch != result.stash_branch
-        ):
-            logger.warning(
-                f"⚠️ {result.project_name}: Stash was created on "
-                f"'{result.stash_branch}' but the working tree is now "
-                f"on '{result.current_branch}'; leaving the stash "
-                f"intact for manual recovery (git stash list)"
-            )
-        elif self._pop_stash(repo_path):
-            result.stash_popped = True
-            logger.debug(f"💾 {result.project_name}: Restored stashed changes")
-        else:
-            logger.warning(
-                f"⚠️ {result.project_name}: Failed to restore stash (may have conflicts)"
-            )
-
-
-def _staged_refspec(refspec: str) -> str | None:
-    """*refspec* for a working copy's staged copy; ``None`` if it has none.
-
-    Remote-tracking destinations become branches, as the copy holds
-    them; tags, negative refspecs and ones naming no destination stay as
-    they are.  Anything else would land where publishing never looks.
-    """
-    force = "+" if refspec.startswith("+") else ""
-    source, colon, destination = refspec.removeprefix("+").partition(":")
-    if refspec.startswith("^") or not colon or not destination:
-        return refspec
-    if destination.startswith(_TRACKING):
-        return f"{force}{source}:refs/heads/{destination.removeprefix(_TRACKING)}"
-    if destination.startswith("refs/tags/"):
-        return refspec
-    return None

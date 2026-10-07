@@ -91,7 +91,10 @@ class ContentFilterSpec:
 
     def policy_for(self, repo_path: Path) -> FilterPolicy:
         """The policy this run would filter *repo_path* under."""
-        project = self.project_name(repo_path)
+        return self.project_policy(self.project_name(repo_path))
+
+    def project_policy(self, project: str) -> FilterPolicy:
+        """The policy this run would filter project *project* under."""
         filters = self.filters_for(project)
         return FilterPolicy.of(
             filters.remove_patterns, self._tokens(project), filters.redact_secrets

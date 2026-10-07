@@ -27,10 +27,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gerrit_clone.content_filter import apply_content_filters, is_shallow_repository
-from gerrit_clone.content_origin import block_pushes
-from gerrit_clone.content_policy import add_policy, mark_recorded, recorded_policy
+from gerrit_clone.content_intent import IntentError
+from gerrit_clone.content_journal import refs_digest
+from gerrit_clone.content_policy import (
+    PolicyRecordError,
+    mark_recorded,
+    recorded_policy,
+    recorded_until_published,
+)
 from gerrit_clone.content_spec import missing_tokens_refusal
-from gerrit_clone.content_stage import filter_repository
+from gerrit_clone.content_stage import filter_repository, publishing
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import RefreshStatus
 from gerrit_clone.refresh_force import ForceModeMixin
@@ -52,11 +58,17 @@ FILTERED_REFRESH_REFUSAL = (
     "--remove-files, --git-filter or --redact-secrets as before"
 )
 
-#: Why a working copy filtered where it stands is refused a refresh.
+#: Why a filtered working copy with nothing to follow is refused a refresh.
 FILTERED_WORKING_COPY_REFUSAL = (
-    "Content filtering rewrote this working copy in place, which removed "
-    "the remote-tracking branch a refresh follows, so it cannot be "
-    "refreshed"
+    "Content filtering rewrote this working copy, and its branch has no "
+    "remote-tracking branch for a refresh to follow -- filtering a working "
+    "copy in place removes them -- so it cannot be refreshed"
+)
+
+#: Why a staged copy is not published over a mirror another run refreshed.
+OVERTAKEN_REFUSAL = (
+    "Another run refreshed the repository while this one staged its copy, "
+    "so the copy was not published over it. Run again"
 )
 
 #: Why a repository an earlier release filtered is refused a refresh.
@@ -212,9 +224,12 @@ class FilteredRefreshMixin(ForceModeMixin):
         refresh filtered keeps them, and can follow upstream again.
         """
         found = run_git(
-            ["git", "rev-parse", "--abbrev-ref", "@{upstream}"], repo_path, timeout=10
+            ["git", "rev-parse", "--symbolic-full-name", "@{upstream}"],
+            repo_path,
+            timeout=10,
         )
-        return found.returncode == 0
+        # Tracking a local branch, it would take nothing the copy fetched.
+        return found.returncode == 0 and found.stdout.startswith("refs/remotes/")
 
     def _missing_tokens_refusal(self, repo_path: Path) -> str | None:
         """Why *repo_path* is refused for lacking tokens its intent replaces.
@@ -268,6 +283,9 @@ class FilteredRefreshMixin(ForceModeMixin):
         """Stage, fetch and filter *repo_path* at *stage*; publish if all worked."""
         spec = self.content_filters
         assert spec is not None  # Checked by _filtered_refusal.
+        # What the copy starts from: published over refs another run moved
+        # since, its forced fetch would roll them back.
+        base = refs_digest(repo_path)
         if not self._prepare_stage(repo_path, stage, result):
             return False
         if not self._execute_adaptive_refresh(stage, result, bare=True):
@@ -289,7 +307,19 @@ class FilteredRefreshMixin(ForceModeMixin):
         # The copy records the run's filters if they rewrote anything in
         # it, and nothing if they did not.  They are added to the mirror's
         # record, which only ever grows.
-        return self._publish_stage(repo_path, stage, result, recorded_policy(stage))
+        try:
+            with publishing(spec, spec.project_name(repo_path)) as stale:
+                overtaken = base is None or refs_digest(repo_path) != base
+                refusal = stale or (OVERTAKEN_REFUSAL if overtaken else None)
+                if refusal is not None:
+                    result.error_message = refusal
+                    return False
+                return self._publish_stage(
+                    repo_path, stage, result, recorded_policy(stage)
+                )
+        except IntentError as exc:
+            result.error_message = f"Could not publish the refreshed refs: {exc}"
+            return False
 
     @staticmethod
     def _remove_stage(stage_parent: Path, result: RefreshResult) -> bool:
@@ -371,26 +401,30 @@ class FilteredRefreshMixin(ForceModeMixin):
         The policy is recorded and pushing blocked first: refs published
         without them would be filtered content nothing knows to protect.
         """
-        if not add_policy(repo_path, policy):
-            result.error_message = (
-                "Could not record the content-filter policy, so the "
-                "repository was left as it was"
-            )
-            return False
-        if not block_pushes(repo_path):
-            result.error_message = (
-                "Could not block pushing from the repository, so it was left as it was"
-            )
-            return False
-        published = run_git(
-            ["git", "fetch", "--atomic", "--prune", str(stage), "+refs/*:refs/*"],
-            repo_path,
-            timeout=self.timeout,
-        )
-        if published.returncode != 0:
-            result.error_message = (
-                f"Could not publish the refreshed refs: {published.stderr.strip()}"
-            )
+        try:
+            # Undone unless the refs are published too.
+            with recorded_until_published(repo_path, policy) as completed:
+                published = run_git(
+                    [
+                        "git",
+                        "fetch",
+                        "--atomic",
+                        "--prune",
+                        str(stage),
+                        "+refs/*:refs/*",
+                    ],
+                    repo_path,
+                    timeout=self.timeout,
+                )
+                if published.returncode != 0:
+                    result.error_message = (
+                        f"Could not publish the refreshed refs: "
+                        f"{published.stderr.strip()}"
+                    )
+                    return False
+                completed()
+        except PolicyRecordError as exc:
+            result.error_message = f"{exc}, so the repository was left as it was"
             return False
         result.commits_pulled = self._count_fetched_commits(published.stderr)
         result.content_filtered = True

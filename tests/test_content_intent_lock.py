@@ -32,10 +32,6 @@ if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
-#: Holds the lock as another run would; there is none on Windows.
-fcntl = pytest.importorskip("fcntl")
-
-
 #: Another run adding ``b.txt`` to the tree given as its argument.
 _OTHER_RUN = """
 import sys
@@ -66,7 +62,12 @@ def tree(tmp_path: Path) -> Path:
 
 @contextmanager
 def _holding(tree: Path) -> Generator[None, None, None]:
-    """The tree's intent lock, held as another run would hold it."""
+    """The tree's intent lock, held with ``fcntl`` as another run holds it.
+
+    Independent of the code under test; there is no ``fcntl`` on Windows,
+    which :class:`TestAnyPlatform` covers instead.
+    """
+    fcntl = pytest.importorskip("fcntl")
     lock = tree / ".gerrit-clone" / "filter-policy.lock"
     lock.parent.mkdir(exist_ok=True)
     with lock.open("a") as stream:
@@ -144,3 +145,47 @@ class TestWaiting:
         resolve_filters(tree, None, persist=True)
 
         assert not (tree / ".gerrit-clone").exists()
+
+
+#: Holds the tree's lock through intent_locked until told to let go.
+_HOLDER = """
+import sys
+import time
+from pathlib import Path
+
+from gerrit_clone.content_intent import intent_locked
+
+root, ready, release = map(Path, sys.argv[1:])
+with intent_locked(root):
+    ready.touch()
+    deadline = time.monotonic() + 60
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+"""
+
+
+class TestAnyPlatform:
+    """Through intent_locked itself, so msvcrt on Windows is covered too."""
+
+    def test_a_run_waits_for_another_process_and_then_proceeds(
+        self, tree: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready, release = tree.parent / "ready", tree.parent / "release"
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER, str(tree), str(ready), str(release)]
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert ready.exists(), "the other process never took the lock"
+            monkeypatch.setattr("gerrit_clone.content_intent.LOCK_WAIT", 0.3)
+
+            with pytest.raises(IntentError, match="another gerrit-clone run"):
+                resolve_filters(tree, _options(tree, "a.txt"), persist=True)
+        finally:
+            release.touch()
+            assert holder.wait(timeout=60) == 0
+        resolve_filters(tree, _options(tree, "a.txt"), persist=True)
+
+        assert _patterns(tree) == {"a.txt"}
