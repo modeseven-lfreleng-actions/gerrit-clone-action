@@ -363,6 +363,9 @@ Issues:
 - **Flexible Strategies**: Support for merge (fast-forward) or rebase
 - **Detailed Reporting**: JSON manifest with complete results
 - **Dry Run**: Preview changes without applying them
+- **Single Checkouts**: Point `--output-path` at one working copy's top
+  level, and refresh lists its own log and manifest in that checkout's
+  `.git/info/exclude`, keeping them out of its uncommitted changes
 
 ### Mirror Command Examples
 

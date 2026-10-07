@@ -9,9 +9,10 @@ the output path, applies any requested content filters and reports results.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import typer
 
@@ -32,6 +33,12 @@ from gerrit_clone.file_logging import (
 )
 from gerrit_clone.models import normalize_project_list
 from gerrit_clone.refresh_manager import refresh_repositories
+from gerrit_clone.worktree_exclude import (
+    hide_from_checkout,
+    is_checkout_top,
+    literal_pattern,
+    tracked_names,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,6 +46,10 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from gerrit_clone.models import RefreshBatchResult
+
+
+#: Default manifest name, before its timestamp and ``.json`` suffix.
+MANIFEST_PREFIX = "refresh-manifest-"
 
 
 @dataclass(frozen=True)
@@ -78,6 +89,7 @@ def prepare_refresh(request: RefreshRequest, console: Console) -> None:
         console.print(format_version_string("refresh"))
         console.print()
 
+    _hide_run_files(request, console)
     _start_logging(request, console)
 
     # Display configuration summary
@@ -131,6 +143,72 @@ def _validate_request(request: RefreshRequest, console: Console) -> None:
             f"[red]❌ Invalid pull strategy: {request.strategy}. Must be 'merge' or 'rebase'.[/red]"
         )
         raise typer.Exit(ExitCode.VALIDATION_ERROR.value)
+
+
+def _hide_run_files(request: RefreshRequest, console: Console) -> None:
+    """Keep the log and manifest out of a checkout at the output path.
+
+    Written there, they are untracked changes in it, and refresh skips a
+    working copy with uncommitted changes (#310).  A tracked file with
+    one of their names cannot be hidden, and writing it would overwrite
+    committed content, so the run stops before writing anything; so it
+    does for a symbolic link there, which could aim the write at one.
+    """
+    root = request.output_path
+    names = [get_default_log_path("refresh", root).name]
+    if request.manifest_filename:
+        # One written outside the checkout cannot dirty it.  Its own name
+        # is kept, not resolved: a link there is refused below.
+        manifest = root / request.manifest_filename
+        with contextlib.suppress(ValueError):
+            names.append(
+                (manifest.parent.resolve() / manifest.name)
+                .relative_to(root.resolve())
+                .as_posix()
+            )
+    try:
+        checkout = is_checkout_top(root)
+        clashes = tracked_names(root, names) if checkout else []
+    except OSError as exc:
+        _stop(console, f"{exc}; refresh stopped before writing into it")
+    if not checkout:
+        return
+    linked = [name for name in names if (root / name).is_symlink()]
+    if linked:
+        _stop(
+            console,
+            f"{root} is a checkout where {', '.join(linked)} is a symbolic "
+            f"link, which refresh would write its log or manifest through. "
+            f"Remove it, or pass another --manifest-filename",
+        )
+    if clashes:
+        _stop(
+            console,
+            f"{root} is a checkout that tracks {', '.join(clashes)}, which "
+            f"refresh would overwrite with its own log or manifest. Point "
+            f"--output-path at its parent directory, or pass another "
+            f"--manifest-filename",
+        )
+    patterns = [literal_pattern(name) for name in names]
+    if None in patterns:
+        _stop(
+            console,
+            "A --manifest-filename with a line break cannot be hidden from "
+            "the checkout's git status, and refresh would then skip the "
+            "checkout every time; choose another name",
+        )
+    if not request.manifest_filename:
+        patterns.append(f"/{MANIFEST_PREFIX}*.json")
+    try:
+        hide_from_checkout(root, [pattern for pattern in patterns if pattern])
+    except OSError as exc:
+        _stop(console, f"{exc}; refresh would then skip the checkout")
+
+
+def _stop(console: Console, message: str) -> NoReturn:
+    """Stop the run with a configuration error, before it writes anything."""
+    console.print(f"[red]❌ {message}[/red]")
+    raise typer.Exit(ExitCode.CONFIGURATION_ERROR.value)
 
 
 def _start_logging(request: RefreshRequest, console: Console) -> None:
@@ -280,7 +358,7 @@ def _write_manifest(
         manifest_file = request.output_path / request.manifest_filename
     else:
         timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
-        manifest_file = request.output_path / f"refresh-manifest-{timestamp}.json"
+        manifest_file = request.output_path / f"{MANIFEST_PREFIX}{timestamp}.json"
     write_refresh_manifest(manifest_file, result)
     if not request.quiet:
         console.print(f"📄 Manifest: [cyan]{manifest_file}[/cyan]")

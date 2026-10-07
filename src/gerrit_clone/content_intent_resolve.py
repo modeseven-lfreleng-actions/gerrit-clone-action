@@ -21,7 +21,6 @@ and it stays refused on its own (see :mod:`gerrit_clone.content_legacy`).
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gerrit_clone.content_intent import (
@@ -32,14 +31,15 @@ from gerrit_clone.content_intent import (
     load_intent,
     save_intent,
 )
-from gerrit_clone.content_origin import git
 from gerrit_clone.content_policy import PolicyReadError, stored_policy
 from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.logging import get_logger
 from gerrit_clone.refresh_discovery import RepositoryDiscoveryMixin, project_name_for
+from gerrit_clone.worktree_exclude import hide_from_checkout
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -86,7 +86,13 @@ def resolve_filters(
         save_intent(root, intent)
         logger.info(f"Recorded the content-filter intent for {root}")
     if persist and not intent.empty:
-        _keep_out_of_worktree(root)
+        # Left visible at a checkout's top level, the intent would be an
+        # untracked change there, and refresh would skip the checkout.
+        try:
+            hide_from_checkout(root, [f"/{INTENT_DIR}/"])
+        except OSError as exc:
+            # Only costs refresh skipping the checkout, which it reports.
+            logger.warning(f"Could not hide {INTENT_DIR} from git: {exc}")
     if intent.empty:
         return None
     if options is None:
@@ -98,35 +104,6 @@ def resolve_filters(
         root,
         intent,
     )
-
-
-def _keep_out_of_worktree(root: Path) -> None:
-    """Hide the intent from git when *root* is a working copy's top level.
-
-    Left visible, ``.gerrit-clone/`` is an untracked change in that
-    checkout, and refresh skips a working copy with uncommitted changes.
-    Failing to hide it only costs that skip, so it is logged, not raised.
-    """
-    top = git(root, "rev-parse", "--show-toplevel")
-    if top is None or top.returncode != 0:
-        return
-    if Path(top.stdout.strip()).resolve() != root.resolve():
-        return
-    found = git(root, "rev-parse", "--git-path", "info/exclude")
-    if found is None or found.returncode != 0:
-        logger.warning(f"Could not find {root}'s info/exclude to hide {INTENT_DIR}")
-        return
-    exclude = root / found.stdout.strip()
-    pattern = f"/{INTENT_DIR}/"
-    try:
-        lines = (
-            exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
-        )
-        if pattern not in lines:
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text("\n".join([*lines, pattern]) + "\n", encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        logger.warning(f"Could not hide {INTENT_DIR} in {exclude}: {exc}")
 
 
 def gathered_intent(root: Path, repos: Iterable[Path] | None = None) -> FilterIntent:
