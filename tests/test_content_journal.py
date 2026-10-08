@@ -412,6 +412,26 @@ class TestSources:
             "v6": "[2001:db8::1]:com/parent",
         }
 
+    @pytest.mark.xfail(strict=True, reason="a helper's address is not redacted")
+    def test_a_remote_helper_url_is_redacted_too(self, tree: Path) -> None:
+        """Its address is a URL in its own right, credentials and all."""
+        repo = tree / "com" / "parent"
+        _git(
+            repo,
+            "remote",
+            "add",
+            "relay",
+            f"remote-x::https://user:{TOKEN}@gerrit.example.org/com/parent",
+        )
+
+        filter_repository(_spec(tree), repo, "com/parent", 60, apply=_unchanged)
+
+        text = (tree / ".gerrit-clone" / "filter-journal.jsonl").read_text()
+        assert TOKEN not in text
+        assert _journal(tree)[0]["sources"]["relay"] == (
+            "remote-x::https://gerrit.example.org/com/parent"
+        )
+
     def test_a_remote_is_named_by_the_url_git_fetches_from(self, tree: Path) -> None:
         """Git fetches from a remote's first URL; later ones only push."""
         repo = tree / "com" / "parent"
