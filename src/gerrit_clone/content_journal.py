@@ -39,7 +39,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit, urlunsplit
 
 from gerrit_clone import __version__
 from gerrit_clone.content_intent import (
@@ -55,6 +54,7 @@ from gerrit_clone.content_intent import (
 from gerrit_clone.content_origin import git
 from gerrit_clone.content_removal import _check_git_filter_repo
 from gerrit_clone.logging import get_logger
+from gerrit_clone.url_credentials import redact_url
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,9 +67,6 @@ logger = get_logger(__name__)
 JOURNAL_SCHEMA = 1
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-#: ``user@host:path``, git's scp-like form, as opposed to a local path;
-#: the host may be a bracketed IPv6 address, and the user hold a token.
-_SCP_LIKE = re.compile(r"^[^/@]+@(?P<rest>(?:\[[^\]/]+\]|[^/:\[\]]+):.*)$")
 
 
 @dataclass(frozen=True)
@@ -177,8 +174,8 @@ def sources(repo_path: Path) -> dict[str, str] | None:
     """Where *repo_path* fetches from: each remote's URL, without secrets.
 
     A staging copy's own path is a temporary directory, so the journal
-    names the upstream by these.  User information, which can hold a
-    token, is dropped, and so are a URL's query and fragment.
+    names the upstream by these, through
+    :func:`gerrit_clone.url_credentials.redact_url`.
 
     Returns:
         ``None`` if the remotes could not be read; empty if it has none.
@@ -192,18 +189,9 @@ def sources(repo_path: Path) -> dict[str, str] | None:
         key, _, url = line.partition(" ")
         # Git fetches from a remote's first URL, so that one names it.
         found.setdefault(
-            key.removeprefix("remote.").removesuffix(".url"), _without_secrets(url)
+            key.removeprefix("remote.").removesuffix(".url"), redact_url(url)
         )
     return dict(sorted(found.items()))
-
-
-def _without_secrets(url: str) -> str:
-    if "://" in url:
-        parts = urlsplit(url)
-        host = parts.netloc.rpartition("@")[2]
-        return urlunsplit((parts.scheme, host, parts.path, "", ""))
-    scp_like = _SCP_LIKE.match(url)
-    return scp_like.group("rest") if scp_like else url
 
 
 def journal_path(root: Path) -> Path:

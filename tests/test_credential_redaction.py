@@ -25,10 +25,6 @@ from gerrit_clone.models import Config
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.xfail(
-    strict=True, reason="remote URLs reach manifests and push output whole"
-)
-
 #: Built at runtime so that no credential-shaped literal sits in the
 #: source for secret scanners to flag.
 TOKEN = "tok-" + "7c6b5a4d3e2f" * 2

@@ -45,6 +45,7 @@ from gerrit_clone.refresh_output import (
 )
 from gerrit_clone.refresh_repo_state import StashOutcome
 from gerrit_clone.subprocess_tracking import ProcessAbandonedError
+from gerrit_clone.url_credentials import redact_url
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,7 +176,8 @@ class RefreshWorker(StagedCheckoutMixin):
                 result.had_uncommitted_changes = state.get("has_uncommitted", False)
 
             remote_url = self._get_remote_url(repo_path)
-            result.remote_url = remote_url
+            # Recorded in the manifest and quoted below: never a credential.
+            result.remote_url = redact_url(remote_url) if remote_url else None
 
             # Read before the Gerrit gate: a config too broken to read the
             # policy hides the remotes too, and must fail the repository,
@@ -186,7 +188,9 @@ class RefreshWorker(StagedCheckoutMixin):
             # fetch being --all.
             if self.filter_gerrit_only and not self._has_gerrit_remote(repo_path):
                 result.status = RefreshStatus.NOT_GERRIT_REPO
-                result.error_message = f"Not a Gerrit repository (remote: {remote_url})"
+                result.error_message = (
+                    f"Not a Gerrit repository (remote: {result.remote_url})"
+                )
                 self._stamp_completion(result, started_at)
                 logger.debug(f"⊘ {project_name}: Not a Gerrit repository")
                 return result

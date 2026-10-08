@@ -412,7 +412,6 @@ class TestSources:
             "v6": "[2001:db8::1]:com/parent",
         }
 
-    @pytest.mark.xfail(strict=True, reason="a helper's address is not redacted")
     def test_a_remote_helper_url_is_redacted_too(self, tree: Path) -> None:
         """Its address is a URL in its own right, credentials and all."""
         repo = tree / "com" / "parent"

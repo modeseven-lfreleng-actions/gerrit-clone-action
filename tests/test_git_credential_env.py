@@ -382,7 +382,6 @@ class TestRemoteHelperUrls:
         ],
         ids=["password", "username-over-https", "ssh-password", "nested"],
     )
-    @pytest.mark.xfail(strict=True, reason="a helper's address is not checked")
     def test_a_credential_in_the_address_is_refused(self, url: str) -> None:
         with pytest.raises(UnsafeCloneUrlError, match="reach the git command line"):
             reject_credentialed_url(url)
