@@ -191,6 +191,35 @@ class TestGitHubRepo:
 
         assert repo.default_branch is None
 
+    def test_from_api_response_captures_archived(self) -> None:
+        """Test that the REST archived flag is captured from API response."""
+        api_data = {
+            "name": "test-repo",
+            "full_name": "org/test-repo",
+            "html_url": "https://github.com/org/test-repo",
+            "clone_url": "https://github.com/org/test-repo.git",
+            "ssh_url": "git@github.com:org/test-repo.git",
+            "private": False,
+            "archived": True,
+        }
+
+        repo = GitHubRepo.from_api_response(api_data)
+
+        assert repo.archived is True
+
+    def test_archived_field_defaults_to_false(self) -> None:
+        """Test that GitHubRepo.archived defaults to False."""
+        repo = GitHubRepo(
+            name="test-repo",
+            full_name="org/test-repo",
+            html_url="https://github.com/org/test-repo",
+            clone_url="https://github.com/org/test-repo.git",
+            ssh_url="git@github.com:org/test-repo.git",
+            private=False,
+        )
+
+        assert repo.archived is False
+
 
 class TestGitHubAPI:
     """Test GitHubAPI client."""
@@ -912,7 +941,6 @@ class TestListAllReposGraphQL:
 
         api.close()
 
-    @pytest.mark.xfail(strict=True, reason="#319: isArchived not queried")
     def test_list_all_repos_carries_archived_flag(self) -> None:
         """Test that the query selects isArchived and results carry it."""
         api = GitHubAPI(token="test-token")

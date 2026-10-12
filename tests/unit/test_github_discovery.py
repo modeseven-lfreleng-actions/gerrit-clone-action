@@ -220,11 +220,12 @@ class TestApplyFilters:
             include_projects=["repo1", "repo3"],
         )
 
-        filtered = _apply_filters(projects, config)
+        filtered, skipped = _apply_filters(projects, config)
 
         assert len(filtered) == 2
         assert filtered[0].name == "repo1"
         assert filtered[1].name == "repo3"
+        assert skipped == 0
 
     def test_filters_archived_repos(self) -> None:
         """Test filtering of archived repositories."""
@@ -248,11 +249,12 @@ class TestApplyFilters:
             skip_archived=True,
         )
 
-        filtered = _apply_filters(projects, config)
+        filtered, skipped = _apply_filters(projects, config)
 
         assert len(filtered) == 2
         assert filtered[0].name == "active1"
         assert filtered[1].name == "active2"
+        assert skipped == 1
 
     def test_includes_archived_when_not_skipped(self) -> None:
         """Test including archived repos when skip_archived=False."""
@@ -273,9 +275,38 @@ class TestApplyFilters:
             skip_archived=False,
         )
 
-        filtered = _apply_filters(projects, config)
+        filtered, skipped = _apply_filters(projects, config)
 
         assert len(filtered) == 2
+        assert skipped == 0
+
+    @pytest.mark.parametrize("skip_archived", [True, False])
+    def test_name_filtered_archived_not_counted_as_skipped(
+        self, skip_archived: bool
+    ) -> None:
+        """An archived repo the name filters remove isn't skipped as archived."""
+        projects = [
+            Project(
+                name="active1", state=ProjectState.ACTIVE, source_type=SourceType.GITHUB
+            ),
+            Project(
+                name="archived1",
+                state=ProjectState.READ_ONLY,
+                source_type=SourceType.GITHUB,
+            ),
+        ]
+
+        config = Config(
+            host="github.com",
+            source_type=SourceType.GITHUB,
+            exclude_projects=["archived1"],
+            skip_archived=skip_archived,
+        )
+
+        filtered, skipped = _apply_filters(projects, config)
+
+        assert [p.name for p in filtered] == ["active1"]
+        assert skipped == 0
 
     def test_no_filters_returns_all(self) -> None:
         """Test that no filters returns all projects."""
@@ -294,9 +325,10 @@ class TestApplyFilters:
             skip_archived=False,
         )
 
-        filtered = _apply_filters(projects, config)
+        filtered, skipped = _apply_filters(projects, config)
 
         assert len(filtered) == 2
+        assert skipped == 0
 
 
 class TestDiscoverGitHubRepositories:
@@ -452,15 +484,7 @@ class TestDiscoverGitHubRepositories:
     @pytest.mark.parametrize(
         ("skip_archived", "expected_names", "expected_skipped"),
         [
-            pytest.param(
-                True,
-                ["live"],
-                1,
-                id="skip-archived",
-                marks=pytest.mark.xfail(
-                    strict=True, reason="#319: isArchived not queried"
-                ),
-            ),
+            pytest.param(True, ["live"], 1, id="skip-archived"),
             pytest.param(False, ["live", "old"], 0, id="include-archived"),
         ],
     )
@@ -509,7 +533,6 @@ class TestDiscoverGitHubRepositories:
         assert sorted(p.name for p in projects) == expected_names
         assert stats["skipped"] == expected_skipped
 
-    @pytest.mark.xfail(strict=True, reason="#319: archived flag not carried")
     @patch("gerrit_clone.github_discovery.GitHubAPI")
     def test_user_fallback_skips_archived(self, mock_api_class: MagicMock) -> None:
         """A user repo archived on GitHub is skipped by default."""

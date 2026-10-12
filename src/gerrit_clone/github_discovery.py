@@ -88,6 +88,7 @@ def discover_github_repositories(
                         "ssh_url": r.ssh_url,
                         "clone_url": r.clone_url,
                         "private": r.private,
+                        "archived": r.archived,
                         "description": r.description,
                         "default_branch": None,
                     }
@@ -102,16 +103,7 @@ def discover_github_repositories(
             projects = _convert_to_projects(repos_list)
 
             # Apply filters
-            filtered_projects = _apply_filters(projects, config)
-
-            # Compute how many archived (READ_ONLY) projects were skipped by filtering
-            archived_total = sum(
-                1 for p in projects if p.state == ProjectState.READ_ONLY
-            )
-            archived_remaining = sum(
-                1 for p in filtered_projects if p.state == ProjectState.READ_ONLY
-            )
-            skipped_archived = archived_total - archived_remaining
+            filtered_projects, skipped_archived = _apply_filters(projects, config)
 
             stats = {
                 "total": len(filtered_projects),
@@ -209,7 +201,9 @@ def _convert_to_projects(repos: list[dict[str, Any]]) -> list[Project]:
     return projects
 
 
-def _apply_filters(projects: list[Project], config: Config) -> list[Project]:
+def _apply_filters(
+    projects: list[Project], config: Config
+) -> tuple[list[Project], int]:
     """Apply configuration filters to project list.
 
     Supports shell-style wildcards (``*``, ``?``, ``[seq]``) and
@@ -220,7 +214,9 @@ def _apply_filters(projects: list[Project], config: Config) -> list[Project]:
         config: Configuration with filter settings
 
     Returns:
-        Filtered list of projects
+        Tuple of (filtered projects, number skipped as archived). An
+        archived repository the name filters already removed is not
+        counted as skipped for being archived.
     """
     filtered = projects
 
@@ -247,14 +243,15 @@ def _apply_filters(projects: list[Project], config: Config) -> list[Project]:
         )
 
     # Filter archived repositories if skip_archived is True
+    skipped_archived = 0
     if config.skip_archived:
         original_count = len(filtered)
         filtered = [p for p in filtered if p.state != ProjectState.READ_ONLY]
-        skipped = original_count - len(filtered)
-        if skipped > 0:
-            logger.debug(f"Skipped {skipped} archived repositories")
+        skipped_archived = original_count - len(filtered)
+        if skipped_archived > 0:
+            logger.debug(f"Skipped {skipped_archived} archived repositories")
 
-    return filtered
+    return filtered, skipped_archived
 
 
 def detect_github_source(host: str) -> bool:

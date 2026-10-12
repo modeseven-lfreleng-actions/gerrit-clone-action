@@ -107,6 +107,7 @@ def _absorb_repo_nodes(
             "ssh_url": node["sshUrl"],
             "clone_url": node["url"],
             "private": node["isPrivate"],
+            "archived": node.get("isArchived", False),
             "description": node.get("description"),
             "default_branch": default_branch,
             "latest_commit_sha": (latest_commit_sha),
