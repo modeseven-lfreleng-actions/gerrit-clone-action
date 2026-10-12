@@ -912,6 +912,57 @@ class TestListAllReposGraphQL:
 
         api.close()
 
+    @pytest.mark.xfail(strict=True, reason="#319: isArchived not queried")
+    def test_list_all_repos_carries_archived_flag(self) -> None:
+        """Test that the query selects isArchived and results carry it."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "data": {
+                "organization": {
+                    "repositories": {
+                        "nodes": [
+                            {
+                                "name": "live",
+                                "nameWithOwner": "test-org/live",
+                                "url": "https://github.com/test-org/live",
+                                "sshUrl": "git@github.com:test-org/live.git",
+                                "isPrivate": False,
+                                "isArchived": False,
+                                "description": None,
+                                "defaultBranchRef": {"name": "main"},
+                            },
+                            {
+                                "name": "old",
+                                "nameWithOwner": "test-org/old",
+                                "url": "https://github.com/test-org/old",
+                                "sshUrl": "git@github.com:test-org/old.git",
+                                "isPrivate": False,
+                                "isArchived": True,
+                                "description": None,
+                                "defaultBranchRef": {"name": "main"},
+                            },
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        }
+
+        with patch.object(api.client, "post", return_value=mock_response) as mock_post:
+            result = api.list_all_repos_graphql("test-org")
+
+            query = mock_post.call_args[1]["json"]["query"]
+            assert "isArchived" in query
+            assert result["live"]["archived"] is False
+            assert result["old"]["archived"] is True
+
+        api.close()
+
     def test_list_all_repos_pagination(self) -> None:
         """Test listing repos with pagination."""
         api = GitHubAPI(token="test-token")
