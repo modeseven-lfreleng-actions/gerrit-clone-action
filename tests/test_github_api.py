@@ -191,6 +191,35 @@ class TestGitHubRepo:
 
         assert repo.default_branch is None
 
+    def test_from_api_response_captures_archived(self) -> None:
+        """Test that the REST archived flag is captured from API response."""
+        api_data = {
+            "name": "test-repo",
+            "full_name": "org/test-repo",
+            "html_url": "https://github.com/org/test-repo",
+            "clone_url": "https://github.com/org/test-repo.git",
+            "ssh_url": "git@github.com:org/test-repo.git",
+            "private": False,
+            "archived": True,
+        }
+
+        repo = GitHubRepo.from_api_response(api_data)
+
+        assert repo.archived is True
+
+    def test_archived_field_defaults_to_false(self) -> None:
+        """Test that GitHubRepo.archived defaults to False."""
+        repo = GitHubRepo(
+            name="test-repo",
+            full_name="org/test-repo",
+            html_url="https://github.com/org/test-repo",
+            clone_url="https://github.com/org/test-repo.git",
+            ssh_url="git@github.com:org/test-repo.git",
+            private=False,
+        )
+
+        assert repo.archived is False
+
 
 class TestGitHubAPI:
     """Test GitHubAPI client."""
@@ -909,6 +938,56 @@ class TestListAllReposGraphQL:
             assert result["repo1"]["full_name"] == "test-org/repo1"
             assert result["repo1"]["private"] is False
             assert result["repo2"]["private"] is True
+
+        api.close()
+
+    def test_list_all_repos_carries_archived_flag(self) -> None:
+        """Test that the query selects isArchived and results carry it."""
+        api = GitHubAPI(token="test-token")
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "data": {
+                "organization": {
+                    "repositories": {
+                        "nodes": [
+                            {
+                                "name": "live",
+                                "nameWithOwner": "test-org/live",
+                                "url": "https://github.com/test-org/live",
+                                "sshUrl": "git@github.com:test-org/live.git",
+                                "isPrivate": False,
+                                "isArchived": False,
+                                "description": None,
+                                "defaultBranchRef": {"name": "main"},
+                            },
+                            {
+                                "name": "old",
+                                "nameWithOwner": "test-org/old",
+                                "url": "https://github.com/test-org/old",
+                                "sshUrl": "git@github.com:test-org/old.git",
+                                "isPrivate": False,
+                                "isArchived": True,
+                                "description": None,
+                                "defaultBranchRef": {"name": "main"},
+                            },
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        }
+
+        with patch.object(api.client, "post", return_value=mock_response) as mock_post:
+            result = api.list_all_repos_graphql("test-org")
+
+            query = mock_post.call_args[1]["json"]["query"]
+            assert "isArchived" in query
+            assert result["live"]["archived"] is False
+            assert result["old"]["archived"] is True
 
         api.close()
 

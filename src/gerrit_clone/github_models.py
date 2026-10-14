@@ -28,6 +28,7 @@ class GitHubRepo:
     private: bool
     description: str | None = None
     default_branch: str | None = None
+    archived: bool = False
 
     @classmethod
     def from_api_response(cls, data: dict[str, Any]) -> GitHubRepo:
@@ -48,6 +49,7 @@ class GitHubRepo:
             private=data["private"],
             description=data.get("description"),
             default_branch=data.get("default_branch"),
+            archived=data.get("archived", False),
         )
 
 

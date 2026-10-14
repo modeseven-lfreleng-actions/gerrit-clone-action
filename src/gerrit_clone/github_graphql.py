@@ -75,6 +75,7 @@ def build_org_repos_query(org: str, cursor: str | None) -> str:
                     url
                     sshUrl
                     isPrivate
+                    isArchived
                     description
                     defaultBranchRef {{
                       name
