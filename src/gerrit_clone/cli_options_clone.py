@@ -85,7 +85,10 @@ SSH_IDENTITY_FILE = typer.Option(
 OUTPUT_PATH = typer.Option(
     Path(),
     "--output-path",
-    help="Clone destination (default: ./{SERVER}/ or ./github.com/{ORG}/)",
+    help=(
+        "Clone destination; omit or pass '.' for ./{SERVER}/ or "
+        "./github.com/{ORG}/, any other path is used exactly"
+    ),
     envvar="OUTPUT_PATH",
     file_okay=False,
     resolve_path=False,

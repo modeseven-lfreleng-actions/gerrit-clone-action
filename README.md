@@ -119,9 +119,11 @@ gerrit-clone clone --host gerrit.example.org \
 
 ### Understanding Path Behavior
 
-By default (when `--output-path` is not specified), `gerrit-clone`
+When you omit `--output-path`, or pass exactly `.`, `gerrit-clone`
 automatically creates an organized folder structure to prevent naming
-conflicts when cloning from different sources:
+conflicts when cloning from different sources. The same rule applies to
+a path set through the `OUTPUT_PATH` or `GERRIT_PATH_PREFIX` environment
+variables or a config file:
 
 **Gerrit sources:**
 
@@ -148,7 +150,14 @@ gerrit-clone clone --host github.enterprise.com/engineering
 ```bash
 # Clones directly to: ./my-repos/project-name
 gerrit-clone clone --host gerrit.example.org --output-path ./my-repos
+
+# Clones directly to: $PWD/project-name (the tool keeps an absolute path
+# as given, even when it names the current directory)
+gerrit-clone clone --host gerrit.example.org --output-path "$PWD"
 ```
+
+The tool uses any value other than `.` exactly as given, so the output
+location does not depend on the directory the command runs from.
 
 This design prevents repository naming conflicts when running concurrent
 clone operations in the same directory (e.g., on GitHub Actions runners).
