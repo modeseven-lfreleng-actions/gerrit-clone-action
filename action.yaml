@@ -47,8 +47,10 @@ inputs:
     required: false
   output-path:
     description: >-
-      Clone destination (default: auto-creates ./{SERVER}/ or
-      ./github.com/{ORG}/ structure)
+      Clone destination. The default "." or another spelling of "." (such
+      as "./" or "./.") creates the ./{SERVER}/ or ./github.com/{ORG}/
+      structure; any other value, including "..", "child/.." or an
+      absolute path, is used exactly as given.
     required: false
     default: "."
   skip-archived:
