@@ -793,14 +793,16 @@ runs:
         # (e.g. "./" becomes "./{HOST}/"), so search
         # for the manifest by name within the tree.
         manifest_name="${INPUT_MANIFEST_FILENAME}"
+        # An empty output-path clones under ".", like "." itself.
+        search_root="${INPUT_OUTPUT_PATH:-.}"
         # Use a slightly higher max depth to handle adjusted paths
         # such as "./github.com/{ORG}/{manifest}".
-        manifest_path=$(find "${INPUT_OUTPUT_PATH}" -maxdepth 4 \
+        manifest_path=$(find "${search_root}" -maxdepth 4 \
           -name "$manifest_name" -type f 2>/dev/null | head -1)
 
         # Fallback: try the literal path in case find missed it
         if [ -z "$manifest_path" ]; then
-          manifest_path="${INPUT_OUTPUT_PATH}/$manifest_name"
+          manifest_path="${search_root}/$manifest_name"
         fi
 
         if [ -f "$manifest_path" ]; then
