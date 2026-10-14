@@ -452,11 +452,11 @@ class TestPathAutoAdjustment:
         try:
             os.chdir(tmp_path)
 
-            # When path is current directory (default), it should be adjusted to host
+            # When path is the literal default ".", it should be adjusted to host
             config = manager.load_config(
                 host="github.com/myorg",
                 source_type=SourceType.GITHUB,
-                path=Path.cwd(),  # Current directory
+                path=Path(),  # The CLI default, equal to Path(".")
             )
 
             # path should be adjusted to the host value (but resolved to absolute)
@@ -478,7 +478,7 @@ class TestPathAutoAdjustment:
             config = manager.load_config(
                 host="github.enterprise.com/engineering",
                 source_type=SourceType.GITHUB,
-                path=Path.cwd(),
+                path=Path(),
             )
 
             # Should create structure: github.enterprise.com/engineering/{PROJECT}
@@ -516,7 +516,7 @@ class TestPathAutoAdjustment:
             config = manager.load_config(
                 host="github.com/opennetworkinglab",
                 source_type=SourceType.GITHUB,
-                path=Path.cwd(),
+                path=Path(),
             )
 
             # Verify the structure matches: {PATH}/github.com/{ORG}
@@ -541,11 +541,11 @@ class TestPathAutoAdjustment:
         try:
             os.chdir(tmp_path)
 
-            # When path is current directory (default), it should be adjusted to server name
+            # When path is the literal default ".", it should be adjusted to server name
             config = manager.load_config(
                 host="gerrit.example.org",
                 source_type=SourceType.GERRIT,
-                path=Path.cwd(),
+                path=Path(),
             )
 
             # path should be adjusted to the server name
@@ -566,7 +566,7 @@ class TestPathAutoAdjustment:
             config = manager.load_config(
                 host="gerrit.example.org:29418",
                 source_type=SourceType.GERRIT,
-                path=Path.cwd(),
+                path=Path(),
             )
 
             # path should use only hostname, not the port
@@ -600,7 +600,7 @@ class TestPathAutoAdjustment:
             config = manager.load_config(
                 host="gerrit.o-ran-sc.org",
                 source_type=SourceType.GERRIT,
-                path=Path.cwd(),
+                path=Path(),
             )
 
             # Verify the structure matches: ./{GERRIT_SERVER_NAME}
@@ -613,6 +613,74 @@ class TestPathAutoAdjustment:
                 expected_clone_path
                 == (tmp_path / "gerrit.o-ran-sc.org/test-project").resolve()
             )
+        finally:
+            os.chdir(original_cwd)
+
+    @pytest.mark.xfail(strict=True, reason="Resolved CWD path is adjusted")
+    @pytest.mark.parametrize(
+        ("host", "source_type"),
+        [
+            ("gerrit.example.org", SourceType.GERRIT),
+            ("github.com/myorg", SourceType.GITHUB),
+        ],
+    )
+    def test_absolute_cwd_path_not_adjusted(
+        self, tmp_path: Path, host: str, source_type: SourceType
+    ):
+        """An absolute path equal to the CWD is used exactly as given."""
+        manager = ConfigManager()
+
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+
+            config = manager.load_config(
+                host=host,
+                source_type=source_type,
+                path=Path.cwd(),
+            )
+
+            assert config.path == tmp_path.resolve()
+        finally:
+            os.chdir(original_cwd)
+
+    @pytest.mark.xfail(strict=True, reason="Absent path is not adjusted")
+    @pytest.mark.parametrize(
+        ("host", "source_type", "expected"),
+        [
+            ("gerrit.example.org", SourceType.GERRIT, "gerrit.example.org"),
+            ("github.com/myorg", SourceType.GITHUB, "github.com/myorg"),
+        ],
+    )
+    def test_no_path_yields_auto_structure(
+        self, tmp_path: Path, host: str, source_type: SourceType, expected: str
+    ):
+        """No path from any source still yields the auto-structure."""
+        manager = ConfigManager()
+        manager._config_paths = []
+
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            with patch.dict(os.environ, {}, clear=True):
+                config = manager.load_config(host=host, source_type=source_type)
+
+            assert config.path == (tmp_path / expected).resolve()
+        finally:
+            os.chdir(original_cwd)
+
+    @pytest.mark.xfail(strict=True, reason="Resolved CWD path is adjusted")
+    def test_output_path_env_absolute_cwd_not_adjusted(self, tmp_path: Path):
+        """OUTPUT_PATH set to an absolute path equal to the CWD is kept."""
+        manager = ConfigManager()
+
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            with patch.dict(os.environ, {"OUTPUT_PATH": str(Path.cwd())}):
+                config = manager.load_config(host="gerrit.example.org")
+
+            assert config.path == tmp_path.resolve()
         finally:
             os.chdir(original_cwd)
 
