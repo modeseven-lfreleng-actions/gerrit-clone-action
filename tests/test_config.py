@@ -8,12 +8,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
+from gerrit_clone.cli import app
 from gerrit_clone.config import ConfigManager, ConfigurationError, load_config
 from gerrit_clone.models import Config, DiscoveryMethod, SourceType
 
@@ -680,6 +683,166 @@ class TestPathAutoAdjustment:
             assert config.path == tmp_path.resolve()
         finally:
             os.chdir(original_cwd)
+
+
+# Values that are empty or a spelling of "." select the auto-structure.
+DOT_SPELLINGS = ["", ".", "./", ".//", "./.", "././"]
+
+SOURCES = [
+    pytest.param("gerrit.example.org", "gerrit", "gerrit.example.org", id="gerrit"),
+    pytest.param("github.com/myorg", "github", "github.com/myorg", id="github"),
+]
+
+# The CLI detects the source type from the host.
+CLI_SOURCES = [
+    pytest.param("gerrit.example.org", "gerrit.example.org", id="gerrit"),
+    pytest.param("github.com/myorg", "github.com/myorg", id="github"),
+]
+
+
+def _given_path(work: Path, value: str) -> tuple[str, Path]:
+    """Return the CLI/config value for *value* and the path it must yield.
+
+    ``"<cwd>"`` stands for the absolute path of *work*.
+    """
+    if value == "<cwd>":
+        return str(work), work.resolve()
+    return value, (work / value).resolve()
+
+
+# Values that are not a spelling of "." are used exactly as given, even
+# when they resolve to the working directory.
+GIVEN_PATHS = ["child/..", "..", ".hidden", "./my-repos", "<cwd>"]
+
+
+@pytest.fixture
+def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Run from ``tmp_path/work``, with a ``child`` directory inside it."""
+    work = tmp_path / "work"
+    (work / "child").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    for name in ("OUTPUT_PATH", "GERRIT_PATH_PREFIX", "GERRIT_OUTPUT_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    return work
+
+
+def _manager() -> ConfigManager:
+    """A ConfigManager that reads no config file."""
+    manager = ConfigManager()
+    manager._config_paths = []
+    return manager
+
+
+class TestOutputPathSpellings:
+    """Pin which output-path values select the auto-structure."""
+
+    @pytest.mark.parametrize("value", DOT_SPELLINGS)
+    @pytest.mark.parametrize(("host", "source_type", "expected"), SOURCES)
+    def test_load_config_dot_spelling_auto_structure(
+        self, work_dir: Path, host: str, source_type: str, expected: str, value: str
+    ):
+        """An empty value or a spelling of '.' selects the auto-structure."""
+        config = _manager().load_config(host=host, source_type=source_type, path=value)
+
+        assert config.path == (work_dir / expected).resolve()
+
+    @pytest.mark.parametrize("value", DOT_SPELLINGS)
+    @pytest.mark.parametrize(("host", "source_type", "expected"), SOURCES)
+    def test_env_dot_spelling_auto_structure(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        host: str,
+        source_type: str,
+        expected: str,
+        value: str,
+    ):
+        """OUTPUT_PATH empty or a spelling of '.' selects the auto-structure."""
+        monkeypatch.setenv("OUTPUT_PATH", value)
+
+        config = _manager().load_config(host=host, source_type=source_type)
+
+        assert config.path == (work_dir / expected).resolve()
+
+    @pytest.mark.parametrize("value", GIVEN_PATHS)
+    @pytest.mark.parametrize(("host", "source_type", "expected"), SOURCES)
+    def test_load_config_other_value_used_as_given(
+        self, work_dir: Path, host: str, source_type: str, expected: str, value: str
+    ):
+        """A value that is not a spelling of '.' is used as given."""
+        given, resolved = _given_path(work_dir, value)
+
+        config = _manager().load_config(host=host, source_type=source_type, path=given)
+
+        assert config.path == resolved
+        assert config.path != (work_dir / expected).resolve()
+
+
+class TestCliOutputPathSpellings:
+    """Pin the clone command's --output-path boundary end to end."""
+
+    @staticmethod
+    def _run_clone(host: str, output_path: str) -> Config:
+        """Invoke ``clone`` with the clone itself stubbed; return its Config.
+
+        The source type is left to auto-detection from *host*.
+        """
+        captured: list[Config] = []
+        now = datetime.now()
+
+        def fake_clone(config: Config) -> MagicMock:
+            captured.append(config)
+            return MagicMock(
+                started_at=now,
+                completed_at=now,
+                total_count=0,
+                success_count=0,
+                failed_count=0,
+                skipped_count=0,
+                refreshed_count=0,
+                results=[],
+                success_rate=100.0,
+            )
+
+        with patch("gerrit_clone.cli.clone_repositories", side_effect=fake_clone):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "clone",
+                    "--host",
+                    host,
+                    "--output-path",
+                    output_path,
+                    "--disable-log-file",
+                    "--quiet",
+                ],
+            )
+
+        assert len(captured) == 1, result.output
+        return captured[0]
+
+    @pytest.mark.parametrize("value", DOT_SPELLINGS)
+    @pytest.mark.parametrize(("host", "expected"), CLI_SOURCES)
+    def test_cli_dot_spelling_auto_structure(
+        self, work_dir: Path, host: str, expected: str, value: str
+    ):
+        """--output-path empty or a spelling of '.' selects the auto-structure."""
+        config = self._run_clone(host, value)
+
+        assert config.path == (work_dir / expected).resolve()
+
+    @pytest.mark.parametrize("value", GIVEN_PATHS)
+    @pytest.mark.parametrize(("host", "expected"), CLI_SOURCES)
+    def test_cli_other_value_used_as_given(
+        self, work_dir: Path, host: str, expected: str, value: str
+    ):
+        """--output-path that is not a spelling of '.' is used as given."""
+        given, resolved = _given_path(work_dir, value)
+
+        config = self._run_clone(host, given)
+
+        assert config.path == resolved
+        assert config.path != (work_dir / expected).resolve()
 
 
 class TestGitHubBaseUrl:
