@@ -119,13 +119,23 @@ gerrit-clone clone --host gerrit.example.org \
 
 ### Understanding Path Behavior
 
-When you omit `--output-path`, or pass an empty value or a spelling of
-`.` (`.` components and slashes with no leading slash: `.`, `./`, `.//`,
-`./.`, `././`), `gerrit-clone` automatically creates an organized folder
-structure to prevent naming conflicts when cloning from different
-sources. The same rule applies to a path set through the `OUTPUT_PATH`
-or `GERRIT_PATH_PREFIX` environment variables or a config file; an empty
-environment variable counts as unset:
+The `clone` command takes its destination from the first of these
+sources that holds a value, highest precedence first:
+
+1. `--output-path`
+2. the `OUTPUT_PATH` environment variable
+3. the `GERRIT_PATH_PREFIX` environment variable
+4. the `GERRIT_OUTPUT_DIR` environment variable
+5. the `path` key of a config file
+
+An empty environment variable or a `null` config-file `path` counts as
+unset, so the next source applies. When no source holds a value, or
+the value that applies is empty or a spelling of `.` (`.` components and
+slashes with no leading slash: `.`, `./`, `.//`, `./.`, `././`),
+`gerrit-clone` automatically creates an organized folder structure to
+prevent naming conflicts when cloning from different sources. An
+explicit `--output-path .` or `--output-path ""` gives that structure
+even when a lower source names a path:
 
 **Gerrit sources:**
 
@@ -621,7 +631,7 @@ Options:
   --base-url TEXT                 Base URL for Gerrit API
   -u, --ssh-user TEXT             SSH username for clone operations
   -i, --ssh-identity-file PATH    SSH identity (private key) file path
-  --output-path PATH              Base directory for clone hierarchy [default: .]
+  --output-path PATH              Base directory for clone hierarchy
   --skip-archived / --include-archived
                                   Skip archived and inactive repositories
                                   [default: skip-archived]
@@ -810,7 +820,7 @@ host: gerrit.example.org
 port: 29418
 ssh_user: myuser
 ssh_identity_file: ~/.ssh/gerrit_key
-output-path: /workspace/repos
+path: /workspace/repos
 skip_archived: true
 threads: 8
 clone_timeout: 600

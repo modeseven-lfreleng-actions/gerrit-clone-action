@@ -10,8 +10,6 @@ in :mod:`gerrit_clone.cli_clone` readable while leaving the option metadata
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 
 from gerrit_clone.ssh_identity import parse_identity_file
@@ -82,13 +80,19 @@ SSH_IDENTITY_FILE = typer.Option(
     envvar="GERRIT_SSH_PRIVATE_KEY",
     parser=parse_identity_file,
 )
+# No default: an omitted option must not override GERRIT_PATH_PREFIX,
+# GERRIT_OUTPUT_DIR or a config-file path.
 OUTPUT_PATH = typer.Option(
-    Path(),
+    None,
     "--output-path",
     help=(
-        "Clone destination; omit, leave empty or pass a spelling of '.' "
+        "Clone destination; leave empty or pass a spelling of '.' "
         "(such as './') for ./{SERVER}/ or ./github.com/{ORG}/; any other "
-        "value, even '..' or an absolute path, is used exactly as given"
+        "value, even '..' or an absolute path, is used exactly as given. "
+        "When omitted, the first of OUTPUT_PATH, GERRIT_PATH_PREFIX, "
+        "GERRIT_OUTPUT_DIR and a config-file path that is set supplies the "
+        "value under the same rule (an empty variable counts as unset); "
+        "with none set, the structure above is used"
     ),
     envvar="OUTPUT_PATH",
     file_okay=False,

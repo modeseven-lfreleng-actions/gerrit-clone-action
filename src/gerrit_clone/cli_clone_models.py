@@ -30,7 +30,7 @@ class CloneRequest:
     base_url: str | None
     ssh_user: str | None
     ssh_identity_file: Path | None
-    output_path: Path
+    output_path: Path | None
     skip_archived: bool
     include_projects: list[str] | None
     exclude_projects: list[str] | None

@@ -33,7 +33,7 @@ def clone(
     base_url: str | None = opts.BASE_URL,
     ssh_user: str | None = opts.SSH_USER,
     ssh_identity_file: Path | None = opts.SSH_IDENTITY_FILE,
-    output_path: Path = opts.OUTPUT_PATH,
+    output_path: Path | None = opts.OUTPUT_PATH,
     skip_archived: bool = opts.SKIP_ARCHIVED,
     include_projects: list[str] | None = opts.INCLUDE_PROJECTS,
     exclude_projects: list[str] | None = opts.EXCLUDE_PROJECTS,
