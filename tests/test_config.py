@@ -616,7 +616,6 @@ class TestPathAutoAdjustment:
         finally:
             os.chdir(original_cwd)
 
-    @pytest.mark.xfail(strict=True, reason="Resolved CWD path is adjusted")
     @pytest.mark.parametrize(
         ("host", "source_type"),
         [
@@ -644,7 +643,6 @@ class TestPathAutoAdjustment:
         finally:
             os.chdir(original_cwd)
 
-    @pytest.mark.xfail(strict=True, reason="Absent path is not adjusted")
     @pytest.mark.parametrize(
         ("host", "source_type", "expected"),
         [
@@ -669,7 +667,6 @@ class TestPathAutoAdjustment:
         finally:
             os.chdir(original_cwd)
 
-    @pytest.mark.xfail(strict=True, reason="Resolved CWD path is adjusted")
     def test_output_path_env_absolute_cwd_not_adjusted(self, tmp_path: Path):
         """OUTPUT_PATH set to an absolute path equal to the CWD is kept."""
         manager = ConfigManager()

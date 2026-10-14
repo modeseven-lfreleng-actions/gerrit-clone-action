@@ -298,15 +298,16 @@ class ConfigManager(EnvConfigLoader):
         # Source-type-aware port and path defaulting
         source_type = config_dict.get("source_type", SourceType.GERRIT)
 
-        # Auto-adjust path to include server/org structure when using default (current directory)
-        # This prevents naming conflicts when multiple clone operations run in the same directory
-        if "host" in config_dict and "path" in config_dict:
+        # Auto-adjust path to include server/org structure when using the default.
+        # This prevents naming conflicts when multiple clone operations run in the same directory.
+        # Decide on the unresolved value: only an absent path or a literal "."
+        # (the CLI default, and what action.yaml passes) counts as the default.
+        # Any other value, including an absolute path to the CWD, is used as given.
+        if "host" in config_dict:
             host = config_dict["host"]
-            path = config_dict["path"]
+            path = config_dict.get("path")
 
-            # Only adjust if path is effectively the default/current directory
-            # Compare resolved paths since CLI uses resolve_path=True
-            if Path(path).resolve() == Path.cwd().resolve():
+            if path is None or path == Path():
                 if source_type == SourceType.GITHUB:
                     # GitHub: ./github.com/{ORG} or ./{ENTERPRISE_SERVER}/{ORG}
                     # E.g., host="github.com/opennetworkinglab" -> path="./github.com/opennetworkinglab"
