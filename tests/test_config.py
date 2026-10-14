@@ -9,7 +9,9 @@ import json
 import os
 import tempfile
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +21,9 @@ from typer.testing import CliRunner
 from gerrit_clone.cli import app
 from gerrit_clone.config import ConfigManager, ConfigurationError, load_config
 from gerrit_clone.models import Config, DiscoveryMethod, SourceType
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class TestConfigManager:
@@ -843,6 +848,295 @@ class TestCliOutputPathSpellings:
 
         assert config.path == resolved
         assert config.path != (work_dir / expected).resolve()
+
+
+# Every source of the clone destination, highest precedence first. "cli"
+# is --output-path and "file" is the ``path`` key of a config file.
+PATH_SOURCES = ["cli", "OUTPUT_PATH", "GERRIT_PATH_PREFIX", "GERRIT_OUTPUT_DIR", "file"]
+
+GERRIT_HOST = "gerrit.example.org"
+
+
+def _apply_sources(
+    sources: Mapping[str, str | None], monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> tuple[str | None, Path | None]:
+    """Set each source in *sources*; return the CLI path and config file.
+
+    No config file is read unless *sources* names ``file``, whose value
+    may be ``None`` to write ``"path": null``.
+    """
+    monkeypatch.setenv("HOME", str(config_dir / "home"))
+    for name in ("OUTPUT_PATH", "GERRIT_PATH_PREFIX", "GERRIT_OUTPUT_DIR"):
+        if (value := sources.get(name)) is not None:
+            monkeypatch.setenv(name, value)
+    config_file = None
+    if "file" in sources:
+        config_file = config_dir / "config.json"
+        config_file.write_text(json.dumps({"path": sources["file"]}))
+    return sources.get("cli"), config_file
+
+
+def _load(
+    sources: Mapping[str, str | None], monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> Config:
+    """Resolve *sources* through ``load_config``."""
+    cli_path, config_file = _apply_sources(sources, monkeypatch, config_dir)
+    return _manager().load_config(
+        host=GERRIT_HOST, path=cli_path, config_file=config_file
+    )
+
+
+def _clone(
+    sources: Mapping[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    *,
+    log_file: bool = False,
+) -> Config:
+    """Resolve *sources* through ``clone`` with cloning stubbed."""
+    cli_path, config_file = _apply_sources(sources, monkeypatch, config_dir)
+    args = ["clone", "--host", GERRIT_HOST, "--quiet"]
+    if cli_path is not None:
+        args += ["--output-path", cli_path]
+    if config_file is not None:
+        args += ["--config-file", str(config_file)]
+    if not log_file:
+        args.append("--disable-log-file")
+    captured: list[Config] = []
+    now = datetime.now()
+
+    def fake_clone(config: Config) -> MagicMock:
+        captured.append(config)
+        return MagicMock(
+            started_at=now,
+            completed_at=now,
+            total_count=0,
+            success_count=0,
+            failed_count=0,
+            skipped_count=0,
+            refreshed_count=0,
+            results=[],
+            success_rate=100.0,
+        )
+
+    with patch("gerrit_clone.cli.clone_repositories", side_effect=fake_clone):
+        result = CliRunner().invoke(app, args)
+
+    assert len(captured) == 1, result.output
+    return captured[0]
+
+
+ADJACENT_PAIRS = [
+    pytest.param(higher, lower, value, id=f"{higher}={value}-over-{lower}")
+    for higher, lower in pairwise(PATH_SOURCES)
+    for value in ("high", ".")
+]
+
+
+def _pair_case(
+    work_dir: Path, higher: str, lower: str, higher_value: str
+) -> tuple[dict[str, str], Path]:
+    """Return the sources for a pair and the path the higher one gives."""
+    low = str(work_dir.parent / "low")
+    if higher_value == ".":
+        return {higher: ".", lower: low}, (work_dir / GERRIT_HOST).resolve()
+    high = work_dir.parent / "high"
+    return {higher: str(high), lower: low}, high.resolve()
+
+
+class TestOutputPathSources:
+    """Every documented output-path source works, in precedence order."""
+
+    @pytest.fixture
+    def config_dir(self, tmp_path: Path) -> Path:
+        """A directory outside the working directory for config files."""
+        path = tmp_path / "config"
+        path.mkdir()
+        return path
+
+    @pytest.mark.parametrize("source", PATH_SOURCES)
+    def test_load_config_single_source_used(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        source: str,
+    ):
+        """Each source alone sets the path through load_config."""
+        target = work_dir.parent / "target"
+
+        config = _load({source: str(target)}, monkeypatch, config_dir)
+
+        assert config.path == target.resolve()
+
+    @pytest.mark.parametrize("source", PATH_SOURCES)
+    def test_clone_single_source_used(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        source: str,
+    ):
+        """Each source alone sets the path through clone."""
+        target = work_dir.parent / "target"
+
+        config = _clone({source: str(target)}, monkeypatch, config_dir)
+
+        assert config.path == target.resolve()
+
+    @pytest.mark.parametrize("value", DOT_SPELLINGS)
+    @pytest.mark.parametrize("source", PATH_SOURCES)
+    def test_load_config_dot_spelling_auto_structure(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        source: str,
+        value: str,
+    ):
+        """Each source given an empty value or '.' yields the auto-structure."""
+        config = _load({source: value}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    @pytest.mark.parametrize("value", DOT_SPELLINGS)
+    @pytest.mark.parametrize("source", PATH_SOURCES)
+    def test_clone_dot_spelling_auto_structure(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        source: str,
+        value: str,
+    ):
+        """Each source given an empty value or '.' yields the auto-structure."""
+        config = _clone({source: value}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    def test_load_config_nothing_set_auto_structure(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    ):
+        """With no source set, load_config yields the auto-structure."""
+        config = _load({}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    def test_clone_nothing_set_auto_structure(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    ):
+        """With no source set, clone yields the auto-structure."""
+        config = _clone({}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    def test_load_config_null_config_file_path_counts_as_unset(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    ):
+        """A config file holding 'path: null' yields the auto-structure."""
+        config = _load({"file": None}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    def test_clone_null_config_file_path_counts_as_unset(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    ):
+        """A config file holding 'path: null' yields the auto-structure."""
+        config = _clone({"file": None}, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    @pytest.mark.parametrize(("higher", "lower", "higher_value"), ADJACENT_PAIRS)
+    def test_load_config_higher_source_wins(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        higher: str,
+        lower: str,
+        higher_value: str,
+    ):
+        """The higher of two adjacent sources decides the path."""
+        sources, expected = _pair_case(work_dir, higher, lower, higher_value)
+
+        config = _load(sources, monkeypatch, config_dir)
+
+        assert config.path == expected
+
+    @pytest.mark.parametrize(("higher", "lower", "higher_value"), ADJACENT_PAIRS)
+    def test_clone_higher_source_wins(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        higher: str,
+        lower: str,
+        higher_value: str,
+    ):
+        """The higher of two adjacent sources decides the path."""
+        sources, expected = _pair_case(work_dir, higher, lower, higher_value)
+
+        config = _clone(sources, monkeypatch, config_dir)
+
+        assert config.path == expected
+
+    @pytest.mark.parametrize("lower", PATH_SOURCES[2:])
+    def test_clone_empty_output_path_env_counts_as_unset(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        lower: str,
+    ):
+        """An empty OUTPUT_PATH defers to the next source that is set."""
+        target = work_dir.parent / "target"
+
+        config = _clone(
+            {"OUTPUT_PATH": "", lower: str(target)}, monkeypatch, config_dir
+        )
+
+        assert config.path == target.resolve()
+
+    @pytest.mark.parametrize("value", [".", ""])
+    def test_clone_dot_output_path_as_action_passes_it(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        value: str,
+    ):
+        """--output-path '.' or '' overrides every lower source, as before."""
+        low = str(work_dir.parent / "low")
+        sources = {
+            "cli": value,
+            "GERRIT_PATH_PREFIX": low,
+            "GERRIT_OUTPUT_DIR": low,
+            "file": low,
+        }
+
+        config = _clone(sources, monkeypatch, config_dir)
+
+        assert config.path == (work_dir / GERRIT_HOST).resolve()
+
+    @pytest.mark.parametrize(
+        "sources", [(), ("GERRIT_PATH_PREFIX",), ("GERRIT_OUTPUT_DIR",), ("file",)]
+    )
+    def test_clone_default_log_file_stays_in_working_directory(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        config_dir: Path,
+        sources: tuple[str, ...],
+    ):
+        """Omitting --output-path keeps the log in the working directory."""
+        target = work_dir.parent / "target"
+
+        _clone(
+            {s: str(target) for s in sources}, monkeypatch, config_dir, log_file=True
+        )
+
+        assert (work_dir / f"{GERRIT_HOST}.log").is_file()
+        assert not (target / f"{GERRIT_HOST}.log").exists()
 
 
 class TestGitHubBaseUrl:

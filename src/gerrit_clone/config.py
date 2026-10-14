@@ -256,7 +256,10 @@ class ConfigManager(EnvConfigLoader):
 
         retry_policy = RetryPolicy(**retry_config) if retry_config else RetryPolicy()
 
-        if "path" in config_dict:
+        # A config file may hold "path: null"; treat it as unset.
+        if config_dict.get("path") is None:
+            config_dict.pop("path", None)
+        else:
             config_dict["path"] = Path(config_dict["path"])
 
         if "ssh_identity_file" in config_dict:

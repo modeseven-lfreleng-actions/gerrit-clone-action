@@ -151,9 +151,14 @@ def start_logging(
 ) -> tuple[logging.Logger, ErrorCollector, Path]:
     """Set up the unified logging system (file + console).
 
+    The default log file goes in the --output-path value, which Typer
+    also reads from OUTPUT_PATH, and otherwise in the working directory,
+    whatever path the other sources later supply for the clones.
+
     Returns:
         Tuple of (file logger, error collector, log file path)
     """
+    log_dir = request.output_path if request.output_path is not None else Path()
     file_logger, error_collector = init_logging(
         log_file=request.log_file,
         disable_file=request.disable_log_file,
@@ -163,7 +168,7 @@ def start_logging(
         verbose=request.verbose,
         cli_args=cli_args,
         host=request.host,
-        path=Path(request.output_path) if request.output_path else None,
+        path=log_dir,
         command="clone",
     )
 
@@ -171,9 +176,7 @@ def start_logging(
     log_file_path = (
         request.log_file
         if request.log_file
-        else get_default_log_path(
-            request.host, Path(request.output_path) if request.output_path else None
-        )
+        else get_default_log_path(request.host, log_dir)
     )
     return file_logger, error_collector, log_file_path
 
