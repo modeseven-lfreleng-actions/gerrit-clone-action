@@ -303,6 +303,7 @@ def fetch_org_repos_page(
     org: str,
     cursor: str | None = None,
     max_retries: int = 3,
+    graphql_url: str = GRAPHQL_URL,
 ) -> GraphQLRepoPage | None:
     """Fetch one page of an organization's repositories over GraphQL.
 
@@ -315,6 +316,7 @@ def fetch_org_repos_page(
         org: Organization name
         cursor: Cursor returned by the previous page, if any
         max_retries: Retries per page on transient errors
+        graphql_url: GraphQL endpoint of the GitHub host
 
     Returns:
         The page, or None if it failed after exhausting the retries
@@ -333,7 +335,7 @@ def fetch_org_repos_page(
             # cache regularly exceeds 30 s, causing nginx to return 502
             # before the backend finishes.
             response = client.post(
-                GRAPHQL_URL,
+                graphql_url,
                 json={"query": query},
                 timeout=60.0,
             )

@@ -181,7 +181,6 @@ def _hosts(urls: list[str]) -> set[str]:
 class TestEnterpriseHost:
     """#322: discovery talks to the configured GitHub host only."""
 
-    @pytest.mark.xfail(strict=True, reason="#322: api.github.com hard-coded")
     def test_enterprise_requests_go_to_enterprise(self) -> None:
         """Every request for an Enterprise host goes to that host."""
         fake = FakeGitHub(orgs={"engineering": ["svc"]})

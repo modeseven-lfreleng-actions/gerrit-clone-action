@@ -13,6 +13,7 @@ import os
 from typing import Any
 
 from gerrit_clone.github_api import GitHubAPI, GitHubAPIError, GitHubAuthError
+from gerrit_clone.github_transport import github_api_url
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import Config, Project, ProjectState, SourceType
 
@@ -57,7 +58,10 @@ def discover_github_repositories(
         token = os.getenv("GERRIT_CLONE_TOKEN") or os.getenv("GITHUB_TOKEN")
 
     try:
-        with GitHubAPI(token=token) as api:
+        # From the host, not config.base_url: --base-url and
+        # GERRIT_BASE_URL name the Gerrit API, and the token goes to
+        # whichever host this is.
+        with GitHubAPI(token=token, base_url=github_api_url(config.host)) as api:
             # Try GraphQL organization API first - it's faster and more efficient
             # If it fails (empty results), fall back to REST user API
             logger.debug(

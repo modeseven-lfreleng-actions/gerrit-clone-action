@@ -626,4 +626,6 @@ class TestDiscoverGitHubRepositories:
             discover_github_repositories(config)
 
         # Verify GitHubAPI was called with GERRIT_CLONE_TOKEN (preferred)
-        mock_api_class.assert_called_once_with(token="gerrit-clone-token")
+        mock_api_class.assert_called_once_with(
+            token="gerrit-clone-token", base_url="https://api.github.com"
+        )

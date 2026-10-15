@@ -206,19 +206,25 @@ class RateLimitBudget:
 
     # -- pre-flight check ------------------------------------------------
 
-    async def preflight_check(self, client: httpx.AsyncClient) -> RateLimitSnapshot:
+    async def preflight_check(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str = "https://api.github.com",
+    ) -> RateLimitSnapshot:
         """Query ``GET /rate_limit`` and return a fresh snapshot.
 
         This endpoint is free (does not count against the budget).
 
         Args:
             client: An authenticated ``httpx.AsyncClient``.
+            base_url: REST API base URL of the GitHub host the
+                client authenticates against.
 
         Returns:
             Updated :class:`RateLimitSnapshot`.
         """
         try:
-            response = await client.get("https://api.github.com/rate_limit")
+            response = await client.get(f"{base_url}/rate_limit")
             if response.status_code == 200:
                 data = response.json()
                 resources = data.get("resources", {})
@@ -255,17 +261,23 @@ class RateLimitBudget:
 
         return self._snapshot
 
-    def preflight_check_sync(self, client: httpx.Client) -> RateLimitSnapshot:
+    def preflight_check_sync(
+        self,
+        client: httpx.Client,
+        base_url: str = "https://api.github.com",
+    ) -> RateLimitSnapshot:
         """Synchronous variant of :meth:`preflight_check`.
 
         Args:
             client: An authenticated ``httpx.Client``.
+            base_url: REST API base URL of the GitHub host the
+                client authenticates against.
 
         Returns:
             Updated :class:`RateLimitSnapshot`.
         """
         try:
-            response = client.get("https://api.github.com/rate_limit")
+            response = client.get(f"{base_url}/rate_limit")
             if response.status_code == 200:
                 data = response.json()
                 resources = data.get("resources", {})

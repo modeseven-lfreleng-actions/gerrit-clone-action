@@ -192,30 +192,9 @@ def _derive_base_url(config: Config) -> None:
             # aislop-ignore-next-line hardcoded-url -- URL built from configured host, not a hardcoded endpoint
             config.base_url = f"https://{config.host}"
     elif config.source_type == SourceType.GITHUB:
-        # For GitHub, use api.github.com or GitHub Enterprise URL.
-        # ``host`` may carry a scheme (https://github.com) and/or
-        # an org/path suffix (github.com/ORG); neither should
-        # affect the github.com vs GitHub-Enterprise
-        # classification or the API base URL, so reduce it to a
-        # bare hostname first.  Match the host exactly (or as a
-        # subdomain) rather than a substring so a lookalike such
-        # as "github.com.evil.example" is not mistaken for
-        # github.com.
-        bare_host = config.host
-        scheme = "https"
-        if "://" in bare_host:
-            scheme, bare_host = bare_host.split("://", 1)
-        bare_host = bare_host.split("/", 1)[0]
-        host_lower = bare_host.lower()
-        if host_lower == "github.com" or host_lower.endswith(".github.com"):
-            config.base_url = "https://api.github.com"
-        else:
-            # GitHub Enterprise - preserve the scheme supplied
-            # on ``host`` (defaulting to https) so installations
-            # served over plain http or a non-standard scheme
-            # still receive a correct API base URL rather than a
-            # forced https:// one.
-            config.base_url = f"{scheme}://{bare_host}/api/v3"
+        from gerrit_clone.github_transport import github_api_url  # noqa: PLC0415
+
+        config.base_url = github_api_url(config.host)
 
 
 def _warn_if_github_token_missing(config: Config) -> None:

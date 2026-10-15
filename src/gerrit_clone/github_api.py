@@ -151,6 +151,7 @@ class GitHubAPI(GitHubRepoOperations):
                 org,
                 cursor=cursor,
                 max_retries=max_retries,
+                graphql_url=self.graphql_url,
             )
 
             if page is None:
@@ -260,7 +261,7 @@ class GitHubAPI(GitHubRepoOperations):
             timeout=30.0,
         ) as client:
             # Pre-flight budget check
-            await budget.preflight_check(client)
+            await budget.preflight_check(client, self.base_url)
             await budget.wait_if_exhausted()
 
             semaphore = asyncio.Semaphore(max_concurrent)
@@ -360,7 +361,7 @@ class GitHubAPI(GitHubRepoOperations):
             timeout=30.0,
         ) as client:
             # Pre-flight budget check
-            await budget.preflight_check(client)
+            await budget.preflight_check(client, self.base_url)
             await budget.wait_if_exhausted()
 
             semaphore = asyncio.Semaphore(max_concurrent)

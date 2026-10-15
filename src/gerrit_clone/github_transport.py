@@ -28,6 +28,53 @@ from gerrit_clone.rate_limit import RateLimitBudget
 
 logger = get_logger(__name__)
 
+GITHUB_API_URL = "https://api.github.com"
+
+
+def github_api_url(host: str) -> str:
+    """Return the REST API base URL for a GitHub source host.
+
+    ``host`` may carry a scheme (``https://github.com``), a port and
+    an owner suffix (``github.com/ORG``); none changes the answer for
+    github.com.  github.com and its subdomains use api.github.com,
+    matched on the hostname alone (an explicit ``:443`` included) and
+    exactly, so a lookalike such as ``github.com.evil.example`` doesn't.
+    Any other host is GitHub Enterprise Server, whose API is under
+    ``/api/v3`` on the same scheme, host and port.
+
+    Args:
+        host: Source host as configured
+
+    Returns:
+        REST API base URL, without a trailing slash
+    """
+    scheme, _, rest = host.rpartition("://")
+    authority = rest.split("/", 1)[0]
+    hostname = authority.rsplit(":", 1)[0] if ":" in authority else authority
+    host_lower = hostname.lower()
+    if host_lower == "github.com" or host_lower.endswith(".github.com"):
+        return GITHUB_API_URL
+    return f"{scheme or 'https'}://{authority}/api/v3"
+
+
+def graphql_url_for(api_url: str) -> str:
+    """Return the GraphQL endpoint that pairs with a REST API base URL.
+
+    GitHub Enterprise Server serves REST under ``/api/v3`` and GraphQL
+    under ``/api/graphql``; elsewhere GraphQL sits at ``/graphql``
+    beside the REST API.
+
+    Args:
+        api_url: REST API base URL
+
+    Returns:
+        GraphQL endpoint URL
+    """
+    base = api_url.rstrip("/")
+    if base.endswith("/api/v3"):
+        return base.removesuffix("/v3") + "/graphql"
+    return f"{base}/graphql"
+
 
 def build_auth_headers(token: str | None) -> dict[str, str]:
     """Build the standard authenticated GitHub request headers.
@@ -48,12 +95,14 @@ def build_auth_headers(token: str | None) -> dict[str, str]:
 class GitHubTransport:
     """HTTP session and request plumbing for the GitHub API."""
 
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(self, token: str | None = None, base_url: str | None = None) -> None:
         """Initialize GitHub API client.
 
         Args:
             token: GitHub personal access token. If None, will try
                    to read from GITHUB_TOKEN environment variable.
+            base_url: REST API base URL; api.github.com when None.
+                The token is sent only to this host.
         """
         self.token = token or os.getenv("GITHUB_TOKEN")
         if not self.token:
@@ -62,7 +111,8 @@ class GitHubTransport:
                 "variable or pass token parameter."
             )
 
-        self.base_url = "https://api.github.com"
+        self.base_url = (base_url or GITHUB_API_URL).rstrip("/")
+        self.graphql_url = graphql_url_for(self.base_url)
         self.client = httpx.Client(
             headers=build_auth_headers(self.token),
             timeout=30.0,

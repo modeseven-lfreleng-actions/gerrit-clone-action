@@ -23,6 +23,7 @@ from gerrit_clone.github_api import (
     sanitize_description,
     transform_gerrit_name_to_github,
 )
+from gerrit_clone.github_transport import github_api_url, graphql_url_for
 from gerrit_clone.rate_limit import TokenBucketLimiter
 
 
@@ -249,6 +250,55 @@ class TestGitHubAPI:
         """Test GitHubAPI as context manager."""
         with GitHubAPI(token="test-token") as api:
             assert api.token == "test-token"
+
+    def test_defaults_to_github_com(self) -> None:
+        """Without a base URL the client targets api.github.com."""
+        with GitHubAPI(token="test-token") as api:
+            assert api.base_url == "https://api.github.com"
+            assert api.graphql_url == "https://api.github.com/graphql"
+
+    def test_enterprise_base_url(self) -> None:
+        """An Enterprise base URL sets both REST and GraphQL endpoints."""
+        with GitHubAPI(
+            token="test-token", base_url="https://ghe.example.com/api/v3/"
+        ) as api:
+            assert api.base_url == "https://ghe.example.com/api/v3"
+            assert api.graphql_url == "https://ghe.example.com/api/graphql"
+
+
+class TestGitHubApiUrls:
+    """Host to API endpoint mapping."""
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("github.com", "https://api.github.com"),
+            ("github.com/org", "https://api.github.com"),
+            ("https://github.com/org", "https://api.github.com"),
+            ("GitHub.com/org", "https://api.github.com"),
+            ("github.com:443/org", "https://api.github.com"),
+            ("https://github.com:443/org", "https://api.github.com"),
+            ("ghe.example.com/org", "https://ghe.example.com/api/v3"),
+            ("https://ghe.example.com:8443/org", "https://ghe.example.com:8443/api/v3"),
+            ("http://ghe.internal/org", "http://ghe.internal/api/v3"),
+            ("github.com.evil.example/org", "https://github.com.evil.example/api/v3"),
+        ],
+    )
+    def test_github_api_url(self, host: str, expected: str) -> None:
+        """Each host maps to its own REST API base URL."""
+        assert github_api_url(host) == expected
+
+    @pytest.mark.parametrize(
+        ("api_url", "expected"),
+        [
+            ("https://api.github.com", "https://api.github.com/graphql"),
+            ("https://ghe.example.com/api/v3", "https://ghe.example.com/api/graphql"),
+            ("https://ghe.example.com/api/v3/", "https://ghe.example.com/api/graphql"),
+        ],
+    )
+    def test_graphql_url_for(self, api_url: str, expected: str) -> None:
+        """GraphQL pairs with the REST API on the same host."""
+        assert graphql_url_for(api_url) == expected
 
     @patch("gerrit_clone.github_api.httpx.Client")
     def test_repo_exists_true(self, mock_client: Mock) -> None:
