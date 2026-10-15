@@ -62,46 +62,8 @@ def discover_github_repositories(
         # GERRIT_BASE_URL name the Gerrit API, and the token goes to
         # whichever host this is.
         with GitHubAPI(token=token, base_url=github_api_url(config.host)) as api:
-            # Try GraphQL organization API first - it's faster and more efficient
-            # If it fails (empty results), fall back to REST user API
-            logger.debug(
-                f"Attempting to fetch repositories for {org_or_user} "
-                "using GraphQL organization API"
-            )
-            repos_data = api.list_all_repos_graphql(org_or_user)
-
-            if repos_data:
-                # GraphQL succeeded - this is an organization
-                logger.debug(
-                    f"Successfully fetched {len(repos_data)} repositories "
-                    f"from organization {org_or_user}"
-                )
-                repos_list = list(repos_data.values())
-            else:
-                # GraphQL returned empty - likely a user account, not an org
-                logger.debug(
-                    f"GraphQL organization API returned no results for {org_or_user}. "
-                    "Falling back to REST user API."
-                )
-                github_repos = api.list_repos(org=None)
-                repos_list = [
-                    {
-                        "name": r.name,
-                        "full_name": r.full_name,
-                        "html_url": r.html_url,
-                        "ssh_url": r.ssh_url,
-                        "clone_url": r.clone_url,
-                        "private": r.private,
-                        "archived": r.archived,
-                        "description": r.description,
-                        "default_branch": None,
-                    }
-                    for r in github_repos
-                ]
-                logger.debug(
-                    f"Successfully fetched {len(repos_list)} repositories "
-                    f"from user account {org_or_user}"
-                )
+            logger.debug(f"Fetching repositories owned by {org_or_user} over GraphQL")
+            repos_list = list(api.list_owner_repos_graphql(org_or_user).values())
 
             # Convert to Project models
             projects = _convert_to_projects(repos_list)

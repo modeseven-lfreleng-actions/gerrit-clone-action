@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from gerrit_clone.github_discovery import discover_github_repositories
-from gerrit_clone.github_models import GitHubNotFoundError
+from gerrit_clone.github_models import GitHubAuthError, GitHubNotFoundError
 from gerrit_clone.models import Config, SourceType
 
 if TYPE_CHECKING:
@@ -240,7 +240,16 @@ class TestOwnerKinds:
             ],
         )
 
-    @pytest.mark.xfail(strict=True, reason="#320: lists the token owner")
+    @pytest.mark.parametrize("login", ["someuser", "someorg"])
+    def test_login_travels_as_a_variable(self, login: str) -> None:
+        """The login is a GraphQL variable, never spliced into the query."""
+        fake = self._fake()
+
+        _discover(fake, f"github.com/{login}")
+
+        (_url, query), *_rest = fake.posts
+        assert login not in query
+
     def test_user_account_lists_that_users_repositories(self, no_sleep: Mock) -> None:
         """A user login yields that user's repositories only."""
         fake = self._fake()
@@ -252,7 +261,6 @@ class TestOwnerKinds:
             u.split("?")[0].endswith("/user/repos") for _, u in fake.requests
         )
 
-    @pytest.mark.xfail(strict=True, reason="#320: retries a missing org")
     def test_user_account_takes_no_retries(self, no_sleep: Mock) -> None:
         """Recognising a user account costs no retry backoff."""
         fake = self._fake()
@@ -270,7 +278,6 @@ class TestOwnerKinds:
         assert names == ["org-repo"]
         no_sleep.assert_not_called()
 
-    @pytest.mark.xfail(strict=True, reason="#320: unknown login falls back")
     def test_unknown_login_is_a_clear_error(self, no_sleep: Mock) -> None:
         """A login GitHub doesn't know fails, naming the login."""
         fake = self._fake()
@@ -280,3 +287,20 @@ class TestOwnerKinds:
 
         no_sleep.assert_not_called()
         assert not fake.requests
+
+    def test_rejected_token_fails_discovery(self, no_sleep: Mock) -> None:
+        """A token GitHub rejects fails discovery, not an empty success."""
+        rejected = _response({"message": "Bad credentials"}, status=401)
+        cfg = Config(
+            host="github.com/someorg",
+            source_type=SourceType.GITHUB,
+            github_token="expired-token",
+        )
+
+        with (
+            patch("httpx.Client.post", return_value=rejected),
+            pytest.raises(GitHubAuthError),
+        ):
+            discover_github_repositories(cfg)
+
+        no_sleep.assert_not_called()

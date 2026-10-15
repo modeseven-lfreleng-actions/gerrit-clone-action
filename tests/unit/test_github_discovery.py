@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from gerrit_clone.github_api import GitHubAPI, GitHubRepo
+from gerrit_clone.github_api import GitHubAPI
 from gerrit_clone.github_discovery import (
     _apply_filters,
     _convert_to_projects,
@@ -32,19 +32,6 @@ def _graphql_node(name: str, *, archived: bool) -> dict[str, object]:
         "isArchived": archived,
         "description": None,
         "defaultBranchRef": {"name": "main"},
-    }
-
-
-def _rest_repo(name: str, *, archived: bool) -> dict[str, object]:
-    """Build a REST repository object as GitHub returns it."""
-    return {
-        "name": name,
-        "full_name": f"testuser/{name}",
-        "html_url": f"https://github.com/testuser/{name}",
-        "clone_url": f"https://github.com/testuser/{name}.git",
-        "ssh_url": f"git@github.com:testuser/{name}.git",
-        "private": False,
-        "archived": archived,
     }
 
 
@@ -341,7 +328,7 @@ class TestDiscoverGitHubRepositories:
         mock_api = MagicMock()
         mock_api_class.return_value.__enter__.return_value = mock_api
 
-        mock_api.list_all_repos_graphql.return_value = {
+        mock_api.list_owner_repos_graphql.return_value = {
             "repo1": {
                 "name": "repo1",
                 "full_name": "testorg/repo1",
@@ -390,7 +377,7 @@ class TestDiscoverGitHubRepositories:
         mock_api = MagicMock()
         mock_api_class.return_value.__enter__.return_value = mock_api
 
-        mock_api.list_all_repos_graphql.return_value = {
+        mock_api.list_owner_repos_graphql.return_value = {
             "repo1": {
                 "name": "repo1",
                 "full_name": "testorg/repo1",
@@ -425,38 +412,21 @@ class TestDiscoverGitHubRepositories:
         assert projects[0].name == "repo1"
 
     @patch("gerrit_clone.github_discovery.GitHubAPI")
-    def test_falls_back_to_user_api_when_org_returns_empty(
-        self, mock_api_class: MagicMock
-    ) -> None:
-        """Test fallback to REST user API when GraphQL org API returns empty."""
-        # Setup mock
+    def test_lists_the_owner_named_in_the_host(self, mock_api_class: MagicMock) -> None:
+        """Discovery lists the repositories of the login it was given."""
         mock_api = MagicMock()
         mock_api_class.return_value.__enter__.return_value = mock_api
-
-        # GraphQL returns empty (not an org)
-        mock_api.list_all_repos_graphql.return_value = {}
-
-        # REST API returns user repos
-        mock_api.list_repos.return_value = [
-            GitHubRepo(
-                name="user-repo1",
-                full_name="testuser/user-repo1",
-                html_url="https://github.com/testuser/user-repo1",
-                ssh_url="git@github.com:testuser/user-repo1.git",
-                clone_url="https://github.com/testuser/user-repo1.git",
-                private=False,
-                description="User repo 1",
-            ),
-            GitHubRepo(
-                name="user-repo2",
-                full_name="testuser/user-repo2",
-                html_url="https://github.com/testuser/user-repo2",
-                ssh_url="git@github.com:testuser/user-repo2.git",
-                clone_url="https://github.com/testuser/user-repo2.git",
-                private=True,
-                description="User repo 2",
-            ),
-        ]
+        mock_api.list_owner_repos_graphql.return_value = {
+            "user-repo1": {
+                "name": "user-repo1",
+                "full_name": "testuser/user-repo1",
+                "html_url": "https://github.com/testuser/user-repo1",
+                "ssh_url": "git@github.com:testuser/user-repo1.git",
+                "clone_url": "https://github.com/testuser/user-repo1",
+                "private": True,
+                "description": "User repo 1",
+            },
+        }
 
         config = Config(
             host="github.com/testuser",
@@ -467,20 +437,15 @@ class TestDiscoverGitHubRepositories:
 
         projects, stats = discover_github_repositories(config)
 
-        # Verify fallback happened
-        mock_api.list_all_repos_graphql.assert_called_once_with("testuser")
-        mock_api.list_repos.assert_called_once_with(org=None)
-
-        # Verify results
-        assert len(projects) == 2
-        assert stats["total"] == 2
+        mock_api.list_owner_repos_graphql.assert_called_once_with("testuser")
+        mock_api.list_all_repos_graphql.assert_not_called()
+        mock_api.list_repos.assert_not_called()
+        assert [p.name for p in projects] == ["user-repo1"]
+        assert stats["total"] == 1
         assert stats["discovery_method"] == "github_api"
         assert stats["org_or_user"] == "testuser"
 
-        assert projects[0].name == "user-repo1"
-        assert projects[0].source_type == SourceType.GITHUB
-        assert projects[1].name == "user-repo2"
-
+    @pytest.mark.parametrize("owner_type", ["Organization", "User"])
     @pytest.mark.parametrize(
         ("skip_archived", "expected_names", "expected_skipped"),
         [
@@ -489,17 +454,19 @@ class TestDiscoverGitHubRepositories:
         ],
     )
     @patch("gerrit_clone.github_discovery.GitHubAPI")
-    def test_org_archived_flag_reaches_filter(
+    def test_archived_flag_reaches_filter(
         self,
         mock_api_class: MagicMock,
         skip_archived: bool,
         expected_names: list[str],
         expected_skipped: int,
+        owner_type: str,
     ) -> None:
-        """An org repo archived on GitHub honours --skip-archived.
+        """A repo archived on GitHub honours --skip-archived.
 
         Only the HTTP call is stubbed, so the GraphQL query, the node
-        mapping and the filter all run as they do against GitHub.
+        mapping and the filter all run as they do against GitHub, for
+        organisations and users alike.
         """
         api = GitHubAPI(token="fake-token")
         mock_api_class.return_value = api
@@ -507,7 +474,8 @@ class TestDiscoverGitHubRepositories:
         response = Mock()
         response.json.return_value = {
             "data": {
-                "organization": {
+                "repositoryOwner": {
+                    "__typename": owner_type,
                     "repositories": {
                         "nodes": [
                             _graphql_node("live", archived=False),
@@ -532,29 +500,6 @@ class TestDiscoverGitHubRepositories:
 
         assert sorted(p.name for p in projects) == expected_names
         assert stats["skipped"] == expected_skipped
-
-    @patch("gerrit_clone.github_discovery.GitHubAPI")
-    def test_user_fallback_skips_archived(self, mock_api_class: MagicMock) -> None:
-        """A user repo archived on GitHub is skipped by default."""
-        mock_api = MagicMock()
-        mock_api_class.return_value.__enter__.return_value = mock_api
-        mock_api.list_all_repos_graphql.return_value = {}
-        mock_api.list_repos.return_value = [
-            GitHubRepo.from_api_response(_rest_repo("live", archived=False)),
-            GitHubRepo.from_api_response(_rest_repo("old", archived=True)),
-        ]
-
-        config = Config(
-            host="github.com/testuser",
-            source_type=SourceType.GITHUB,
-            github_org="testuser",
-            github_token="fake-token",
-        )
-
-        projects, stats = discover_github_repositories(config)
-
-        assert [p.name for p in projects] == ["live"]
-        assert stats["skipped"] == 1
 
     def test_raises_on_invalid_source_type(self) -> None:
         """Test that error is raised for non-GitHub source type."""
@@ -583,7 +528,7 @@ class TestDiscoverGitHubRepositories:
         mock_api = MagicMock()
         mock_api_class.return_value.__enter__.return_value = mock_api
 
-        mock_api.list_all_repos_graphql.return_value = {}
+        mock_api.list_owner_repos_graphql.return_value = {}
 
         config = Config(
             host="github.com/testorg",
@@ -605,7 +550,7 @@ class TestDiscoverGitHubRepositories:
         mock_api = MagicMock()
         mock_api_class.return_value.__enter__.return_value = mock_api
 
-        mock_api.list_all_repos_graphql.return_value = {}
+        mock_api.list_owner_repos_graphql.return_value = {}
 
         config = Config(
             host="github.com/testorg",

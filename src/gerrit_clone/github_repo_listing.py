@@ -11,11 +11,17 @@ discovery all consume.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from gerrit_clone.github_graphql import fetch_org_repos_page
+from gerrit_clone.github_graphql import fetch_org_repos_page, fetch_owner_repos_page
+from gerrit_clone.github_models import GitHubNotFoundError
 from gerrit_clone.github_repo_ops import GitHubRepoOperations
 from gerrit_clone.logging import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from gerrit_clone.github_graphql import GraphQLRepoPage
 
 logger = get_logger(__name__)
 
@@ -95,18 +101,77 @@ class GitHubRepoListing(GitHubRepoOperations):
             max_retries: Retries per page on transient errors
 
         Returns:
+            Dictionary mapping repo name to repo details; empty when
+            ``org`` is not an organization
+        """
+        repos_map, _found = self._list_repos_graphql(
+            org, fetch_org_repos_page, max_retries
+        )
+        return repos_map
+
+    def list_owner_repos_graphql(
+        self,
+        login: str,
+        max_retries: int = 3,
+    ) -> dict[str, dict[str, Any]]:
+        """List the repositories a user or organization owns, using GraphQL.
+
+        Unlike :meth:`list_all_repos_graphql`, ``login`` may name a
+        user, whose own repositories are listed (not those they only
+        collaborate on).
+
+        Args:
+            login: User or organization login
+            max_retries: Retries per page on transient errors
+
+        Returns:
             Dictionary mapping repo name to repo details
+
+        Raises:
+            GitHubNotFoundError: GitHub knows no user or organization
+                by that login, or the token cannot see it
+            GitHubAuthError: GitHub rejected the token
+            GitHubAPIError: A page failed after exhausting its retries,
+                so the listing would be incomplete
+        """
+        repos_map, found = self._list_repos_graphql(
+            login, fetch_owner_repos_page, max_retries
+        )
+        if not found:
+            raise GitHubNotFoundError(
+                f"GitHub has no user or organization '{login}' visible to this token"
+            )
+        return repos_map
+
+    def _list_repos_graphql(
+        self,
+        login: str,
+        fetch_page: Callable[..., GraphQLRepoPage | None],
+        max_retries: int,
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Page through an owner's repositories with *fetch_page*.
+
+        Args:
+            login: Owner login
+            fetch_page: Fetches one page of the owner's repositories
+            max_retries: Retries per page on transient errors
+
+        Returns:
+            Tuple of (repo name to repo details, whether the owner
+            exists); a page that fails after its retries stops the
+            listing but keeps what was collected
         """
         repos_map: dict[str, dict[str, Any]] = {}
         repos_without_default_branch: list[str] = []
         cursor: str | None = None
         has_next_page = True
+        found = True
 
         while has_next_page:
-            page = fetch_org_repos_page(
+            page = fetch_page(
                 self.client,
                 self._budget,
-                org,
+                login,
                 cursor=cursor,
                 max_retries=max_retries,
                 graphql_url=self.graphql_url,
@@ -122,7 +187,8 @@ class GitHubRepoListing(GitHubRepoOperations):
                 )
                 break
 
-            if page.organization_missing:
+            if page.owner_missing:
+                found = False
                 break
 
             _absorb_repo_nodes(page.nodes, repos_map, repos_without_default_branch)
@@ -151,6 +217,6 @@ class GitHubRepoListing(GitHubRepoOperations):
         logger.debug(
             "Fetched %d repositories from %s using GraphQL",
             len(repos_map),
-            org,
+            login,
         )
-        return repos_map
+        return repos_map, found

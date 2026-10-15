@@ -10,6 +10,7 @@ import time as _time
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 
 from gerrit_clone.github_api import (
@@ -1178,6 +1179,143 @@ class TestListAllReposGraphQL:
             assert 'test\\"org' in query
 
         api.close()
+
+
+def _owner_response(
+    owner_type: str, names: list[str], *, has_next: bool = False
+) -> Mock:
+    """A repositoryOwner GraphQL response listing *names*."""
+    response = Mock()
+    response.json.return_value = {
+        "data": {
+            "repositoryOwner": {
+                "__typename": owner_type,
+                "repositories": {
+                    "nodes": [
+                        {
+                            "name": name,
+                            "nameWithOwner": f"owner/{name}",
+                            "url": f"https://github.com/owner/{name}",
+                            "sshUrl": f"git@github.com:owner/{name}.git",
+                            "isPrivate": False,
+                            "isArchived": False,
+                            "defaultBranchRef": {"name": "main"},
+                        }
+                        for name in names
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": has_next,
+                        "endCursor": "cursor1" if has_next else None,
+                    },
+                },
+            },
+        },
+    }
+    return response
+
+
+class TestListOwnerReposGraphQL:
+    """Test list_owner_repos_graphql method."""
+
+    @pytest.mark.parametrize("owner_type", ["Organization", "User"])
+    def test_lists_an_owners_repositories(self, owner_type: str) -> None:
+        """Users and organizations are listed the same way."""
+        with (
+            GitHubAPI(token="test-token") as api,
+            patch.object(
+                api.client, "post", return_value=_owner_response(owner_type, ["r1"])
+            ),
+        ):
+            result = api.list_owner_repos_graphql("owner")
+
+        assert list(result) == ["r1"]
+        assert result["r1"]["full_name"] == "owner/r1"
+
+    def test_pages_with_the_cursor_as_a_variable(self) -> None:
+        """Each later page sends the previous end cursor as a variable."""
+        responses = [
+            _owner_response("User", ["r1"], has_next=True),
+            _owner_response("User", ["r2"]),
+        ]
+        with (
+            GitHubAPI(token="test-token") as api,
+            patch.object(api.client, "post", side_effect=responses) as mock_post,
+        ):
+            result = api.list_owner_repos_graphql("owner")
+
+        assert sorted(result) == ["r1", "r2"]
+        variables = [c.kwargs["json"]["variables"] for c in mock_post.call_args_list]
+        assert variables == [
+            {"login": "owner", "cursor": None},
+            {"login": "owner", "cursor": "cursor1"},
+        ]
+
+    def test_unknown_login_raises_not_found(self) -> None:
+        """An unknown login raises at once, without retrying."""
+        response = Mock()
+        response.json.return_value = {"data": {"repositoryOwner": None}}
+        with (
+            GitHubAPI(token="test-token") as api,
+            patch.object(api.client, "post", return_value=response) as mock_post,
+            pytest.raises(GitHubNotFoundError, match="nobody"),
+        ):
+            api.list_owner_repos_graphql("nobody")
+
+        assert mock_post.call_count == 1
+
+    def test_rejected_token_raises_at_once(self) -> None:
+        """A 401 is an authentication error, not an empty account."""
+        response = Mock(status_code=401, headers={})
+        with (
+            GitHubAPI(token="bad-token") as api,
+            patch.object(api.client, "post", return_value=response) as mock_post,
+            patch("gerrit_clone.github_graphql_retry.time_mod.sleep") as sleep,
+            pytest.raises(GitHubAuthError),
+        ):
+            api.list_owner_repos_graphql("owner")
+
+        assert mock_post.call_count == 1
+        sleep.assert_not_called()
+
+    def test_exhausted_retries_raise_with_the_cause(self) -> None:
+        """A page that keeps failing raises rather than returning {}."""
+        response = Mock(status_code=502, headers={})
+        with (
+            GitHubAPI(token="test-token") as api,
+            patch.object(api.client, "post", return_value=response),
+            patch("gerrit_clone.github_graphql_retry.time_mod.sleep"),
+            pytest.raises(GitHubAPIError, match="HTTP 502"),
+        ):
+            api.list_owner_repos_graphql("owner")
+
+    def test_org_listing_keeps_returning_empty_on_failure(self) -> None:
+        """mirror and reset keep their existing failure handling."""
+        response = Mock(status_code=401, headers={})
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401 Unauthorized", request=Mock(), response=Mock()
+        )
+        with (
+            GitHubAPI(token="bad-token") as api,
+            patch.object(api.client, "post", return_value=response),
+            patch("gerrit_clone.github_graphql_retry.time_mod.sleep"),
+        ):
+            assert api.list_all_repos_graphql("some-org") == {}
+
+    def test_org_listing_still_empty_for_a_user(self) -> None:
+        """list_all_repos_graphql still lists organizations only.
+
+        mirror and reset rely on it, and reset deletes what it lists.
+        """
+        response = Mock()
+        response.json.return_value = {"data": {"organization": None}}
+        with (
+            GitHubAPI(token="test-token") as api,
+            patch.object(api.client, "post", return_value=response) as mock_post,
+        ):
+            result = api.list_all_repos_graphql("someuser")
+
+        assert result == {}
+        assert "organization(login:" in mock_post.call_args.kwargs["json"]["query"]
 
 
 class TestRequestPaginated:

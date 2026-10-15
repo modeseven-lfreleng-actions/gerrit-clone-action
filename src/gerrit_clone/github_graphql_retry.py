@@ -67,7 +67,7 @@ def pause_before_retry(
     budget_pct = f"{snap.budget_fraction:.1%}" if snap.limit > 0 else "unknown"
     Console(stderr=True).print(
         f"[yellow]⚠️ {reason} "
-        f"for GitHub Organisation: "
+        f"for GitHub owner: "
         f"{org}, retrying in {backoff}s "
         f"({retry + 1}/{max_retries}) "
         f"[Budget remaining: "
