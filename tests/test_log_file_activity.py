@@ -25,6 +25,7 @@ from gerrit_clone.cli_mirror_setup import start_logging as start_mirror_logging
 from gerrit_clone.cli_reset_run import _start_logging as start_reset_logging
 from gerrit_clone.cli_session import CliSession
 from gerrit_clone.error_codes import DiscoveryError
+from gerrit_clone.file_logging import file_logging_active, init_logging
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -85,7 +86,6 @@ def _clone(output_path: Path, *extra: str, fail: bool) -> tuple[int, str]:
 class TestCloneWithLogFileDisabled:
     """``clone --disable-log-file`` never touches a log file."""
 
-    @pytest.mark.xfail(strict=True, reason="#323: summary written when disabled")
     def test_early_failure_into_new_directory(self, tmp_path: Path) -> None:
         """An early failure reports only the real error."""
         output = tmp_path / "new"
@@ -97,7 +97,6 @@ class TestCloneWithLogFileDisabled:
         assert "Traceback" not in output_text
         assert not output.exists()
 
-    @pytest.mark.xfail(strict=True, reason="#323: summary written when disabled")
     def test_early_failure_into_existing_directory(self, tmp_path: Path) -> None:
         """An early failure creates no log file."""
         exit_code, _output = _clone(tmp_path, "--disable-log-file", fail=True)
@@ -105,7 +104,6 @@ class TestCloneWithLogFileDisabled:
         assert exit_code == 3
         assert not (tmp_path / LOG_NAME).exists()
 
-    @pytest.mark.xfail(strict=True, reason="#323: absent log file reported")
     def test_success_reports_no_log_file(self, tmp_path: Path) -> None:
         """The results panel names no log file."""
         exit_code, output_text = _clone(tmp_path, "--disable-log-file", fail=False)
@@ -136,7 +134,6 @@ class TestCloneWithLogFileEnabled:
         assert "Log File:" in output_text
         assert (tmp_path / LOG_NAME).is_file()
 
-    @pytest.mark.xfail(strict=True, reason="#323: summary written when inactive")
     def test_uncreatable_log_file_is_not_retried(self, tmp_path: Path) -> None:
         """A log file that cannot be created is not written later either.
 
@@ -162,10 +159,32 @@ def _uncreatable_dir(tmp_path: Path) -> Path:
     return blocker / "out"
 
 
+class TestFileLoggingActive:
+    """``file_logging_active`` reports whether a log file is written."""
+
+    def test_true_once_log_file_created(self, tmp_path: Path) -> None:
+        """An enabled log file that was created counts as active."""
+        init_logging(log_file=tmp_path / "run.log", quiet=True)
+
+        assert file_logging_active()
+
+    def test_false_when_disabled(self, tmp_path: Path) -> None:
+        """Disabled file logging is inactive."""
+        init_logging(log_file=tmp_path / "run.log", disable_file=True, quiet=True)
+
+        assert not file_logging_active()
+        assert not (tmp_path / "run.log").exists()
+
+    def test_false_when_log_file_cannot_be_created(self, tmp_path: Path) -> None:
+        """A log file that cannot be created leaves logging inactive."""
+        init_logging(log_file=_uncreatable_dir(tmp_path) / "run.log", quiet=True)
+
+        assert not file_logging_active()
+
+
 class TestOtherCommandsRecordOnlyAnActiveLogFile:
     """``mirror`` and ``reset`` record a log file only once it exists."""
 
-    @pytest.mark.xfail(strict=True, reason="#323: inactive log file recorded")
     def test_mirror(self, tmp_path: Path) -> None:
         """Mirror records no log file it could not create."""
         request = SimpleNamespace(
@@ -187,7 +206,6 @@ class TestOtherCommandsRecordOnlyAnActiveLogFile:
 
         assert session.log_file_path is None
 
-    @pytest.mark.xfail(strict=True, reason="#323: inactive log file recorded")
     def test_reset(self, tmp_path: Path) -> None:
         """Reset records no log file it could not create."""
         request = SimpleNamespace(

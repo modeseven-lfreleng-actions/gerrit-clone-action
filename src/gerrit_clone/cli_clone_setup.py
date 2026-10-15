@@ -27,6 +27,7 @@ from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
+    file_logging_active,
     get_default_log_path,
     init_logging,
 )
@@ -148,7 +149,7 @@ def build_cli_args(
 
 def start_logging(
     request: CloneRequest, cli_args: dict[str, Any]
-) -> tuple[logging.Logger, ErrorCollector, Path]:
+) -> tuple[logging.Logger, ErrorCollector, Path | None]:
     """Set up the unified logging system (file + console).
 
     The default log file goes in the --output-path value, which Typer
@@ -156,7 +157,9 @@ def start_logging(
     whatever path the other sources later supply for the clones.
 
     Returns:
-        Tuple of (file logger, error collector, log file path)
+        Tuple of (file logger, error collector, log file path). The
+        path is None when no log file is being written: file logging
+        was disabled, or the log file could not be created.
     """
     log_dir = request.output_path if request.output_path is not None else Path()
     file_logger, error_collector = init_logging(
@@ -172,7 +175,8 @@ def start_logging(
         command="clone",
     )
 
-    # Set log_file_path for error handling compatibility
+    if not file_logging_active():
+        return file_logger, error_collector, None
     log_file_path = (
         request.log_file
         if request.log_file
