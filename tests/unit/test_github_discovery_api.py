@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from gerrit_clone.github_discovery import discover_github_repositories
+from gerrit_clone.github_models import GitHubNotFoundError
 from gerrit_clone.models import Config, SourceType
 
 if TYPE_CHECKING:
@@ -136,10 +138,9 @@ class FakeGitHub:
     def request(self, method: str, url: str, **_kwargs: Any) -> Mock:
         """Answer a REST request."""
         self.requests.append((method, url))
-        path = url.split("?", 1)[0]
-        page = 1
-        if "page=" in url:
-            page = int(url.split("page=", 1)[1].split("&", 1)[0])
+        parsed = urlsplit(url)
+        path = parsed.path
+        page = int(parse_qs(parsed.query).get("page", ["1"])[0])
         if path.endswith("/user/repos"):
             repos = [_rest_repo(o, n) for o, n in self.token_owner_repos]
         elif "/users/" in path and path.endswith("/repos"):
@@ -220,3 +221,62 @@ class TestEnterpriseHost:
         assert names == ["repo1"]
         urls = [u for u, _ in fake.posts] + [u for _, u in fake.requests]
         assert _hosts(urls) == {"https://api.github.com"}
+
+
+class TestOwnerKinds:
+    """#320: github.com/LOGIN discovers what LOGIN owns, user or org."""
+
+    @staticmethod
+    def _fake() -> FakeGitHub:
+        """An org, a user, and a token owner in many repositories."""
+        return FakeGitHub(
+            orgs={"someorg": ["org-repo"]},
+            users={"someuser": ["Hello-World", "Spoon-Knife"]},
+            token_owner_repos=[
+                ("tokenowner", "private-notes"),
+                ("someorg", "org-repo"),
+                ("otherorg", ".github"),
+                ("thirdorg", ".github"),
+            ],
+        )
+
+    @pytest.mark.xfail(strict=True, reason="#320: lists the token owner")
+    def test_user_account_lists_that_users_repositories(self, no_sleep: Mock) -> None:
+        """A user login yields that user's repositories only."""
+        fake = self._fake()
+
+        names = _discover(fake, "github.com/someuser")
+
+        assert names == ["Hello-World", "Spoon-Knife"]
+        assert not any(
+            u.split("?")[0].endswith("/user/repos") for _, u in fake.requests
+        )
+
+    @pytest.mark.xfail(strict=True, reason="#320: retries a missing org")
+    def test_user_account_takes_no_retries(self, no_sleep: Mock) -> None:
+        """Recognising a user account costs no retry backoff."""
+        fake = self._fake()
+
+        _discover(fake, "github.com/someuser")
+
+        no_sleep.assert_not_called()
+
+    def test_organisation_lists_its_repositories(self, no_sleep: Mock) -> None:
+        """An organisation login yields the organisation's repositories."""
+        fake = self._fake()
+
+        names = _discover(fake, "github.com/someorg")
+
+        assert names == ["org-repo"]
+        no_sleep.assert_not_called()
+
+    @pytest.mark.xfail(strict=True, reason="#320: unknown login falls back")
+    def test_unknown_login_is_a_clear_error(self, no_sleep: Mock) -> None:
+        """A login GitHub doesn't know fails, naming the login."""
+        fake = self._fake()
+
+        with pytest.raises(GitHubNotFoundError, match="no-such-login"):
+            _discover(fake, "github.com/no-such-login")
+
+        no_sleep.assert_not_called()
+        assert not fake.requests
