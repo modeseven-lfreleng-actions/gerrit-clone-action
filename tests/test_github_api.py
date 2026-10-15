@@ -1422,7 +1422,7 @@ def test_list_all_repos_no_default_branch() -> None:
 
     with (
         patch.object(api.client, "post", return_value=mock_response),
-        patch("gerrit_clone.github_api.logger") as mock_logger,
+        patch("gerrit_clone.github_repo_listing.logger") as mock_logger,
     ):
         result = api.list_all_repos_graphql("test-org")
 

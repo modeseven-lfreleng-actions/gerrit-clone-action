@@ -4,10 +4,9 @@
 """GitHub API integration for repository mirroring.
 
 This module is the public entry point for the GitHub client.  It
-composes the transport and single-repository layers into
-:class:`GitHubAPI` and adds the two bulk operations — GraphQL
-organization listing and the rate-limit-aware batch mutations — that
-coordinate the lower layers.
+composes the transport, single-repository and GraphQL listing layers
+into :class:`GitHubAPI` and adds the rate-limit-aware batch mutations
+that coordinate them.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from gerrit_clone.github_batch_support import (
     log_delete_batch_outcome,
     scale_create_interval,
 )
-from gerrit_clone.github_graphql import fetch_org_repos_page
 from gerrit_clone.github_models import (
     GitHubAPIError,
     GitHubAuthError,
@@ -36,7 +34,8 @@ from gerrit_clone.github_models import (
     sanitize_description,
     transform_gerrit_name_to_github,
 )
-from gerrit_clone.github_repo_ops import GitHubRepoOperations, get_default_org_or_user
+from gerrit_clone.github_repo_listing import GitHubRepoListing
+from gerrit_clone.github_repo_ops import get_default_org_or_user
 from gerrit_clone.github_transport import build_auth_headers
 from gerrit_clone.logging import get_logger
 from gerrit_clone.rate_limit import AsyncProgressCounter, TokenBucketLimiter
@@ -62,140 +61,8 @@ _AsyncProgressCounter = AsyncProgressCounter
 _AsyncRateLimiter = TokenBucketLimiter
 
 
-def _absorb_repo_nodes(
-    nodes: list[dict[str, Any]],
-    repos_map: dict[str, dict[str, Any]],
-    repos_without_default_branch: list[str],
-) -> None:
-    """Fold one page of GraphQL repository nodes into the result map.
-
-    Args:
-        nodes: Raw repository nodes from a GraphQL page
-        repos_map: Accumulated mapping of repo name to repo details
-        repos_without_default_branch: Accumulated names of repos with
-            no default branch configured
-    """
-    for node in nodes:
-        name = node["name"]
-        default_branch_ref = node.get("defaultBranchRef")
-        default_branch = None
-        latest_commit_sha = None
-        last_commit_date = None
-
-        if default_branch_ref:
-            default_branch = default_branch_ref.get("name")
-            target = default_branch_ref.get("target")
-            if target:
-                latest_commit_sha = target.get("oid")
-                last_commit_date = target.get("committedDate")
-        else:
-            repos_without_default_branch.append(name)
-            logger.debug(
-                "Repository %s has no default "
-                "branch configured (may be a "
-                "Gerrit parent project or an "
-                "empty repo from a failed push)"
-                "; latest_commit_sha will be "
-                "unavailable",
-                name,
-            )
-
-        repos_map[name] = {
-            "name": name,
-            "full_name": node["nameWithOwner"],
-            "html_url": node["url"],
-            "ssh_url": node["sshUrl"],
-            "clone_url": node["url"],
-            "private": node["isPrivate"],
-            "archived": node.get("isArchived", False),
-            "description": node.get("description"),
-            "default_branch": default_branch,
-            "latest_commit_sha": (latest_commit_sha),
-            "last_commit_date": (last_commit_date),
-        }
-
-
-class GitHubAPI(GitHubRepoOperations):
+class GitHubAPI(GitHubRepoListing):
     """GitHub API client for repository operations."""
-
-    # GraphQL - list all repos with retry
-
-    def list_all_repos_graphql(
-        self,
-        org: str,
-        max_retries: int = 3,
-    ) -> dict[str, dict[str, Any]]:
-        """List all repositories in an org using GraphQL.
-
-        Much faster than paginating through the REST API.  Now
-        includes retry logic for transient errors (502, 503, etc.)
-        that previously caused cascade failures when the result was
-        empty.
-
-        Args:
-            org: Organization name
-            max_retries: Retries per page on transient errors
-
-        Returns:
-            Dictionary mapping repo name to repo details
-        """
-        repos_map: dict[str, dict[str, Any]] = {}
-        repos_without_default_branch: list[str] = []
-        cursor: str | None = None
-        has_next_page = True
-
-        while has_next_page:
-            page = fetch_org_repos_page(
-                self.client,
-                self._budget,
-                org,
-                cursor=cursor,
-                max_retries=max_retries,
-                graphql_url=self.graphql_url,
-            )
-
-            if page is None:
-                # If a page failed after all retries, stop
-                # paginating but keep what we have so far.
-                logger.warning(
-                    "Stopping GraphQL pagination after "
-                    "page failure (collected %d repos so far)",
-                    len(repos_map),
-                )
-                break
-
-            if page.organization_missing:
-                break
-
-            _absorb_repo_nodes(page.nodes, repos_map, repos_without_default_branch)
-
-            has_next_page = page.has_next_page
-            cursor = page.end_cursor
-
-            logger.debug(
-                "Fetched %d repos, total so far: %d, has_next: %s",
-                len(page.nodes),
-                len(repos_map),
-                has_next_page,
-            )
-
-        if repos_without_default_branch:
-            logger.info(
-                "%d/%d repositories have no default branch "
-                "configured (typically Gerrit parent projects "
-                "with no code branches, or repos where a "
-                "previous push failed): %s",
-                len(repos_without_default_branch),
-                len(repos_map),
-                ", ".join(sorted(repos_without_default_branch)),
-            )
-
-        logger.debug(
-            "Fetched %d repositories from %s using GraphQL",
-            len(repos_map),
-            org,
-        )
-        return repos_map
 
     # Batch operations with token-bucket rate limiting
 

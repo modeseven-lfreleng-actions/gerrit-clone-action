@@ -154,7 +154,7 @@ class FakeGitHub:
 @pytest.fixture
 def no_sleep() -> Iterator[Mock]:
     """Make GraphQL retry backoff instant, recording each pause."""
-    with patch("gerrit_clone.github_graphql.time_mod.sleep") as sleep:
+    with patch("gerrit_clone.github_graphql_retry.time_mod.sleep") as sleep:
         yield sleep
 
 
