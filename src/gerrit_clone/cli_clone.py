@@ -24,6 +24,7 @@ from gerrit_clone.concurrent_utils import handle_sigint_gracefully
 
 
 def clone(
+    ctx: typer.Context,
     host: str = opts.HOST,
     source_type: str | None = opts.SOURCE_TYPE,
     github_token: str | None = opts.GITHUB_TOKEN,
@@ -126,6 +127,7 @@ def clone(
         host=host,
         source_type=source_type,
         github_token=github_token,
+        github_token_source=_github_token_source(ctx),
         github_org=github_org,
         use_gh_cli=use_gh_cli,
         port=port,
@@ -186,3 +188,16 @@ def clone(
         raise
     except Exception as e:
         handle_crash(session, e, verbose=verbose)
+
+
+def _github_token_source(ctx: typer.Context) -> str:
+    """Name where the --github-token value came from, for logging.
+
+    The option also reads GERRIT_CLONE_TOKEN, so its value alone cannot
+    tell a typed token from one left in the environment; the parameter
+    source can.
+    """
+    source = ctx.get_parameter_source("github_token")
+    if source is not None and source.name == "ENVIRONMENT":
+        return "GERRIT_CLONE_TOKEN"
+    return "--github-token"

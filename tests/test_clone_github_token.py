@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from gerrit_clone.cli import app
 from gerrit_clone.content_intent import INTENT_DIR
 from gerrit_clone.error_codes import ExitCode
+from gerrit_clone.github_transport import resolve_github_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,7 +78,6 @@ def _clone(
 class TestGitHubCloneWithoutToken:
     """A GitHub clone without a token stops at configuration."""
 
-    @pytest.mark.xfail(strict=True, reason="#321: warns, then fails discovery")
     def test_stops_before_discovery(self, tmp_path: Path) -> None:
         """No banner, no discovery, a configuration error naming the fix."""
         exit_code, output, stub = _clone(tmp_path)
@@ -88,7 +88,6 @@ class TestGitHubCloneWithoutToken:
         for source in TOKEN_SOURCES:
             assert source in output
 
-    @pytest.mark.xfail(strict=True, reason="#321: warns, then fails discovery")
     def test_records_no_filters(self, tmp_path: Path) -> None:
         """Content filters aren't written down for a run that can't start."""
         exit_code, _output, stub = _clone(tmp_path, "--remove-files", "*.jar")
@@ -97,7 +96,6 @@ class TestGitHubCloneWithoutToken:
         stub.assert_not_called()
         assert not (tmp_path / INTENT_DIR).exists()
 
-    @pytest.mark.xfail(strict=True, reason="#321: misleading warning")
     def test_drops_the_misleading_warning(self, tmp_path: Path) -> None:
         """No claim that clones will still work without a token."""
         _exit_code, output, _stub = _clone(tmp_path)
@@ -134,3 +132,92 @@ class TestCloneWithTokenOrGerrit:
 
         assert exit_code == 0, output
         stub.assert_called_once()
+
+
+@pytest.mark.usefixtures("no_token")
+class TestLoggedTokenSource:
+    """clone logs where its token came from, never the token itself.
+
+    ``--github-token`` also reads GERRIT_CLONE_TOKEN, so the logged
+    source must come from how the option got its value.
+    """
+
+    @staticmethod
+    def _logged_source(tmp_path: Path, *extra: str) -> tuple[str, str]:
+        """Run clone; return the logged token source and every log call."""
+        with patch("gerrit_clone.cli_clone_setup.logger") as logger:
+            exit_code, output, _stub = _clone(tmp_path, *extra)
+        assert exit_code == 0, output
+        calls = [c for c in logger.debug.call_args_list if "token from" in c.args[0]]
+        assert len(calls) == 1
+        return calls[0].args[1], repr(logger.mock_calls)
+
+    def test_gerrit_clone_token_from_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With both variables set, GERRIT_CLONE_TOKEN is named."""
+        monkeypatch.setenv("GERRIT_CLONE_TOKEN", "stale-value")
+        monkeypatch.setenv("GITHUB_TOKEN", "other-value")
+
+        source, calls = self._logged_source(tmp_path)
+
+        assert source == "GERRIT_CLONE_TOKEN"
+        assert "stale-value" not in calls
+
+    def test_flag_beats_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A token typed on the command line is named as the flag."""
+        monkeypatch.setenv("GERRIT_CLONE_TOKEN", "stale-value")
+
+        source, calls = self._logged_source(tmp_path, "--github-token", "typed")
+
+        assert source == "--github-token"
+        assert "typed" not in calls
+
+    def test_github_token_from_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GITHUB_TOKEN alone is named as GITHUB_TOKEN."""
+        monkeypatch.setenv("GITHUB_TOKEN", "gh-value")
+
+        source, calls = self._logged_source(tmp_path)
+
+        assert source == "GITHUB_TOKEN"
+        assert "gh-value" not in calls
+
+
+@pytest.mark.usefixtures("no_token")
+class TestResolveGitHubToken:
+    """Token precedence, with a source name that is safe to log."""
+
+    def test_explicit_token_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit token beats both environment variables."""
+        monkeypatch.setenv("GERRIT_CLONE_TOKEN", "from-gerrit-clone")
+        monkeypatch.setenv("GITHUB_TOKEN", "from-github")
+
+        assert resolve_github_token("explicit") == ("explicit", "--github-token")
+
+    def test_gerrit_clone_token_beats_github_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GERRIT_CLONE_TOKEN is preferred to GITHUB_TOKEN."""
+        monkeypatch.setenv("GERRIT_CLONE_TOKEN", "from-gerrit-clone")
+        monkeypatch.setenv("GITHUB_TOKEN", "from-github")
+
+        assert resolve_github_token(None) == (
+            "from-gerrit-clone",
+            "GERRIT_CLONE_TOKEN",
+        )
+
+    def test_github_token_last(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GITHUB_TOKEN is used when nothing else is set."""
+        monkeypatch.setenv("GITHUB_TOKEN", "from-github")
+
+        assert resolve_github_token(None) == ("from-github", "GITHUB_TOKEN")
+
+    def test_empty_values_count_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty variable or option supplies no token."""
+        monkeypatch.setenv("GERRIT_CLONE_TOKEN", "")
+
+        assert resolve_github_token("") == (None, None)

@@ -820,6 +820,9 @@ class TestCliOutputPathSpellings:
                     output_path,
                     "--disable-log-file",
                     "--quiet",
+                    # GitHub sources need a token to start; Gerrit ignores it.
+                    "--github-token",
+                    "test-token",
                 ],
             )
 

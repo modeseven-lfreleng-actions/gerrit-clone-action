@@ -72,3 +72,5 @@ class CloneRequest:
     remove_files: str | None
     git_filter: str | None
     redact_secrets: bool
+    # Where github_token came from, for logs; never the token itself
+    github_token_source: str = "--github-token"

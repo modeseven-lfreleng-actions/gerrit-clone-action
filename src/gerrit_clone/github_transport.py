@@ -30,6 +30,37 @@ logger = get_logger(__name__)
 
 GITHUB_API_URL = "https://api.github.com"
 
+# Where a GitHub token comes from, highest precedence first after an
+# explicit --github-token.
+GITHUB_TOKEN_VARIABLES = ("GERRIT_CLONE_TOKEN", "GITHUB_TOKEN")
+
+
+def resolve_github_token(
+    explicit: str | None, explicit_source: str = "--github-token"
+) -> tuple[str | None, str | None]:
+    """Return the GitHub token to use and where it came from.
+
+    Precedence: an explicit token, then GERRIT_CLONE_TOKEN, then
+    GITHUB_TOKEN.  The source is a name safe to log; the token never
+    is.
+
+    Args:
+        explicit: Token given on the command line or in configuration
+        explicit_source: Where *explicit* came from.  ``--github-token``
+            also reads GERRIT_CLONE_TOKEN, so the CLI passes the
+            source it observed.
+
+    Returns:
+        Tuple of (token, source name), or (None, None) when no source
+        supplies one
+    """
+    if explicit:
+        return explicit, explicit_source
+    for variable in GITHUB_TOKEN_VARIABLES:
+        if token := os.getenv(variable):
+            return token, variable
+    return None, None
+
 
 def github_api_url(host: str) -> str:
     """Return the REST API base URL for a GitHub source host.

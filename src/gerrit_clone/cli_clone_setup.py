@@ -31,6 +31,8 @@ from gerrit_clone.file_logging import (
     init_logging,
 )
 from gerrit_clone.github_discovery import detect_github_source, parse_github_url
+from gerrit_clone.github_transport import resolve_github_token
+from gerrit_clone.logging import get_logger
 from gerrit_clone.models import DiscoveryMethod, SourceType
 from gerrit_clone.netrc import NetrcParseError
 
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
     from gerrit_clone.cli_session import CliSession
     from gerrit_clone.file_logging import ErrorCollector
     from gerrit_clone.models import Config
+
+logger = get_logger(__name__)
 
 
 def resolve_source(
@@ -323,6 +327,11 @@ def build_config(
     except ConfigurationError as e:
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
+    try:
+        _require_github_token(config, request.github_token_source)
+    except ConfigurationError as e:
+        _report_configuration_error(session, e)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     options = ContentFilterSpec.from_options(
         request.remove_files, request.git_filter, request.redact_secrets, config.path
     )
@@ -335,6 +344,33 @@ def build_config(
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     return config
+
+
+def _require_github_token(config: Config, token_source: str) -> None:
+    """Refuse a GitHub source that has no token to discover it with.
+
+    GitHub discovery always calls the API with a token, and GitHub's
+    GraphQL API answers no anonymous query, so without one no
+    repository, public or private, can be listed.  Checked before
+    anything is printed, recorded or fetched.
+
+    Args:
+        config: Effective configuration
+        token_source: Where the configured token came from
+
+    Raises:
+        ConfigurationError: The source is GitHub and no token is set
+    """
+    if config.source_type != SourceType.GITHUB:
+        return
+    _token, source = resolve_github_token(config.github_token, token_source)
+    if source is None:
+        raise ConfigurationError(
+            "A GitHub source needs a GitHub token to list its "
+            "repositories, public or private. Pass --github-token, or "
+            "set GERRIT_CLONE_TOKEN or GITHUB_TOKEN."
+        )
+    logger.debug("GitHub token from: %s", source)
 
 
 def _report_configuration_error(session: CliSession, error: Exception) -> None:

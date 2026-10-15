@@ -11,7 +11,6 @@ for type checking so it remains a leaf module.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 from gerrit_clone.model_enums import DiscoveryMethod, SourceType
@@ -65,8 +64,6 @@ def validate_and_normalize(config: Config) -> None:
     # Generate base_url if not provided
     if config.base_url is None:
         _derive_base_url(config)
-
-    _warn_if_github_token_missing(config)
 
 
 def _apply_port_defaults(config: Config) -> None:
@@ -195,25 +192,3 @@ def _derive_base_url(config: Config) -> None:
         from gerrit_clone.github_transport import github_api_url  # noqa: PLC0415
 
         config.base_url = github_api_url(config.host)
-
-
-def _warn_if_github_token_missing(config: Config) -> None:
-    """Warn when a GitHub source has no token from config or environment."""
-    # Validate GitHub-specific requirements
-    # Check for token: explicit config > GERRIT_CLONE_TOKEN > GITHUB_TOKEN
-    if (
-        config.source_type == SourceType.GITHUB
-        and not config.github_token
-        and not os.getenv("GERRIT_CLONE_TOKEN")
-        and not os.getenv("GITHUB_TOKEN")
-    ):
-        logger = __import__("gerrit_clone.logging", fromlist=["get_logger"]).get_logger(
-            __name__
-        )
-        logger.warning(
-            "No GitHub token provided. SSH clones of public repos "
-            "will still work; a token is required for private "
-            "repositories or authenticated HTTPS/API access. "
-            "Set GERRIT_CLONE_TOKEN, GITHUB_TOKEN, or use "
-            "--github-token when needed."
-        )

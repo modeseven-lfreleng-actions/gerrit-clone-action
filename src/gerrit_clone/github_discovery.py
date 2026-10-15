@@ -9,11 +9,10 @@ using the GitHub REST or GraphQL API.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from gerrit_clone.github_api import GitHubAPI, GitHubAPIError, GitHubAuthError
-from gerrit_clone.github_transport import github_api_url
+from gerrit_clone.github_transport import github_api_url, resolve_github_token
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import Config, Project, ProjectState, SourceType
 
@@ -49,13 +48,9 @@ def discover_github_repositories(
 
     logger.debug(f"Discovering repositories in GitHub org/user: {org_or_user}")
 
-    # Get token from config or environment
-    # Priority: explicit config > GERRIT_CLONE_TOKEN > GITHUB_TOKEN
-    token: str | None
-    if config.github_token:
-        token = config.github_token
-    else:
-        token = os.getenv("GERRIT_CLONE_TOKEN") or os.getenv("GITHUB_TOKEN")
+    # The CLI logs where the token came from; here it is already resolved
+    # into config.github_token, so its origin would be mislabelled.
+    token, _source = resolve_github_token(config.github_token)
 
     try:
         # From the host, not config.base_url: --base-url and
