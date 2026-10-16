@@ -11,7 +11,7 @@ partially-initialised state explicit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,8 +31,21 @@ class CliSession:
     file_logger: logging.Logger | None = None
     error_collector: ErrorCollector | None = None
     log_file_path: Path | None = None
+    _summary_written: bool = field(default=False, init=False, repr=False)
 
     def write_summary(self) -> None:
-        """Write the collected error summary to the log file, if both exist."""
-        if self.error_collector and self.log_file_path:
-            self.error_collector.write_summary_to_file(self.log_file_path)
+        """Write the collected error summary to the log file, once.
+
+        Some exit paths write the summary and then raise ``typer.Exit``
+        through a command handler that writes it again; only the first
+        write reaches the file, so issues collected after it are not
+        summarised.  A call that writes nothing, because there is no
+        collector, no log file or nothing collected yet, does not count,
+        so a later call still writes the summary.
+        """
+        if self._summary_written:
+            return
+        collector = self.error_collector
+        if collector and self.log_file_path and collector.get_total_count():
+            collector.write_summary_to_file(self.log_file_path)
+            self._summary_written = True

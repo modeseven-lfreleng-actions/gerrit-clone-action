@@ -42,10 +42,6 @@ TOKEN_VARIABLES = ("GITHUB_TOKEN", "GERRIT_CLONE_TOKEN")
 
 _stub_logger = logging.getLogger("gerrit_clone.test_summary_written_once")
 
-_WRITTEN_TWICE = pytest.mark.xfail(
-    strict=True, reason="the summary is written again on typer.Exit"
-)
-
 
 @pytest.fixture(autouse=True)
 def _close_file_handlers() -> Iterator[None]:
@@ -92,7 +88,6 @@ class TestClone:
 
     log_name = f"{HOST}.log"
 
-    @_WRITTEN_TWICE
     def test_failed_result(self, tmp_path: Path) -> None:
         """A failed clone exits non-zero after writing one summary."""
 
@@ -103,7 +98,6 @@ class TestClone:
         assert _clone(tmp_path, fail) == 7
         assert _summaries(tmp_path / self.log_name) == 1
 
-    @_WRITTEN_TWICE
     def test_configuration_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -204,13 +198,11 @@ class TestMirror:
 
     log_name = f"{HOST}.log"
 
-    @_WRITTEN_TWICE
     def test_success(self, tmp_path: Path) -> None:
         """A successful mirror that collected a warning writes one summary."""
         assert _mirror(tmp_path, MirrorStatus.SUCCESS) == 0
         assert _summaries(tmp_path / self.log_name) == 1
 
-    @_WRITTEN_TWICE
     def test_failure(self, tmp_path: Path) -> None:
         """A failed mirror writes one summary."""
         assert _mirror(tmp_path, MirrorStatus.FAILED) == 7
@@ -259,13 +251,11 @@ class TestReset:
 
     log_name = f"reset-{ORG}.log"
 
-    @_WRITTEN_TWICE
     def test_with_deletions(self, tmp_path: Path) -> None:
         """A reset that deleted repositories writes one summary."""
         assert _reset(tmp_path, deleted=1) == 0
         assert _summaries(tmp_path / self.log_name) == 1
 
-    @_WRITTEN_TWICE
     def test_without_deletions(self, tmp_path: Path) -> None:
         """A reset that deleted nothing writes one summary."""
         assert _reset(tmp_path, deleted=0) == 0
@@ -283,7 +273,6 @@ def _collector(*warnings: str) -> ErrorCollector:
 class TestWriteSummary:
     """``CliSession.write_summary`` writes the summary once per session."""
 
-    @_WRITTEN_TWICE
     def test_second_call_writes_nothing(self, tmp_path: Path) -> None:
         """Calling twice leaves one summary block."""
         log_file = tmp_path / "run.log"
