@@ -59,6 +59,7 @@ from gerrit_clone.refresh_checkout_refs import (
     TRACKING,
     as_upstream_copy,
     configured_upstream,
+    copy_tags,
 )
 from gerrit_clone.refresh_filtered import OVERTAKEN_REFUSAL, FilteredRefreshMixin
 from gerrit_clone.refresh_git_env import run_git
@@ -209,15 +210,15 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
     ) -> _Staged | None:
         """Steps 1 and 2: ``None`` if the copy fetched and was filtered.
 
-        Without *fetch*, the copy is filtered as staged, holding the
-        checkout's remote-tracking refs as branches and no tags: for a
-        checkout that was just cloned, and so already holds upstream.
+        Without *fetch*, the copy is filtered holding the checkout's
+        remote-tracking refs as branches and its tags, which would else
+        escape the filters: for a checkout just cloned, holding upstream.
         """
         spec = self.content_filters
         assert spec is not None  # Checked by the caller.
         if not (
             self._prepare_stage(repo_path, stage, result)
-            and self._as_upstream_copy(repo_path, stage, result)
+            and self._as_upstream_copy(repo_path, stage, result, tags=not fetch)
             and (not fetch or self._execute_adaptive_refresh(stage, result, bare=True))
         ):
             return _Staged.FAILED
@@ -233,6 +234,8 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             result.error_message = (
                 f"Filtering what arrived failed, so the working copy was "
                 f"left as it was: {reason}"
+                if fetch
+                else f"Filtering the working copy failed: {reason}"
             )
             return _Staged.FAILED
         # The worktree fallback's removal commit sits on upstream's tip, not
@@ -294,14 +297,21 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
             result.error_message = (
                 f"Could not publish the refreshed refs, so the working copy "
                 f"was left as it was: {exc}"
+                if follow
+                else f"Could not publish the filtered refs: {exc}"
             )
             return _Staged.FAILED
 
     def _as_upstream_copy(
-        self, repo_path: Path, stage: Path, result: RefreshResult
+        self, repo_path: Path, stage: Path, result: RefreshResult, *, tags: bool
     ) -> bool:
-        """Make *stage* stand in for upstream (see :func:`as_upstream_copy`)."""
+        """Make *stage* stand in for upstream (see :func:`as_upstream_copy`).
+
+        With *tags*, it then takes *repo_path*'s (see :func:`copy_tags`).
+        """
         failure = as_upstream_copy(repo_path, stage, self.timeout)
+        if failure is None and tags:
+            failure = copy_tags(repo_path, stage, self.timeout)
         if failure is not None:
             result.error_message = failure
         return failure is None

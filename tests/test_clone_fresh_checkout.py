@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -23,15 +24,21 @@ from typer.testing import CliRunner
 
 from gerrit_clone import refresh_checkout_stage
 from gerrit_clone.cli import app
+from gerrit_clone.cli_clone_run import _delete_working_copy
 from gerrit_clone.content_origin import NO_PUSH_URL
 from gerrit_clone.content_policy import stored_policy
+from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.content_stage import SHALLOW_HISTORY_REFUSED
 from gerrit_clone.models import (
     CloneResult,
     CloneStatus,
     Project,
     ProjectState,
+    RefreshResult,
+    RefreshStatus,
 )
+from gerrit_clone.refresh_checkout_fresh import NO_UPSTREAM_REFUSAL
+from gerrit_clone.refresh_worker import RefreshWorker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -176,7 +183,6 @@ def _failing(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
 
 @needs_filter_repo
 class TestRemovedFiles:
-    @pytest.mark.xfail(strict=True, reason="filtered in place before the fix")
     def test_it_keeps_tracking_its_upstream(self, upstream: Path, tree: Path) -> None:
         result = _clone(upstream, tree, "--remove-files", "secret.txt")
 
@@ -210,7 +216,6 @@ class TestRemovedFiles:
             assert shown.returncode != 0
         assert _stages_left(checkout) == []
 
-    @pytest.mark.xfail(strict=True, reason="filtered in place before the fix")
     def test_a_later_refresh_follows_it(self, upstream: Path, tree: Path) -> None:
         assert _clone(upstream, tree, "--remove-files", "secret.txt").exit_code == 0
         checkout = tree / "proj"
@@ -232,7 +237,6 @@ class TestReplacedTokens:
         [("--git-filter", f"proj:{TOKEN}"), ("--redact-secrets",)],
         ids=["git-filter", "redact-secrets"],
     )
-    @pytest.mark.xfail(strict=True, reason="filtered in place before the fix")
     def test_no_object_holds_the_token(
         self, upstream: Path, tree: Path, options: tuple[str, ...]
     ) -> None:
@@ -249,7 +253,6 @@ class TestReplacedTokens:
 
 @needs_filter_repo
 class TestMatchingNothing:
-    @pytest.mark.xfail(strict=True, reason="filtered in place before the fix")
     def test_nothing_is_recorded_or_rewritten(
         self, upstream: Path, tree: Path, tmp_path: Path
     ) -> None:
@@ -279,7 +282,6 @@ class TestMatchingNothing:
 
 
 class TestFailureDeletes:
-    @pytest.mark.xfail(strict=True, reason="left the unfiltered checkout")
     def test_a_shallow_checkout_refused_history_filters(
         self, upstream: Path, tree: Path
     ) -> None:
@@ -291,7 +293,6 @@ class TestFailureDeletes:
         assert "working copy was deleted" in output
         assert not (tree / "proj").exists()
 
-    @pytest.mark.xfail(strict=True, reason="left the unfiltered checkout")
     def test_a_filter_that_fails(self, upstream: Path, tree: Path) -> None:
         with patch.object(refresh_checkout_stage, "apply_content_filters", _failing):
             result = _clone(upstream, tree, "--remove-files", "secret.txt")
@@ -302,7 +303,6 @@ class TestFailureDeletes:
         assert "working copy was deleted" in output
         assert not (tree / "proj").exists()
 
-    @pytest.mark.xfail(strict=True, reason="left the unfiltered checkout")
     @needs_filter_repo
     def test_a_copy_that_cannot_be_removed(self, upstream: Path, tree: Path) -> None:
         """It may hold unfiltered history: the project fails, naming it."""
@@ -318,7 +318,6 @@ class TestFailureDeletes:
         assert "working copy was deleted" in output
         assert not (tree / "proj").exists()
 
-    @pytest.mark.xfail(strict=True, reason="left the unfiltered checkout")
     def test_an_interrupted_filter(self, upstream: Path, tree: Path) -> None:
         with patch.object(
             refresh_checkout_stage,
@@ -329,6 +328,44 @@ class TestFailureDeletes:
 
         assert result.exit_code != 0
         assert not (tree / "proj").exists()
+
+    @needs_filter_repo
+    def test_a_branch_tracking_nothing(self, upstream: Path, tmp_path: Path) -> None:
+        """It could not be reset to the filtered history."""
+        checkout = tmp_path / "tree" / "proj"
+        _git("clone", "-q", upstream.as_uri(), str(checkout))
+        _git("branch", "--unset-upstream", cwd=checkout)
+        worker = RefreshWorker(
+            timeout=60,
+            filter_gerrit_only=False,
+            content_filters=ContentFilterSpec(
+                ["secret.txt"], None, False, checkout.parent
+            ),
+        )
+        result = RefreshResult(
+            path=checkout,
+            project_name="proj",
+            status=RefreshStatus.REFRESHING,
+            started_at=datetime.now(UTC),
+        )
+
+        assert not worker._filter_fresh_checkout(checkout, result)
+        assert result.error_message == NO_UPSTREAM_REFUSAL
+        assert _stages_left(checkout) == []
+
+    def test_repositories_nested_in_it_are_kept(self, tmp_path: Path) -> None:
+        parent = tmp_path / "parent"
+        (parent / ".git").mkdir(parents=True)
+        (parent / "file.txt").write_text("unfiltered\n")
+        (parent / "sub" / "child" / ".git").mkdir(parents=True)
+        (parent / "sub" / "other.txt").write_text("unfiltered\n")
+
+        assert _delete_working_copy(parent) is None
+        assert sorted(str(path.relative_to(parent)) for path in parent.rglob("*")) == [
+            "sub",
+            "sub/child",
+            "sub/child/.git",
+        ]
 
 
 @needs_filter_repo

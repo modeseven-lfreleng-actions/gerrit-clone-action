@@ -144,6 +144,35 @@ def as_upstream_copy(repo_path: Path, stage: Path, timeout: int) -> str | None:
     return None
 
 
+def copy_tags(repo_path: Path, stage: Path, timeout: int) -> str | None:
+    """Give *stage* every tag working copy *repo_path* holds, as they stand.
+
+    For a checkout just cloned, whose tags are all upstream's: without
+    them the copy's filters would leave the checkout's tags unfiltered.
+
+    Returns:
+        Why they could not be copied, or ``None``.
+    """
+    copied = run_git(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            str(repo_path),
+            "+refs/tags/*:refs/tags/*",
+        ],
+        stage,
+        timeout=timeout,
+    )
+    if copied.returncode != 0:
+        return (
+            f"Could not copy the working copy's tags to the staged copy: "
+            f"{copied.stderr.strip()}"
+        )
+    return None
+
+
 def configured_upstream(repo_path: Path) -> str:
     """The current branch's upstream ref, from config, even if it is gone."""
     branch = run_git(["git", "symbolic-ref", "-q", "HEAD"], repo_path, timeout=10)
