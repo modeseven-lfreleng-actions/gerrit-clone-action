@@ -280,7 +280,10 @@ QUIET = typer.Option(
 CLEANUP = typer.Option(
     False,
     "--cleanup/--no-cleanup",
-    help="Remove cloned repositories (output-path) after run completes (success or failure)",
+    help=(
+        "Remove cloned repositories (output-path) after run completes "
+        "(success or failure), keeping the run's log file"
+    ),
     envvar="GERRIT_CLEANUP",
 )
 NO_REFRESH = typer.Option(

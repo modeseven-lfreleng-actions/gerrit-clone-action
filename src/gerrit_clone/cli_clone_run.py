@@ -10,11 +10,14 @@ optional cleanup) and owns the interrupt/crash handlers used by the command.
 from __future__ import annotations
 
 import traceback
+from contextlib import suppress
+from pathlib import Path
 from shutil import rmtree
 from typing import TYPE_CHECKING, NoReturn
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -191,7 +194,11 @@ def _determine_exit_code(session: CliSession, batch_result: BatchResult) -> int:
 
 
 def _cleanup_clone_directory(session: CliSession, config: Config) -> None:
-    """Remove the cloned directory once the run has finished."""
+    """Remove the cloned directory once the run has finished.
+
+    The run's log file is spared when it lies inside the directory, so
+    the closing error summary can still be written to it.
+    """
     file_logger = session.file_logger
     try:
         if file_logger:
@@ -202,14 +209,63 @@ def _cleanup_clone_directory(session: CliSession, config: Config) -> None:
         session.console.print(
             f"[yellow]🧹 Cleanup enabled - removing cloned directory: {config.path}[/yellow]"
         )
-        rmtree(config.path, ignore_errors=True)
+        kept = _log_file_within(session.log_file_path, Path(config.path))
+        if kept is None:
+            rmtree(config.path, ignore_errors=True)
+        else:
+            _remove_all_except(Path(config.path).resolve(), kept)
         if file_logger:
             file_logger.debug("Cleanup completed successfully")
-        session.console.print("[green]Cleanup complete.[/green]")
+        if kept is None:
+            session.console.print("[green]Cleanup complete.[/green]")
+        else:
+            session.console.print(
+                "[green]Cleanup complete (kept log file "
+                f"{escape(str(session.log_file_path))}).[/green]"
+            )
     except Exception as e:
         if file_logger:
             file_logger.debug("Cleanup failed: %s", str(e))
         session.console.print(f"[red]Cleanup failed:[/red] {e}")
+
+
+def _log_file_within(log_file: Path | None, directory: Path) -> Path | None:
+    """Return the log file's path relative to ``directory``, if inside it.
+
+    Both paths are resolved first, so a relative or linked spelling of
+    either is compared by the file it names.
+    """
+    if log_file is None:
+        return None
+    resolved_log = log_file.resolve()
+    resolved_dir = directory.resolve()
+    if resolved_log == resolved_dir or not resolved_log.is_relative_to(resolved_dir):
+        return None
+    return resolved_log.relative_to(resolved_dir)
+
+
+def _remove_all_except(directory: Path, kept: Path) -> None:
+    """Remove every entry under ``directory`` except the ``kept`` path.
+
+    ``kept`` is relative to ``directory``; the directories leading down
+    to it stay. Symbolic links are removed, never followed, and a failure
+    to remove one entry does not stop the rest.
+    """
+    first, *rest = kept.parts
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name == first:
+            if rest and entry.is_dir() and not entry.is_symlink():
+                _remove_all_except(entry, Path(*rest))
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            rmtree(entry, ignore_errors=True)
+        else:
+            with suppress(OSError):
+                entry.unlink()
 
 
 def handle_interrupt(session: CliSession) -> NoReturn:
