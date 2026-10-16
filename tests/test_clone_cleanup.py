@@ -12,7 +12,9 @@ it, and the closing error summary is still to be written there.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +26,6 @@ from gerrit_clone.error_codes import DiscoveryError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
     from gerrit_clone.models import Config
 
@@ -81,10 +82,15 @@ def _fail_discovery(_config: Config) -> MagicMock:
 
 
 def _clone(
-    *args: str, stub: Callable[[Config], MagicMock] = _succeed
+    *args: str,
+    stub: Callable[[Config], MagicMock] = _succeed,
+    cleanup: bool = True,
 ) -> tuple[int, str]:
-    """Run ``clone --cleanup`` with cloning stubbed; return code and output."""
-    argv = ["clone", "--host", HOST, "--cleanup", *args]
+    """Run ``clone`` with cloning stubbed; return code and output.
+
+    ``--cleanup`` is passed unless ``cleanup`` is False.
+    """
+    argv = ["clone", "--host", HOST, *(["--cleanup"] if cleanup else []), *args]
     with patch("gerrit_clone.cli.clone_repositories", side_effect=stub):
         result = CliRunner().invoke(app, argv)
     return result.exit_code, result.output
@@ -112,6 +118,16 @@ def _assert_log_kept(log_file: Path, output_text: str) -> None:
     log_text = log_file.read_text(encoding="utf-8")
     assert SUMMARY_HEADING in log_text
     assert WARNING_TEXT in log_text
+
+
+def _panel_log_path(output_text: str) -> Path:
+    """Return the path on the results panel's ``Log File:`` line.
+
+    Callers set ``COLUMNS`` wide enough that Rich does not wrap it.
+    """
+    match = re.search(r"Log File:\s*(\S+)", output_text)
+    assert match is not None, output_text
+    return Path(match.group(1))
 
 
 class TestReproductionTable:
@@ -278,3 +294,81 @@ class TestFailedRuns:
         log_text = (output / LOG_NAME).read_text(encoding="utf-8")
         assert SUMMARY_HEADING in log_text
         assert "discovery failed" in log_text
+
+
+class TestNonCanonicalLogPath:
+    """The session records the log file's canonical path.
+
+    Cleanup, the results panel and the closing summary then all name the
+    same file, however ``--output-path`` or ``--log-file`` is spelled.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _wide_console(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the ``Log File:`` line on one line of the panel."""
+        monkeypatch.setenv("COLUMNS", "1000")
+
+    def test_cleanup_output_path_through_removed_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup removing ``child/`` leaves the printed path valid."""
+        output = tmp_path / "out"
+        (output / "child").mkdir(parents=True)
+
+        exit_code, output_text = _clone("--output-path", str(output / "child" / ".."))
+
+        assert exit_code == 0
+        _assert_log_kept(output / LOG_NAME, output_text)
+        assert not (output / "child").exists()
+        assert _panel_log_path(output_text).is_file()
+
+    def test_cleanup_log_file_through_symlink(self, tmp_path: Path) -> None:
+        """A ``--log-file`` reached through a link is kept and printed."""
+        output = tmp_path / "out"
+        actual = output / "actual"
+        actual.mkdir(parents=True)
+        (output / "logs").symlink_to(actual, target_is_directory=True)
+
+        exit_code, output_text = _clone(
+            "--output-path",
+            str(output),
+            "--log-file",
+            str(output / "logs" / "run.log"),
+        )
+
+        assert exit_code == 0
+        _assert_log_kept(actual / "run.log", output_text)
+        assert not (output / "logs").is_symlink()
+        assert _panel_log_path(output_text).is_file()
+
+    def test_no_cleanup_shows_canonical_path(self, tmp_path: Path) -> None:
+        """Without cleanup the file lands as before; the panel names it."""
+        output = tmp_path / "out"
+        (output / "child").mkdir(parents=True)
+        log_file = output / LOG_NAME
+
+        exit_code, output_text = _clone(
+            "--output-path", str(output / "child" / ".."), cleanup=False
+        )
+
+        assert exit_code == 0
+        _assert_log_kept(log_file, output_text)
+        assert (output / "child").is_dir()
+        assert _panel_log_path(output_text) == log_file.resolve()
+
+    def test_disabled_log_file_prints_no_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With file logging off there is no log file and no path line."""
+        monkeypatch.chdir(tmp_path)
+        output = tmp_path / "out"
+        (output / "child").mkdir(parents=True)
+
+        exit_code, output_text = _clone(
+            "--output-path", str(output / "child" / ".."), "--disable-log-file"
+        )
+
+        assert exit_code == 0
+        assert SUMMARY_FAILURE not in output_text
+        assert "Log File:" not in output_text
+        assert list(tmp_path.rglob("*.log")) == []
