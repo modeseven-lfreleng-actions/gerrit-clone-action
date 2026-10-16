@@ -57,7 +57,7 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
         skip_conflicts: bool = True,
         auto_stash: bool = False,
         strategy: str = "merge",
-        filter_gerrit_only: bool = True,
+        filter_gerrit_only: bool = False,
         threads: int | None = None,
         exit_on_error: bool = False,
         dry_run: bool = False,
@@ -79,7 +79,8 @@ class RefreshManager(RepositoryDiscoveryMixin, ParallelRefreshMixin):
             skip_conflicts: Skip repositories with uncommitted changes
             auto_stash: Automatically stash uncommitted changes
             strategy: Git pull strategy ('merge' or 'rebase')
-            filter_gerrit_only: Only refresh repositories with Gerrit remotes
+            filter_gerrit_only: Only refresh repositories that came from
+                Gerrit, by their clone manifest or else their remotes' hosts
             threads: Number of concurrent threads (None = auto-detect)
             exit_on_error: Exit immediately on first error
             dry_run: Show what would be refreshed without executing
@@ -312,7 +313,7 @@ def refresh_repositories(
     skip_conflicts: bool = True,
     auto_stash: bool = False,
     strategy: str = "merge",
-    filter_gerrit_only: bool = True,
+    filter_gerrit_only: bool = False,
     threads: int | None = None,
     include_projects: list[str] | None = None,
     exclude_projects: list[str] | None = None,
@@ -336,7 +337,8 @@ def refresh_repositories(
         skip_conflicts: Skip repositories with uncommitted changes
         auto_stash: Automatically stash uncommitted changes
         strategy: Git pull strategy ('merge' or 'rebase')
-        filter_gerrit_only: Only refresh repositories with Gerrit remotes
+        filter_gerrit_only: Only refresh repositories that came from
+            Gerrit, by their clone manifest or else their remotes' hosts
         threads: Number of concurrent threads (None = auto-detect)
         include_projects: Optional list of project name patterns to include
         exclude_projects: Optional list of project name patterns to exclude

@@ -93,10 +93,17 @@ class TestRefreshManifests:
     def test_a_refusal_quotes_the_remote_without_its_credential(
         self, tree: Path
     ) -> None:
-        """Gerrit-only by default: example.org is refused, and quoted."""
+        """Under --gerrit-only, example.org is refused, and quoted."""
         CliRunner().invoke(
             app,
-            ["refresh", "--output-path", str(tree), "--manifest-filename", "m.json"],
+            [
+                "refresh",
+                "--output-path",
+                str(tree),
+                "--gerrit-only",
+                "--manifest-filename",
+                "m.json",
+            ],
         )
 
         text = (tree / "m.json").read_text()

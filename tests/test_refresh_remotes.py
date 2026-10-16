@@ -6,7 +6,7 @@
 The refresh fetch is ``--all``, so a mirror cloned with ``git clone
 --mirror --origin upstream`` from Gerrit is refreshed from Gerrit even
 though it has no ``origin``.  Reading ``remote.origin.url`` alone
-rejected it as "not a Gerrit repository" under the default
+rejected it as "not a Gerrit repository" under
 ``filter_gerrit_only``.
 """
 

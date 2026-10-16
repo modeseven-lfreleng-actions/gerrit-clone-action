@@ -714,13 +714,11 @@ class TestStagedRefreshRefusals:
 class TestReporting:
     """What the ``refresh`` command says must match what it did."""
 
-    def test_the_default_gerrit_only_refresh_reads_every_remote(
-        self, tree: Path
-    ) -> None:
+    def test_the_gerrit_only_refresh_reads_every_remote(self, tree: Path) -> None:
         """A Gerrit mirror cloned with ``--origin upstream`` is still Gerrit.
 
-        Run as a dry run, through the command's defaults, so that no real
-        Gerrit server is needed.
+        Run as a dry run, through the command, so that no real Gerrit
+        server is needed.
         """
         mirror = tree / "com/parent"
         _git("remote", "rename", "origin", "upstream", cwd=mirror)
@@ -729,7 +727,7 @@ class TestReporting:
 
         outcome = CliRunner().invoke(
             app,
-            ["refresh", "--output-path", str(tree), "--dry-run"],
+            ["refresh", "--output-path", str(tree), "--gerrit-only", "--dry-run"],
         )
 
         assert outcome.exit_code == 0, outcome.output

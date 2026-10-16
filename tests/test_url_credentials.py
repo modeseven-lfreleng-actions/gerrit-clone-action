@@ -10,9 +10,11 @@ import pytest
 from gerrit_clone.url_credentials import (
     REDACTED,
     UNRECOGNISED_URL,
+    RemoteLocation,
     helper_address,
     redact_text,
     redact_url,
+    remote_location,
 )
 
 #: Built at runtime so that no credential-shaped literal sits in the
@@ -35,6 +37,53 @@ class TestHelperAddress:
     )
     def test_it_finds_what_the_helper_receives(self, url: str, address: str) -> None:
         assert helper_address(url) == address
+
+
+class TestRemoteLocation:
+    @pytest.mark.parametrize(
+        ("url", "location"),
+        [
+            (
+                f"https://user:{TOKEN}@Gerrit.Example.org./r/proj?x=1#f",
+                RemoteLocation("https", "gerrit.example.org", None, "/r/proj"),
+            ),
+            (
+                "ssh://git@[2001:db8::1]:29418/proj",
+                RemoteLocation("ssh", "2001:db8::1", 29418, "/proj"),
+            ),
+            (
+                f"{TOKEN}@github.com:org/proj.git",
+                RemoteLocation("ssh", "github.com", None, "org/proj.git"),
+            ),
+            (
+                "review.example.org:proj",
+                RemoteLocation("ssh", "review.example.org", None, "proj"),
+            ),
+            ("helper::ssh://h:2222/r", RemoteLocation("ssh", "h", 2222, "/r")),
+            (
+                "file:///srv/git/r.git",
+                RemoteLocation("file", "", None, "/srv/git/r.git"),
+            ),
+            ("/srv/git/r.git", None),
+            ("./r:x", None),
+            ("https://host:port/r", None),
+        ],
+        ids=[
+            "https",
+            "ipv6-port",
+            "scp-like",
+            "scp-like-no-user",
+            "helper",
+            "file",
+            "path",
+            "relative-path",
+            "bad-port",
+        ],
+    )
+    def test_it_splits_a_remote_url(
+        self, url: str, location: RemoteLocation | None
+    ) -> None:
+        assert remote_location(url) == location
 
 
 class TestRedactUrl:

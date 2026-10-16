@@ -37,7 +37,10 @@ from gerrit_clone.refresh_filtered import (
     FILTERED_REFRESH_REFUSAL,
     FILTERED_WORKING_COPY_REFUSAL,
 )
-from gerrit_clone.refresh_git_env import SSH_HANDSHAKE_JITTER_SECONDS
+from gerrit_clone.refresh_git_env import (
+    SSH_HANDSHAKE_JITTER_SECONDS,
+    CloneManifestSources,
+)
 from gerrit_clone.refresh_output import (
     RefreshAuthError,
     RefreshError,
@@ -95,7 +98,7 @@ class RefreshWorker(StagedCheckoutMixin):
         skip_conflicts: bool = True,
         auto_stash: bool = False,
         strategy: str = "merge",
-        filter_gerrit_only: bool = True,
+        filter_gerrit_only: bool = False,
         force: bool = False,
         force_hard: bool = False,
         ssh_jitter_seconds: float = SSH_HANDSHAKE_JITTER_SECONDS,
@@ -112,7 +115,8 @@ class RefreshWorker(StagedCheckoutMixin):
             skip_conflicts: Skip repositories with uncommitted changes
             auto_stash: Automatically stash uncommitted changes
             strategy: Git pull strategy ('merge' or 'rebase')
-            filter_gerrit_only: Only refresh repositories with Gerrit remotes
+            filter_gerrit_only: Only refresh repositories that came from
+                Gerrit, by their clone manifest or else their remotes' hosts
             force: Force refresh by fixing detached HEAD, upstream tracking, and stashing changes
             force_hard: Superset of ``force`` that additionally hard-resets the
                 default branch to its upstream ref, discarding local commits and
@@ -133,6 +137,8 @@ class RefreshWorker(StagedCheckoutMixin):
         self.auto_stash = auto_stash
         self.strategy = strategy
         self.filter_gerrit_only = filter_gerrit_only
+        # Shared by every repository this worker refreshes, from any thread.
+        self.clone_manifests = CloneManifestSources()
         # force_hard is a strict superset of force.
         self.force_hard = force_hard
         self.force = force or force_hard
