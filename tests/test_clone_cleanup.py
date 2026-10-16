@@ -308,9 +308,6 @@ class TestNonCanonicalLogPath:
         """Keep the ``Log File:`` line on one line of the panel."""
         monkeypatch.setenv("COLUMNS", "1000")
 
-    @pytest.mark.xfail(
-        strict=True, reason="the session keeps the spelled log path (#349)"
-    )
     def test_cleanup_output_path_through_removed_directory(
         self, tmp_path: Path
     ) -> None:
@@ -344,9 +341,6 @@ class TestNonCanonicalLogPath:
         assert not (output / "logs").is_symlink()
         assert _panel_log_path(output_text).is_file()
 
-    @pytest.mark.xfail(
-        strict=True, reason="the session keeps the spelled log path (#349)"
-    )
     def test_no_cleanup_shows_canonical_path(self, tmp_path: Path) -> None:
         """Without cleanup the file lands as before; the panel names it."""
         output = tmp_path / "out"

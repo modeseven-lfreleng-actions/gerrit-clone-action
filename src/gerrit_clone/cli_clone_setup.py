@@ -162,8 +162,10 @@ def start_logging(
 
     Returns:
         Tuple of (file logger, error collector, log file path). The
-        path is None when no log file is being written: file logging
-        was disabled, or the log file could not be created.
+        path is resolved, so every consumer names the same file however
+        the options spelled it. It is None when no log file is being
+        written: file logging was disabled, or the log file could not
+        be created.
     """
     log_dir = request.output_path if request.output_path is not None else Path()
     file_logger, error_collector = init_logging(
@@ -186,7 +188,7 @@ def start_logging(
         if request.log_file
         else get_default_log_path(request.host, log_dir)
     )
-    return file_logger, error_collector, log_file_path
+    return file_logger, error_collector, log_file_path.resolve()
 
 
 def apply_http_credentials(
