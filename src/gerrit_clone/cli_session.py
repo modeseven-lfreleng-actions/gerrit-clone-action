@@ -41,11 +41,13 @@ class CliSession:
         write reaches the file, so issues collected after it are not
         summarised.  A call that writes nothing, because there is no
         collector, no log file or nothing collected yet, does not count,
-        so a later call still writes the summary.
+        so a later call still writes the summary.  The session is marked
+        before the write starts, so a write that an interrupt cuts short
+        still counts and no later call appends a second summary.
         """
         if self._summary_written:
             return
         collector = self.error_collector
         if collector and self.log_file_path and collector.get_total_count():
-            collector.write_summary_to_file(self.log_file_path)
             self._summary_written = True
+            collector.write_summary_to_file(self.log_file_path)

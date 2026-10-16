@@ -332,7 +332,6 @@ class TestWriteSummary:
 class TestInterruptedWrite:
     """An interrupt during the summary write leaves one summary heading."""
 
-    @pytest.mark.xfail(strict=True, reason="summary marked written after the write")
     def test_clone_interrupted_during_write(self, tmp_path: Path) -> None:
         """``clone`` exits 130 with one heading when the write is interrupted."""
         get_summary = ErrorCollector.get_summary
@@ -356,7 +355,6 @@ class TestInterruptedWrite:
         assert exit_code == 130
         assert _summaries(tmp_path / f"{HOST}.log") == 1
 
-    @pytest.mark.xfail(strict=True, reason="summary marked written after the write")
     def test_interrupt_propagates_and_blocks_rewrite(self, tmp_path: Path) -> None:
         """The interrupt propagates and a later call does not write again."""
         collector = _collector("warned")
