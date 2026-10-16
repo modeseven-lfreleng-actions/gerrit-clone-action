@@ -34,10 +34,6 @@ SUMMARY_FAILURE = "Failed to write error summary"
 SUMMARY_HEADING = "ERROR AND WARNING SUMMARY"
 WARNING_TEXT = "stubbed clone warning"
 
-NOT_KEPT_ON_MAIN = pytest.mark.xfail(
-    strict=True, reason="cleanup deletes the run's log file (issue #345)"
-)
-
 
 @pytest.fixture(autouse=True)
 def _close_file_handlers() -> Iterator[None]:
@@ -121,7 +117,6 @@ def _assert_log_kept(log_file: Path, output_text: str) -> None:
 class TestReproductionTable:
     """Each invocation from the issue keeps its log file."""
 
-    @NOT_KEPT_ON_MAIN
     def test_explicit_output_path(self, tmp_path: Path) -> None:
         """The default log file inside the output path survives cleanup."""
         output = tmp_path / "out"
@@ -180,7 +175,6 @@ class TestReproductionTable:
 class TestCleanupWithinOutputPath:
     """Cleanup removes everything under the output path but the log."""
 
-    @NOT_KEPT_ON_MAIN
     def test_removes_clones_but_not_log(self, tmp_path: Path) -> None:
         """Every clone directory and file goes; the log file stays."""
         output = tmp_path / "out"
@@ -194,7 +188,6 @@ class TestCleanupWithinOutputPath:
             assert not path.exists(), path
         assert sorted(p.name for p in output.iterdir()) == [LOG_NAME]
 
-    @NOT_KEPT_ON_MAIN
     def test_log_file_in_subdirectory(self, tmp_path: Path) -> None:
         """A nested log file and its parent directories survive."""
         output = tmp_path / "out"
@@ -259,7 +252,6 @@ class TestCleanupWithinOutputPath:
 class TestFailedRuns:
     """A failed run keeps its log file too."""
 
-    @NOT_KEPT_ON_MAIN
     def test_failed_clone(self, tmp_path: Path) -> None:
         """A run with failed clones still cleans up and keeps the log."""
         output = tmp_path / "out"

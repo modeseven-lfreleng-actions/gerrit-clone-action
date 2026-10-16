@@ -673,7 +673,8 @@ Options:
                                   [default: clone-manifest.json]
   -c, --config-file PATH          Configuration file path (YAML or JSON)
   --cleanup / --no-cleanup        Remove cloned repositories (path) after
-                                  run completes (success or failure)
+                                  run completes (success or failure),
+                                  keeping the run's log file
   --exit-on-error                 Exit when first error occurs
   --log-file PATH                 Custom log file path
   --disable-log-file              Disable creation of log file
