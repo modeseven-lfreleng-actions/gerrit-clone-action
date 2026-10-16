@@ -47,10 +47,10 @@ def refresh(
     git_filter: str | None = opts.GIT_FILTER,
     redact_secrets: bool = opts.REDACT_SECRETS,
 ) -> None:
-    """Refresh local content cloned from a Gerrit server.
+    """Refresh the repositories under a path.
 
-    Scans the specified directory for Git repositories and updates them by pulling
-    latest changes from their Gerrit remotes. Supports parallel updates, automatic
+    Scans the specified directory for Git repositories and updates each one from
+    its remotes, wherever it was cloned from. Supports parallel updates, automatic
     stash handling, and various safety features.
 
     Examples:
@@ -82,6 +82,9 @@ def refresh(
 
         # Dry run (show what would be updated)
         gerrit-clone refresh --output-path ~/repos --dry-run
+
+        # Refresh only repositories cloned from Gerrit
+        gerrit-clone refresh --output-path ~/repos --gerrit-only
     """
     # Configure graceful interrupt handling for multi-threaded operations
     handle_sigint_gracefully()

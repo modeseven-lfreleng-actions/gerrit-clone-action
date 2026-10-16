@@ -16,12 +16,16 @@ Keeping a credential out of everything the tool writes -- log lines,
 error messages, manifests, the filter journal -- is :func:`redact_url`
 for a URL and :func:`redact_text` for text that may quote one, such as
 git's own output.  Nothing else strips credentials by hand.
+
+The same grammar also tells where a remote points, without its
+credential: :func:`remote_location` gives a URL's scheme, host, port
+and path.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -51,6 +55,17 @@ _HIERARCHICAL = re.compile(
 #: IPv6 address, and the user anything up to the ``@``, a token included.
 _SCP_LIKE = re.compile(r"^[^/@]+@(?P<rest>(?:\[[^\]/]+\]|[^/:\[\]]+):.*)$", re.DOTALL)
 
+#: The ``host:path`` of a scp-like URL, its user removed or absent.
+_SCP_LOCATION = re.compile(
+    r"^(?P<host>\[[^\]/]+\]|[^/:@\[\]]+):(?P<path>.*)$", re.DOTALL
+)
+
+#: An authority with its userinfo removed: a name or a bracketed IPv6
+#: address, then an optional port.
+_HOST_PORT = re.compile(
+    r"^(?:\[(?P<ipv6>[^\]]*)\]|(?P<name>[^:\[\]]*))(?::(?P<port>\d*))?$"
+)
+
 #: Userinfo in a URL quoted inside other text.
 _QUOTED_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/\s@'\"<>]*@")
 
@@ -64,6 +79,54 @@ def helper_address(url: str) -> str:
     while helper := _REMOTE_HELPER.match(url):
         url = helper.group("address")
     return url
+
+
+class RemoteLocation(NamedTuple):
+    """Where a git remote URL points, without any credential.
+
+    Attributes:
+        scheme: The URL scheme, in lower case; ``ssh`` for scp-like.
+        host: The host, in lower case, without brackets or a final dot.
+        port: The port, when the URL names one.
+        path: The path, as written.
+    """
+
+    scheme: str
+    host: str
+    port: int | None
+    path: str
+
+
+def remote_location(url: str) -> RemoteLocation | None:
+    """Where *url* points, or None for a local path or an unknown shape.
+
+    A remote helper's address is read in its place.  Both the
+    hierarchical form and git's scp-like ``[user@]host:path`` are
+    recognised; a query or a fragment is never part of the path.
+    """
+    url = helper_address(url)
+    hierarchical = _HIERARCHICAL.match(url)
+    if hierarchical:
+        scheme = (hierarchical.group("scheme") or "").rstrip(":").lower()
+        authority = hierarchical.group("authority").rpartition("@")[2]
+        path = hierarchical.group("path")
+    else:
+        scp_like = _SCP_LIKE.match(url)
+        location = _SCP_LOCATION.match(scp_like.group("rest") if scp_like else url)
+        if not location:
+            return None
+        scheme, authority, path = "ssh", location.group("host"), location.group("path")
+    host_port = _HOST_PORT.match(authority)
+    if not host_port:
+        return None
+    host = host_port.group("ipv6") or host_port.group("name") or ""
+    port = host_port.group("port")
+    return RemoteLocation(
+        scheme=scheme,
+        host=host.lower().rstrip("."),
+        port=int(port) if port else None,
+        path=path,
+    )
 
 
 def redact_url(url: str) -> str:

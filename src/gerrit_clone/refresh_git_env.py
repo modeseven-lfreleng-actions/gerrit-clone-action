@@ -4,9 +4,10 @@
 """Git execution environment and remote handling for refresh operations.
 
 Bottom layer of the :class:`~gerrit_clone.refresh_worker.RefreshWorker` mixin
-stack. It answers three related questions about *how* we talk to a remote:
-which URL is configured, whether that URL implies an SSH handshake (and so
-needs pacing), and what environment git subprocesses should run with.
+stack. It answers related questions about *how* we talk to a remote:
+which URL is configured, whether the repository came from Gerrit, whether
+that URL implies an SSH handshake (and so needs pacing), and what
+environment git subprocesses should run with.
 
 Every higher layer that performs a network operation depends on the handshake
 jitter provided here, and launches its git commands through :func:`run_git`.
@@ -14,18 +15,21 @@ jitter provided here, and launches its git commands through :func:`run_git`.
 
 from __future__ import annotations
 
+import json
 import os
 import random
-import re
+import threading
 import time
 from typing import TYPE_CHECKING
 
 from gerrit_clone.logging import get_logger
+from gerrit_clone.model_enums import SourceType
 from gerrit_clone.subprocess_tracking import (
     ProcessAbandonedError,
     batch_abandoned,
     run_tracked,
 )
+from gerrit_clone.url_credentials import remote_location
 
 if TYPE_CHECKING:
     import subprocess
@@ -42,6 +46,142 @@ logger = get_logger(__name__)
 # is a common cause of transient "Could not read from remote repository"
 # throttling failures.
 SSH_HANDSHAKE_JITTER_SECONDS = 0.25
+
+#: The manifest ``clone`` writes at the root of a tree by default.  A
+#: tree cloned with another ``--manifest-filename`` has none ``refresh``
+#: can find, and is classified by its remotes' hosts alone.
+CLONE_MANIFEST_FILENAME = "clone-manifest.json"
+
+#: Hosts that never serve Gerrit; any ``*.github.com`` host too.
+_NON_GERRIT_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
+
+#: Gerrit's default SSH port.
+GERRIT_SSH_PORT = 29418
+
+_SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
+_HTTP_SCHEMES = frozenset({"http", "https"})
+
+#: A host label that is one of these, or starts with one and a dash,
+#: names a Gerrit host: ``gerrit.onap.org``, ``review.opendev.org``.
+_GERRIT_HOST_LABELS = ("gerrit", "review")
+
+#: The first path segment under which Gerrit serves HTTP(S) clones.
+_GERRIT_PATH_PREFIXES = frozenset({"r", "gerrit"})
+
+
+def is_gerrit_url(remote_url: str | None) -> bool:
+    """Whether *remote_url*'s host, port or path prefix marks it as Gerrit.
+
+    Only the host, the SSH port and an HTTP(S) URL's first path segment
+    count; a repository's name, or anything later in its path, never
+    does.  GitHub, GitLab and Bitbucket hosts are never Gerrit.
+
+    Args:
+        remote_url: Remote URL to check
+
+    Returns:
+        True if the URL points at a Gerrit server
+    """
+    location = remote_location(remote_url) if remote_url else None
+    if location is None or not location.host:
+        return False
+    host = location.host
+    if host in _NON_GERRIT_HOSTS or host.endswith(".github.com"):
+        return False
+    if location.scheme in _SSH_SCHEMES and location.port == GERRIT_SSH_PORT:
+        return True
+    if any(
+        label in _GERRIT_HOST_LABELS
+        or label.startswith(tuple(f"{name}-" for name in _GERRIT_HOST_LABELS))
+        for label in host.split(".")
+    ):
+        return True
+    if location.scheme in _HTTP_SCHEMES:
+        segments = [segment for segment in location.path.split("/") if segment]
+        return bool(segments) and segments[0] in _GERRIT_PATH_PREFIXES
+    return False
+
+
+def _read_clone_manifest(path: Path) -> SourceType | None:
+    """The source type the clone manifest at *path* records.
+
+    Args:
+        path: The manifest file
+
+    Returns:
+        The recorded source type, or None if the manifest cannot be read
+        or parsed, or records none this tool recognises.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.debug(f"Ignoring unreadable clone manifest {path}: {e}")
+        return None
+    source = data.get("source_type") if isinstance(data, dict) else None
+    if isinstance(source, str) and source in {member.value for member in SourceType}:
+        return SourceType(source)
+    logger.debug(f"Ignoring clone manifest {path}: no recognised source_type")
+    return None
+
+
+def _find_clone_manifest(directory: Path) -> tuple[bool, SourceType | None]:
+    """Whether *directory* holds a clone manifest, and what it records.
+
+    Args:
+        directory: Directory to look in
+
+    Returns:
+        ``(True, source type or None)`` for a manifest, readable or not;
+        ``(False, None)`` when there is none.
+    """
+    manifest = directory / CLONE_MANIFEST_FILENAME
+    try:
+        present = manifest.exists()
+    except OSError as e:
+        logger.debug(f"Ignoring clone manifest {manifest} that cannot be read: {e}")
+        return True, None
+    return (True, _read_clone_manifest(manifest)) if present else (False, None)
+
+
+class CloneManifestSources:
+    """What the clone manifests above repositories record, read once each.
+
+    One instance serves a whole run, from every worker thread, so a tree
+    of thousands of repositories reads each manifest, and looks for one
+    in each directory, once.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing looked up."""
+        self._lock = threading.Lock()
+        # Each directory looked in: whether it holds a manifest, and the
+        # source type that manifest records, if any.
+        self._directories: dict[Path, tuple[bool, SourceType | None]] = {}
+
+    def source_type(self, repo_path: Path) -> SourceType | None:
+        """The source type the nearest clone manifest above *repo_path* records.
+
+        The repository's parent directory is searched first, then each
+        ancestor.  The first manifest found decides: one that cannot be
+        read, or records no recognised source type, gives no answer
+        rather than deferring to one further up.
+
+        Args:
+            repo_path: Repository path
+
+        Returns:
+            The source type recorded, or None if there is no answer.
+        """
+        with self._lock:
+            for directory in repo_path.resolve().parents:
+                found = self._directories.get(directory)
+                if found is None:
+                    found = _find_clone_manifest(directory)
+                    self._directories[directory] = found
+                has_manifest, source = found
+                if has_manifest:
+                    return source
+        return None
 
 
 def run_git(
@@ -89,6 +229,7 @@ class GitEnvironmentMixin:
     # reads them.
     config: Config | None
     ssh_jitter_seconds: float
+    clone_manifests: CloneManifestSources
 
     def _remote_urls(self, repo_path: Path) -> list[tuple[str, str]]:
         """List the URL of every configured remote, in configuration order.
@@ -144,48 +285,44 @@ class GitEnvironmentMixin:
         return remotes[0][1] if remotes else None
 
     def _has_gerrit_remote(self, repo_path: Path) -> bool:
-        """Whether any remote of the repository looks like Gerrit.
+        """Whether the repository came from Gerrit.
 
-        The refresh fetch is ``--all``, so a repository whose Gerrit
-        remote is not called ``origin`` -- ``git clone --mirror --origin
-        upstream`` -- is still refreshed from Gerrit.
+        The clone manifest nearest above the repository decides, when
+        one records a source type: ``clone`` knew where it cloned from.
+        Otherwise any remote on a Gerrit host makes the repository
+        Gerrit.  The refresh fetch is ``--all``, so a repository whose
+        Gerrit remote is not called ``origin`` -- ``git clone --mirror
+        --origin upstream`` -- is still refreshed from Gerrit.
 
         Args:
             repo_path: Repository path
 
         Returns:
-            True if at least one remote URL looks like Gerrit
+            True if the repository came from Gerrit
         """
+        source = self.clone_manifests.source_type(repo_path)
+        if source is not None:
+            logger.debug(
+                f"{repo_path}: clone manifest records source type {source.value}"
+            )
+            return source == SourceType.GERRIT
         return any(
             self._is_gerrit_repository(url) for _, url in self._remote_urls(repo_path)
         )
 
-    def _is_gerrit_repository(self, remote_url: str | None) -> bool:
-        """Check if remote URL looks like a Gerrit repository.
+    @staticmethod
+    def _is_gerrit_repository(remote_url: str | None) -> bool:
+        """Check if a remote URL points at a Gerrit server.
+
+        See :func:`is_gerrit_url`.
 
         Args:
             remote_url: Remote URL to check
 
         Returns:
-            True if URL looks like Gerrit
+            True if the URL points at a Gerrit server
         """
-        if not remote_url:
-            return False
-
-        # Gerrit-specific patterns
-        gerrit_patterns = [
-            r"ssh://.*:\d+/",  # SSH with port (typical Gerrit: ssh://host:29418/project)
-            r"https?://.*/r/",  # HTTPS with /r/ prefix
-            r"https?://.*/gerrit/",  # HTTPS with /gerrit/ prefix
-        ]
-
-        for pattern in gerrit_patterns:
-            if re.search(pattern, remote_url):
-                return True
-
-        # Additional check: Gerrit servers often have specific hostnames
-        gerrit_hosts = ["gerrit", "review", "code-review"]
-        return any(host in remote_url.lower() for host in gerrit_hosts)
+        return is_gerrit_url(remote_url)
 
     @staticmethod
     def _remote_uses_ssh(remote_url: str | None) -> bool:

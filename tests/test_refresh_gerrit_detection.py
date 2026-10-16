@@ -41,10 +41,6 @@ GERRIT_HTTPS_URL = "https://gerrit.onap.org/r/ccsdk/parent"
 
 REFRESHED = {RefreshStatus.SUCCESS.value, RefreshStatus.UP_TO_DATE.value}
 
-FIXED = pytest.mark.xfail(
-    strict=True, reason="refresh classifies remotes by URL substrings"
-)
-
 
 def _git(*args: str, cwd: Path | None = None) -> str:
     """Run git with an identity and no signing, returning its stdout."""
@@ -111,12 +107,10 @@ class TestHostRule:
     @pytest.mark.parametrize(
         ("url", "expected"),
         [
-            pytest.param(GITHUB_REVIEW_URL, False, marks=FIXED),
-            pytest.param("https://github.com/org/reviewdog-action", False, marks=FIXED),
-            pytest.param(GITLAB_URL, False, marks=FIXED),
-            pytest.param(
-                "git@github.com:org/gerrit-clone-action.git", False, marks=FIXED
-            ),
+            (GITHUB_REVIEW_URL, False),
+            ("https://github.com/org/reviewdog-action", False),
+            (GITLAB_URL, False),
+            ("git@github.com:org/gerrit-clone-action.git", False),
             ("https://github.com/org/plain-repo", False),
             (GERRIT_SSH_URL, True),
             ("https://gerrit.onap.org/r/ccsdk/apps", True),
@@ -129,20 +123,18 @@ class TestHostRule:
             ("https://git.example.org/r/project", True),
             ("ssh://git.example.org:29418/project", True),
             ("ssh://git@[2001:db8::1]:29418/project", True),
-            pytest.param(
-                "https://github.example.com/org/review-app", False, marks=FIXED
-            ),
-            pytest.param("https://code.github.com/org/r/app", False, marks=FIXED),
-            pytest.param("ssh://git@gitlab.com:29418/team/app", False, marks=FIXED),
-            pytest.param("https://gitlab.com/gerrit/app", False, marks=FIXED),
-            pytest.param("https://bitbucket.org/r/app", False, marks=FIXED),
-            pytest.param("https://git.example.org/team/r/app", False, marks=FIXED),
-            pytest.param("https://git.example.org/team/gerrit/app", False, marks=FIXED),
-            pytest.param("https://reviewboard.example.org/app", False, marks=FIXED),
-            pytest.param("https://gerritlike.example.org/app", False, marks=FIXED),
-            pytest.param("ssh://git.example.org:2222/r/app", False, marks=FIXED),
-            pytest.param("/srv/gerrit/app.git", False, marks=FIXED),
-            pytest.param("file:///srv/review/app.git", False, marks=FIXED),
+            ("https://github.example.com/org/review-app", False),
+            ("https://code.github.com/org/r/app", False),
+            ("ssh://git@gitlab.com:29418/team/app", False),
+            ("https://gitlab.com/gerrit/app", False),
+            ("https://bitbucket.org/r/app", False),
+            ("https://git.example.org/team/r/app", False),
+            ("https://git.example.org/team/gerrit/app", False),
+            ("https://reviewboard.example.org/app", False),
+            ("https://gerritlike.example.org/app", False),
+            ("ssh://git.example.org:2222/r/app", False),
+            ("/srv/gerrit/app.git", False),
+            ("file:///srv/review/app.git", False),
             ("https://git.example.org/app", False),
             ("", False),
             (None, False),
@@ -157,7 +149,6 @@ class TestHostRule:
 class TestManifestRule:
     """The ``clone-manifest.json`` nearest above a repository decides."""
 
-    @FIXED
     def test_a_gerrit_manifest_makes_every_repository_gerrit(
         self, tmp_path: Path, upstream: Path, worker: RefreshWorker
     ) -> None:
@@ -168,7 +159,6 @@ class TestManifestRule:
 
         assert worker._has_gerrit_remote(repo) is True
 
-    @FIXED
     def test_a_github_manifest_makes_no_repository_gerrit(
         self, tmp_path: Path, upstream: Path, worker: RefreshWorker
     ) -> None:
@@ -181,7 +171,6 @@ class TestManifestRule:
         assert worker._has_gerrit_remote(named) is False
         assert worker._has_gerrit_remote(hosted) is False
 
-    @FIXED
     def test_the_nearest_manifest_wins(
         self, tmp_path: Path, upstream: Path, worker: RefreshWorker
     ) -> None:
@@ -236,7 +225,6 @@ class TestManifestRule:
         assert worker._has_gerrit_remote(gerrit) is True
         assert worker._has_gerrit_remote(github) is False
 
-    @FIXED
     def test_each_manifest_is_read_once_per_run(
         self, tmp_path: Path, upstream: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -278,7 +266,6 @@ class TestDefault:
         _mirror(upstream, tree / "gerrit", GERRIT_SSH_URL)
         return tree
 
-    @FIXED
     def test_no_flag_refreshes_every_repository(self, tree: Path) -> None:
         outcome = CliRunner().invoke(app, ["refresh", "--output-path", str(tree)])
 
@@ -293,7 +280,6 @@ class TestDefault:
         assert outcome.exit_code == 0, outcome.output
         assert set(_statuses(tree).values()) <= REFRESHED
 
-    @FIXED
     def test_gerrit_only_refreshes_only_gerrit(self, tree: Path) -> None:
         CliRunner().invoke(
             app, ["refresh", "--output-path", str(tree), "--gerrit-only"]
@@ -308,7 +294,6 @@ class TestDefault:
             "gitlab": RefreshStatus.NOT_GERRIT_REPO.value,
         }
 
-    @FIXED
     def test_the_library_defaults_to_every_repository(self) -> None:
         assert RefreshWorker().filter_gerrit_only is False
         assert RefreshManager().filter_gerrit_only is False
@@ -318,7 +303,6 @@ class TestDefault:
         assert default.default is False
 
 
-@FIXED
 def test_the_dry_run_predicts_the_real_run(tmp_path: Path, upstream: Path) -> None:
     tree = tmp_path / "tree"
     (tree / "gerrit-tree").mkdir(parents=True)

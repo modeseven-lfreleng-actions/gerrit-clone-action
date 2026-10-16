@@ -85,9 +85,14 @@ STRATEGY = typer.Option(
     help="Git pull strategy: 'merge' (fast-forward only) or 'rebase'",
 )
 FILTER_GERRIT_ONLY = typer.Option(
-    True,
+    False,
     "--gerrit-only / --all-repos",
-    help="Only refresh repositories with Gerrit remotes",
+    help=(
+        "Only refresh repositories cloned from Gerrit. The nearest "
+        "clone-manifest.json above a repository decides when it records "
+        "a source type; otherwise a remote pointing at a Gerrit server "
+        "does. Default: --all-repos, every repository under the path"
+    ),
 )
 EXIT_ON_ERROR = typer.Option(
     False,

@@ -326,11 +326,28 @@ Dry run to see what changes would occur:
 gerrit-clone refresh --output-path ~/onap --dry-run
 ```
 
-Refresh all repositories (not just Gerrit):
+Refresh only the repositories cloned from Gerrit:
 
 ```bash
-gerrit-clone refresh --all-repos
+gerrit-clone refresh --output-path ~/repos --gerrit-only
 ```
+
+By default, `refresh` refreshes every repository under the path, wherever
+it came from; `--all-repos` asks for that explicitly. With `--gerrit-only`,
+the `clone-manifest.json` nearest above a repository, looking in its parent
+directory first and then each ancestor, decides: a `source_type` of
+`gerrit` makes it Gerrit, and `github` does not. When no manifest exists,
+or `refresh` cannot parse the nearest one, or it records no recognised
+`source_type`, `refresh` checks the remotes instead: a repository with any
+remote on a Gerrit server counts as Gerrit. A remote counts when it uses SSH port
+`29418`, when a label of its host is `gerrit` or `review` or starts with
+`gerrit-` or `review-` (`gerrit.onap.org`, `review.opendev.org`), or when an
+HTTP(S) URL's first path segment is `r` or `gerrit`. Remotes on
+`github.com`, `*.github.com`, `gitlab.com` and `bitbucket.org` never count,
+and a repository's name or the rest of its path never decides. `refresh`
+looks only for the default manifest name, so it checks the remotes of a
+tree cloned with a custom `--manifest-filename`. It reports the
+repositories it skips as not Gerrit repositories.
 
 ### Complete Refresh Example
 
@@ -358,7 +375,7 @@ Prune: True
 Timeout: 300s
 Skip Conflicts: True
 Auto Stash: True
-Filter: Gerrit only
+Filter: All repos
 Dry Run: False
 Force: False
 Recursive: True
@@ -397,7 +414,9 @@ Issues:
 **Key Features**:
 
 - **Parallel Updates**: Uses concurrent threads for fast updates
-- **Smart Detection**: Automatically detects Gerrit repositories by remote URL
+- **Every Repository**: Refreshes every repository under the path, whatever
+  its remote; `--gerrit-only` restricts it to those the clone manifest or
+  the remote's host marks as cloned from Gerrit
 - **Safe Defaults**: Skips repositories with uncommitted changes by default
 - **Auto-Stash**: Optionally stash and restore uncommitted changes
 - **Flexible Strategies**: Support for merge (fast-forward) or rebase
