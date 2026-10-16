@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -327,3 +327,48 @@ class TestWriteSummary:
         session.write_summary()
 
         assert _summaries(log_file) == 1
+
+
+class TestInterruptedWrite:
+    """An interrupt during the summary write leaves one summary heading."""
+
+    @pytest.mark.xfail(strict=True, reason="summary marked written after the write")
+    def test_clone_interrupted_during_write(self, tmp_path: Path) -> None:
+        """``clone`` exits 130 with one heading when the write is interrupted."""
+        get_summary = ErrorCollector.get_summary
+        calls = 0
+
+        def interrupt_once(collector: ErrorCollector) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyboardInterrupt
+            summary: dict[str, Any] = get_summary(collector)
+            return summary
+
+        def fail(_config: Config) -> MagicMock:
+            _stub_logger.error("clone failed")
+            return _batch(failed=1)
+
+        with patch.object(ErrorCollector, "get_summary", interrupt_once):
+            exit_code = _clone(tmp_path, fail)
+
+        assert exit_code == 130
+        assert _summaries(tmp_path / f"{HOST}.log") == 1
+
+    @pytest.mark.xfail(strict=True, reason="summary marked written after the write")
+    def test_interrupt_propagates_and_blocks_rewrite(self, tmp_path: Path) -> None:
+        """The interrupt propagates and a later call does not write again."""
+        collector = _collector("warned")
+        session = CliSession(
+            console=Console(), error_collector=collector, log_file_path=tmp_path
+        )
+
+        with patch.object(
+            collector, "write_summary_to_file", side_effect=[KeyboardInterrupt, None]
+        ) as write:
+            with pytest.raises(KeyboardInterrupt):
+                session.write_summary()
+            session.write_summary()
+
+        write.assert_called_once_with(tmp_path)
