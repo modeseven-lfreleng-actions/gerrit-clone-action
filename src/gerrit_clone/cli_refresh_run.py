@@ -28,6 +28,7 @@ from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
+    file_logging_active,
     get_default_log_path,
     init_logging,
 )
@@ -229,7 +230,7 @@ def _start_logging(request: RefreshRequest, console: Console) -> None:
         command="refresh",
     )
 
-    if log_file_path and request.verbose:
+    if request.verbose and file_logging_active():
         console.print(f"📝 Logging to: [cyan]{log_file_path}[/cyan]")
         console.print()
 

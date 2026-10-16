@@ -248,6 +248,20 @@ def setup_file_logging(
     return logger, file_logger.get_error_collector()
 
 
+def file_logging_active(logger_name: str = "gerrit_clone") -> bool:
+    """Report whether a log file is being written for this run.
+
+    False when file logging was disabled, and when the log file could
+    not be created: :class:`FileLogger` then turns itself off and
+    attaches no file handler.  Callers use this before naming or
+    writing the log file, since the path alone says neither.
+    """
+    return any(
+        isinstance(handler, logging.FileHandler)
+        for handler in logging.getLogger(logger_name).handlers
+    )
+
+
 def get_default_log_path(host: str | None = None, path: Path | None = None) -> Path:
     """Get default log file path in path directory (or current working directory).
 

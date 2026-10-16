@@ -21,6 +21,7 @@ from gerrit_clone import cli_hooks
 from gerrit_clone.error_codes import ExitCode
 from gerrit_clone.file_logging import (
     cli_args_to_dict,
+    file_logging_active,
     get_default_log_path,
     init_logging,
 )
@@ -123,7 +124,7 @@ def start_logging(request: MirrorRequest, session: CliSession) -> None:
         path=request.output_path,
         command="mirror",
     )
-    session.log_file_path = log_file_path
+    session.log_file_path = log_file_path if file_logging_active() else None
     session.file_logger = file_logger
     session.error_collector = error_collector
 
