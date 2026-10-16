@@ -76,6 +76,74 @@ def drop_tags(stage: Path, timeout: int) -> str | None:
     return None
 
 
+def as_upstream_copy(repo_path: Path, stage: Path, timeout: int) -> str | None:
+    """Make *stage*, a copy of working copy *repo_path*, stand in for upstream.
+
+    It holds the checkout's remote-tracking refs as its branches,
+    ``refs/remotes/X`` as ``refs/heads/X``, and its remotes fetch there;
+    the checkout's own branches and tags, and its remotes' ``HEAD`` refs,
+    go.
+
+    Returns:
+        Why the copy could not be made to stand in for upstream, or
+        ``None``.
+    """
+    moved = run_git(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            "--prune",
+            "--no-tags",
+            str(repo_path),
+            f"+{TRACKING}*:refs/heads/*",
+            f"^{TRACKING}*/HEAD",
+        ],
+        stage,
+        timeout=timeout,
+    )
+    failure = (
+        f"Could not stage a copy: {moved.stderr.strip()}"
+        if moved.returncode != 0
+        else drop_tags(stage, timeout)
+    )
+    if failure is not None:
+        return failure
+    listed = run_git(
+        ["git", "config", "--get-regexp", r"^remote\..*\.fetch$"], stage, timeout=10
+    )
+    refspecs: dict[str, list[str]] = {}
+    for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
+        key, _, value = line.partition(" ")
+        refspecs.setdefault(key, []).append(value)
+    if not any(
+        refspec.partition(":")[2].startswith(TRACKING)
+        for values in refspecs.values()
+        for refspec in values
+    ):
+        # Fetching would update FETCH_HEAD alone, and leave the copy's
+        # branches where they were: a refresh that took nothing.
+        return (
+            "Could not stage a copy: no remote has a fetch refspec that "
+            "updates a remote-tracking branch"
+        )
+    for key, values in refspecs.items():
+        staged = [
+            refspec for refspec in map(staged_refspec, values) if refspec is not None
+        ]
+        if len(staged) != len(values):
+            return (
+                f"Could not stage a copy: {key} fetches outside "
+                f"{TRACKING} and refs/tags/"
+            )
+        run_git(["git", "config", "--unset-all", key], stage, timeout=10)
+        for refspec in staged:
+            added = run_git(["git", "config", "--add", key, refspec], stage, timeout=10)
+            if added.returncode != 0:
+                return f"Could not stage a copy: {added.stderr.strip()}"
+    return None
+
+
 def configured_upstream(repo_path: Path) -> str:
     """The current branch's upstream ref, from config, even if it is gone."""
     branch = run_git(["git", "symbolic-ref", "-q", "HEAD"], repo_path, timeout=10)

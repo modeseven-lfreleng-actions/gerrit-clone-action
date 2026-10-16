@@ -27,9 +27,14 @@ from typer.testing import CliRunner
 
 from gerrit_clone import content_stage, refresh_checkout_stage
 from gerrit_clone.cli import app
+from gerrit_clone.content_journal import refs_digest
+from gerrit_clone.content_origin import NO_PUSH_URL
+from gerrit_clone.content_policy import stored_policy
 from gerrit_clone.content_spec import ContentFilterSpec
 from gerrit_clone.models import RefreshResult, RefreshStatus, RetryPolicy
+from gerrit_clone.refresh_checkout_refs import PUBLISHED
 from gerrit_clone.refresh_checkout_stage import (
+    CANNOT_FOLLOW_REFUSAL,
     NO_FILTER_REPO_REFUSAL,
     UPSTREAM_GONE_REFUSAL,
 )
@@ -611,6 +616,135 @@ class TestRewrittenThroughACopy:
         assert result.status == RefreshStatus.SKIPPED
         assert result.error_message == FILTERED_REFRESH_REFUSAL
         assert _refs(checkout) == before
+
+
+def _result(checkout: Path) -> RefreshResult:
+    return RefreshResult(
+        path=checkout,
+        project_name=checkout.name,
+        status=RefreshStatus.REFRESHING,
+        started_at=datetime.now(UTC),
+    )
+
+
+def _cloned_with_secret(upstream: Path, checkout: Path, tmp_path: Path) -> None:
+    """Hold unfiltered history, with no way to fetch more."""
+    _commit(upstream, "secret.txt", "hunter2\n")
+    _commit(upstream, "file.txt", "two\n")
+    _git("pull", "-q", cwd=checkout)
+    _git("config", "remote.origin.url", str(tmp_path / "unreachable"), cwd=checkout)
+
+
+class TestFreshCheckoutSeams:
+    """The steps a freshly cloned working copy reuses, apart from a refresh."""
+
+    def test_staging_without_a_fetch_filters_what_the_checkout_holds(
+        self, upstream: Path, checkout: Path, tmp_path: Path
+    ) -> None:
+        _cloned_with_secret(upstream, checkout, tmp_path)
+        worker = _worker(_spec(checkout))
+        fetched = _result(checkout)
+        assert (
+            worker._stage_and_filter(checkout, tmp_path / "fetched.git", fetched)
+            is not None
+        ), "a fetch from the unreachable remote should have failed"
+        result = _result(checkout)
+        stage = tmp_path / "stage.git"
+
+        outcome = worker._stage_and_filter(checkout, stage, result, fetch=False)
+
+        assert outcome is None, result.error_message
+        assert "secret.txt" not in _history(stage)
+        assert _git("show", "origin/main:file.txt", cwd=stage) == "two"
+        assert not stored_policy(stage).empty
+
+    def test_publishing_without_the_follow_check(
+        self, upstream: Path, checkout: Path, tmp_path: Path
+    ) -> None:
+        """The checkout's branch holds what the filtered history removes."""
+        _cloned_with_secret(upstream, checkout, tmp_path)
+        branch = _git("rev-parse", "main", cwd=checkout)
+        worker = _worker(_spec(checkout))
+        base = refs_digest(checkout, *PUBLISHED)
+        stage = tmp_path / "stage.git"
+        staged = worker._stage_and_filter(
+            checkout, stage, _result(checkout), fetch=False
+        )
+        assert staged is None
+        followed = _result(checkout)
+        refused = worker._record_and_publish(checkout, stage, followed, base)
+        assert refused is not None
+        assert refused.name == "REFUSED"
+        assert followed.error_message == CANNOT_FOLLOW_REFUSAL
+        result = _result(checkout)
+
+        outcome = worker._record_and_publish(
+            checkout, stage, result, base, follow=False
+        )
+
+        assert outcome is None, result.error_message
+        assert _git("rev-parse", "origin/main", cwd=checkout) == _git(
+            "rev-parse", "refs/heads/origin/main", cwd=stage
+        )
+        assert "secret.txt" not in _git(
+            "log", "--name-only", "--format=", "origin/main", cwd=checkout
+        )
+        assert _git("rev-parse", "main", cwd=checkout) == branch
+        assert not stored_policy(checkout).empty
+        assert _git("config", "remote.origin.pushurl", cwd=checkout) == NO_PUSH_URL
+
+
+class TestCheckoutStage:
+    def test_it_is_made_in_the_git_directory_and_removed(self, checkout: Path) -> None:
+        result = _result(checkout)
+        worker = _worker(_spec(checkout))
+        git_dir = worker._checkout_git_dir(checkout, result)
+        assert git_dir is not None
+        seen: list[Path] = []
+
+        def work(stage: Path) -> str:
+            seen.append(stage)
+            assert _stages_left(checkout) == [stage.parent]
+            return "worked"
+
+        assert worker._in_checkout_stage(git_dir, result, work) == ("worked", True)
+        assert seen[0].parent.parent == checkout / ".git"
+        assert _stages_left(checkout) == []
+        assert result.error_message is None
+
+    def test_it_is_removed_when_the_work_raises(self, checkout: Path) -> None:
+        result = _result(checkout)
+        worker = _worker(_spec(checkout))
+
+        def work(stage: Path) -> None:
+            stage.mkdir()
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            worker._in_checkout_stage(str(checkout / ".git"), result, work)
+        assert _stages_left(checkout) == []
+
+    def test_one_it_cannot_remove_is_reported(self, checkout: Path) -> None:
+        result = _result(checkout)
+        seen: list[Path] = []
+
+        with patch(
+            "gerrit_clone.refresh_filtered.shutil.rmtree",
+            side_effect=OSError("busy"),
+        ):
+            done = _worker(_spec(checkout))._in_checkout_stage(
+                str(checkout / ".git"), result, seen.append
+            )
+
+        assert done == (None, False)
+        assert str(seen[0].parent) in (result.error_message or "")
+        assert _stages_left(checkout) == [seen[0].parent]
+
+    def test_without_a_git_directory_it_says_so(self, tmp_path: Path) -> None:
+        result = _result(tmp_path)
+
+        assert _worker(_spec(tmp_path))._checkout_git_dir(tmp_path, result) is None
+        assert "Could not find its git directory" in (result.error_message or "")
 
 
 def _refresh(tree: Path, *options: str) -> Any:
