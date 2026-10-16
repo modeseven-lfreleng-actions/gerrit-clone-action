@@ -335,7 +335,9 @@ class MirrorManager:
 
         # Step 0b: Pre-flight rate-limit budget check (synchronous)
         logger.info("📊 Checking rate-limit budget before batch operations...")
-        self.github_api.budget.preflight_check_sync(self.github_api.client)
+        self.github_api.budget.preflight_check_sync(
+            self.github_api.client, self.github_api.base_url
+        )
 
         # This handles all the dependency ordering and safe parallel operations
         logger.info("📥 Cloning repositories from Gerrit...")

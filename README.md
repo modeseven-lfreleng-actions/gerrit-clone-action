@@ -147,7 +147,8 @@ gerrit-clone clone --host gerrit.example.org
 gerrit-clone clone --host gerrit.example.org:29418
 ```
 
-**GitHub sources:**
+**GitHub sources** (these need a token, even for public repositories:
+set `GITHUB_TOKEN` or `GERRIT_CLONE_TOKEN`, or pass `--github-token`):
 
 ```bash
 # Clones to: ./github.com/myorg/repo-name
@@ -1242,7 +1243,7 @@ jobs:
 | `ssh-user`             | No       |                       | SSH username for clone operations                                                                                                                                  |
 | `ssh-private-key`      | No       |                       | SSH private key content for authentication                                                                                                                         |
 | `source-type`          | No       |                       | Source type: `gerrit` or `github` (auto-detected from host)                                                                                                        |
-| `github-token`         | No       |                       | GitHub personal access token for API access and private repos                                                                                                      |
+| `github-token`         | No       |                       | GitHub personal access token; required for GitHub sources, public or private                                                                                       |
 | `github-org`           | No       |                       | GitHub organization or user (auto-detected from host)                                                                                                              |
 | `use-gh-cli`           | No       | `false`               | Use GitHub CLI (`gh`) for cloning instead of git                                                                                                                   |
 | `output-path`          | No       | `.`                   | Clone destination; an empty value or a spelling of `.` such as `./` creates `./{SERVER}/` or `./github.com/{ORG}/`; the tool uses any other value exactly as given |

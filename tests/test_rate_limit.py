@@ -316,6 +316,27 @@ class TestRateLimitBudget:
         snap = budget.preflight_check_sync(client)
         assert snap.limit == 5000  # Default unchanged
 
+    @pytest.mark.asyncio
+    async def test_preflight_check_uses_base_url(self) -> None:
+        """The rate-limit query goes to the client's GitHub host."""
+        budget = RateLimitBudget()
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=Mock(status_code=404))
+
+        await budget.preflight_check(client, "https://ghe.example.com/api/v3")
+
+        client.get.assert_awaited_once_with("https://ghe.example.com/api/v3/rate_limit")
+
+    def test_preflight_check_sync_uses_base_url(self) -> None:
+        """The sync rate-limit query goes to the client's GitHub host."""
+        budget = RateLimitBudget()
+        client = Mock()
+        client.get = Mock(return_value=Mock(status_code=404))
+
+        budget.preflight_check_sync(client, "https://ghe.example.com/api/v3")
+
+        client.get.assert_called_once_with("https://ghe.example.com/api/v3/rate_limit")
+
 
 # -------------------------------------------------------------------
 # TokenBucketLimiter

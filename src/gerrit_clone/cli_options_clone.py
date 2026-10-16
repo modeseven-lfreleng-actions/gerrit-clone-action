@@ -30,7 +30,10 @@ SOURCE_TYPE = typer.Option(
 GITHUB_TOKEN = typer.Option(
     None,
     "--github-token",
-    help="GitHub personal access token (or set GERRIT_CLONE_TOKEN/GITHUB_TOKEN env var)",
+    help=(
+        "GitHub personal access token; required for GitHub sources "
+        "(or set GERRIT_CLONE_TOKEN/GITHUB_TOKEN env var)"
+    ),
     envvar="GERRIT_CLONE_TOKEN",
 )
 GITHUB_ORG = typer.Option(

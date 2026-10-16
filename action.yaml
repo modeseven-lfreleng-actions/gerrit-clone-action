@@ -30,8 +30,8 @@ inputs:
     required: false
   github-token:
     description: >-
-      GitHub personal access token for API access and private
-      repos
+      GitHub personal access token; required for GitHub sources,
+      public or private
     required: false
   github-org:
     description: >-

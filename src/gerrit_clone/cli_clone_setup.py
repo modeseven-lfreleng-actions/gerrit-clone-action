@@ -4,7 +4,8 @@
 """Preparation steps run before the ``clone`` command starts cloning.
 
 Covers source detection, logging initialisation, HTTP credential resolution,
-discovery-method parsing, configuration loading and the startup banner.
+discovery-method parsing and configuration loading.  The startup banner
+is in :mod:`gerrit_clone.cli_clone_banner`.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from gerrit_clone import cli_hooks
-from gerrit_clone.cli_app import format_version_string
 from gerrit_clone.config import ConfigurationError, load_config
 from gerrit_clone.content_intent import IntentError
 from gerrit_clone.content_intent_resolve import resolve_filters
@@ -32,6 +32,8 @@ from gerrit_clone.file_logging import (
     init_logging,
 )
 from gerrit_clone.github_discovery import detect_github_source, parse_github_url
+from gerrit_clone.github_transport import resolve_github_token
+from gerrit_clone.logging import get_logger
 from gerrit_clone.models import DiscoveryMethod, SourceType
 from gerrit_clone.netrc import NetrcParseError
 
@@ -42,6 +44,8 @@ if TYPE_CHECKING:
     from gerrit_clone.cli_session import CliSession
     from gerrit_clone.file_logging import ErrorCollector
     from gerrit_clone.models import Config
+
+logger = get_logger(__name__)
 
 
 def resolve_source(
@@ -327,6 +331,11 @@ def build_config(
     except ConfigurationError as e:
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
+    try:
+        _require_github_token(config, request.github_token_source)
+    except ConfigurationError as e:
+        _report_configuration_error(session, e)
+        raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     options = ContentFilterSpec.from_options(
         request.remove_files, request.git_filter, request.redact_secrets, config.path
     )
@@ -339,6 +348,33 @@ def build_config(
         _report_configuration_error(session, e)
         raise typer.Exit(ExitCode.CONFIGURATION_ERROR) from e
     return config
+
+
+def _require_github_token(config: Config, token_source: str) -> None:
+    """Refuse a GitHub source that has no token to discover it with.
+
+    GitHub discovery always calls the API with a token, and GitHub's
+    GraphQL API answers no anonymous query, so without one no
+    repository, public or private, can be listed.  Checked before
+    anything is printed, recorded or fetched.
+
+    Args:
+        config: Effective configuration
+        token_source: Where the configured token came from
+
+    Raises:
+        ConfigurationError: The source is GitHub and no token is set
+    """
+    if config.source_type != SourceType.GITHUB:
+        return
+    _token, source = resolve_github_token(config.github_token, token_source)
+    if source is None:
+        raise ConfigurationError(
+            "A GitHub source needs a GitHub token to list its "
+            "repositories, public or private. Pass --github-token, or "
+            "set GERRIT_CLONE_TOKEN or GITHUB_TOKEN."
+        )
+    logger.debug("GitHub token from: %s", source)
 
 
 def _report_configuration_error(session: CliSession, error: Exception) -> None:
@@ -354,85 +390,3 @@ def _report_configuration_error(session: CliSession, error: Exception) -> None:
             border_style="red",
         )
     )
-
-
-def show_startup_banner(console: Console, config: Any) -> None:
-    """Show startup banner with configuration summary."""
-    # Show version first
-    console.print(format_version_string())
-    console.print()
-
-    # Create summary text
-    # Format host with port only if port is set (Gerrit) or omit for GitHub
-    if config.effective_port is not None:
-        host_display = f"{config.host}:{config.effective_port}"
-    else:
-        host_display = config.host
-
-    lines = [
-        f"Host: [cyan]{host_display} [{config.protocol}][/cyan]",
-        f"Output: [cyan]{config.path}[/cyan]",
-        f"Threads: [cyan]{config.effective_threads}[/cyan]",
-    ]
-
-    if config.ssh_user:
-        lines.append(f"SSH User: [cyan]{config.ssh_user}[/cyan]")
-
-    if config.ssh_identity_file:
-        lines.append(f"SSH Identity: [cyan]{config.ssh_identity_file}[/cyan]")
-
-    if config.depth:
-        lines.append(f"Depth: [cyan]{config.depth}[/cyan]")
-
-    if config.branch:
-        lines.append(f"Branch: [cyan]{config.branch}[/cyan]")
-
-    # Add mirror status
-    lines.append(f"Git Mirror: [cyan]{config.mirror}[/cyan]")
-
-    # Add common options
-    discovery = getattr(config, "discovery_method", None) or DiscoveryMethod.SSH
-    lines.extend(
-        [
-            f"Discovery Method: [cyan]{discovery.value.upper()}[/cyan]",
-            f"Skip Archived: [cyan]{config.skip_archived}[/cyan]",
-        ]
-    )
-
-    # Add Gerrit-specific options only for Gerrit sources
-    if config.source_type == SourceType.GERRIT:
-        lines.extend(
-            [
-                f"Allow Nested Git: [cyan]{getattr(config, 'allow_nested_git', False)}[/cyan]",
-                f"Nested Protection: [cyan]{getattr(config, 'nested_protection', False)}[/cyan]",
-                f"Move Conflicting: [cyan]{getattr(config, 'move_conflicting', True)}[/cyan]",
-            ]
-        )
-
-    # Add remaining common options
-    lines.extend(
-        [
-            f"Strict Host Check: [cyan]{config.strict_host_checking}[/cyan]",
-            f"Include Filter: [cyan]{', '.join(config.include_projects) if getattr(config, 'include_projects', []) else '—'}[/cyan]",
-            f"Exclude Filter: [cyan]{', '.join(config.exclude_projects) if getattr(config, 'exclude_projects', []) else '—'}[/cyan]",
-            f"SSH Debug: [cyan]{getattr(config, 'ssh_debug', False)}[/cyan]",
-            f"Exit on Error: [cyan]{getattr(config, 'exit_on_error', False)}[/cyan]",
-        ]
-    )
-
-    summary_text = Text.from_markup("\n".join(lines))
-
-    # Set title based on source type
-    if config.source_type == SourceType.GITHUB:
-        title = "[bold]GitHub Clone Configuration[/bold]"
-    else:
-        title = "[bold]Gerrit Clone Configuration[/bold]"
-
-    panel = Panel(
-        summary_text,
-        title=title,
-        border_style="blue",
-        padding=(1, 2),
-    )
-
-    console.print(panel)

@@ -9,10 +9,10 @@ using the GitHub REST or GraphQL API.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from gerrit_clone.github_api import GitHubAPI, GitHubAPIError, GitHubAuthError
+from gerrit_clone.github_transport import github_api_url, resolve_github_token
 from gerrit_clone.logging import get_logger
 from gerrit_clone.models import Config, Project, ProjectState, SourceType
 
@@ -48,56 +48,17 @@ def discover_github_repositories(
 
     logger.debug(f"Discovering repositories in GitHub org/user: {org_or_user}")
 
-    # Get token from config or environment
-    # Priority: explicit config > GERRIT_CLONE_TOKEN > GITHUB_TOKEN
-    token: str | None
-    if config.github_token:
-        token = config.github_token
-    else:
-        token = os.getenv("GERRIT_CLONE_TOKEN") or os.getenv("GITHUB_TOKEN")
+    # The CLI logs where the token came from; here it is already resolved
+    # into config.github_token, so its origin would be mislabelled.
+    token, _source = resolve_github_token(config.github_token)
 
     try:
-        with GitHubAPI(token=token) as api:
-            # Try GraphQL organization API first - it's faster and more efficient
-            # If it fails (empty results), fall back to REST user API
-            logger.debug(
-                f"Attempting to fetch repositories for {org_or_user} "
-                "using GraphQL organization API"
-            )
-            repos_data = api.list_all_repos_graphql(org_or_user)
-
-            if repos_data:
-                # GraphQL succeeded - this is an organization
-                logger.debug(
-                    f"Successfully fetched {len(repos_data)} repositories "
-                    f"from organization {org_or_user}"
-                )
-                repos_list = list(repos_data.values())
-            else:
-                # GraphQL returned empty - likely a user account, not an org
-                logger.debug(
-                    f"GraphQL organization API returned no results for {org_or_user}. "
-                    "Falling back to REST user API."
-                )
-                github_repos = api.list_repos(org=None)
-                repos_list = [
-                    {
-                        "name": r.name,
-                        "full_name": r.full_name,
-                        "html_url": r.html_url,
-                        "ssh_url": r.ssh_url,
-                        "clone_url": r.clone_url,
-                        "private": r.private,
-                        "archived": r.archived,
-                        "description": r.description,
-                        "default_branch": None,
-                    }
-                    for r in github_repos
-                ]
-                logger.debug(
-                    f"Successfully fetched {len(repos_list)} repositories "
-                    f"from user account {org_or_user}"
-                )
+        # From the host, not config.base_url: --base-url and
+        # GERRIT_BASE_URL name the Gerrit API, and the token goes to
+        # whichever host this is.
+        with GitHubAPI(token=token, base_url=github_api_url(config.host)) as api:
+            logger.debug(f"Fetching repositories owned by {org_or_user} over GraphQL")
+            repos_list = list(api.list_owner_repos_graphql(org_or_user).values())
 
             # Convert to Project models
             projects = _convert_to_projects(repos_list)

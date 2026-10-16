@@ -21,6 +21,7 @@ from rich.text import Text
 from gerrit_clone import __version__, cli_hooks
 from gerrit_clone import cli_clone_setup as setup
 from gerrit_clone.cli_app import is_github_actions_context
+from gerrit_clone.cli_clone_banner import show_startup_banner
 from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.error_codes import DiscoveryError, ExitCode
 from gerrit_clone.rich_status import (
@@ -63,7 +64,7 @@ def run_clone(request: CloneRequest, session: CliSession) -> None:
 
     # Show startup banner if not quiet
     if not request.quiet:
-        setup.show_startup_banner(console, config)
+        show_startup_banner(console, config)
 
     batch_result = _clone_repositories(config)
     _apply_content_filters(request, console, batch_result, config.content_filters)
