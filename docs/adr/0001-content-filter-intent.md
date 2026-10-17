@@ -137,9 +137,12 @@ blocks pushing, as every filtered repository does.
 well. The clone has just fetched upstream, so the copy fetches nothing;
 it takes the checkout's tags instead, so the filters rewrite them too.
 The checkout takes the copy's refs without the follow check, since its
-branch holds the unfiltered history the filtered one replaces. When the
+branch holds the unfiltered history the filtered one replaces, and its
+tags become exactly the copy's: a tag the filters removed entirely, such
+as one on a commit holding only removed content, goes too. When the
 filters rewrote anything, the checkout's branch, with no work of its
-own, resets to its filtered upstream, and the run expires its reflogs,
+own, resets to its filtered upstream (a clone of a single tag moves to
+the filtered tag instead), and the run expires its reflogs,
 drops `ORIG_HEAD` and prunes every unreachable object, so nothing
 unfiltered stays behind. A filter matching nothing records nothing and
 leaves the checkout unchanged. A new working copy whose filtering fails,

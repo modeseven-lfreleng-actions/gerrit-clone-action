@@ -115,6 +115,9 @@ def _cloning_from(upstream: Path) -> Any:
             options = ["--mirror"] if config.mirror else []
             if config.depth:
                 options += ["--depth", str(config.depth)]
+            if config.branch:
+                # As the GitHub backend clones a named branch or tag.
+                options += ["--single-branch", "--branch", config.branch]
             _git("clone", "-q", *options, upstream.as_uri(), str(path))
             results.append(
                 CloneResult(project=project, status=CloneStatus.SUCCESS, path=path)
@@ -409,3 +412,83 @@ class TestUnchanged:
         assert _git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=checkout) == (
             "origin/main"
         )
+
+
+@needs_filter_repo
+class TestTagsTheFiltersRemove:
+    """A tag on a commit holding only removed content goes with it."""
+
+    def test_no_tag_keeps_the_removed_content(self, tmp_path: Path, tree: Path) -> None:
+        upstream = tmp_path / "rooted"
+        upstream.mkdir()
+        _git("init", "-q", "-b", "main", str(upstream))
+        _commit(upstream, "secret.txt", f"{SECRET}\n")  # The root: secret alone.
+        _git("tag", "root-light", cwd=upstream)
+        _git("tag", "-a", "root-annotated", "-m", "root", cwd=upstream)
+        _commit(upstream, "file.txt", "one\n")
+
+        result = _clone(upstream, tree, "--remove-files", "secret.txt")
+
+        assert result.exit_code == 0, result.output
+        checkout = tree / "proj"
+        assert _git("tag", cwd=checkout) == ""
+        assert SECRET not in _blobs(checkout)
+        assert "secret.txt" not in _history(checkout)
+        assert _stages_left(checkout) == []
+
+
+@needs_filter_repo
+class TestSingleTagClones:
+    """A clone of one tag: detached, fetching that tag alone."""
+
+    def test_a_filter_matching_nothing_keeps_it(
+        self, upstream: Path, tree: Path
+    ) -> None:
+        result = _clone(
+            upstream, tree, "--branch", "light", "--remove-files", "absent.txt"
+        )
+
+        assert result.exit_code == 0, result.output
+        checkout = tree / "proj"
+        assert _git("rev-parse", "HEAD", cwd=checkout) == _git(
+            "rev-parse", "light^{commit}", cwd=upstream
+        )
+        assert stored_policy(checkout).empty
+
+    def test_head_follows_its_filtered_tag(self, upstream: Path, tree: Path) -> None:
+        result = _clone(
+            upstream, tree, "--branch", "light", "--remove-files", "secret.txt"
+        )
+
+        assert result.exit_code == 0, result.output
+        checkout = tree / "proj"
+        assert _git("rev-parse", "HEAD", cwd=checkout) == _git(
+            "rev-parse", "light^{commit}", cwd=checkout
+        )
+        assert not (checkout / "secret.txt").exists()
+        assert (checkout / "config.txt").exists()
+        assert SECRET not in _blobs(checkout)
+        assert not stored_policy(checkout).empty
+        assert _stages_left(checkout) == []
+
+
+class TestInterruptedDeletion:
+    def test_a_copy_left_behind_is_reported(self, upstream: Path, tree: Path) -> None:
+        """An interrupt whose deletion fails names the checkout to delete."""
+        with (
+            patch.object(
+                RefreshWorker, "_filter_fresh_checkout", side_effect=KeyboardInterrupt
+            ),
+            patch(
+                "gerrit_clone.cli_clone_run._delete_working_copy",
+                return_value="permission denied",
+            ),
+            patch("gerrit_clone.cli_clone_run.logger") as logger,
+        ):
+            result = _clone(upstream, tree, "--remove-files", "secret.txt")
+
+        assert result.exit_code == 130, result.output
+        logger.error.assert_called_once()
+        logged = logger.error.call_args.args
+        assert tree / "proj" in logged
+        assert "permission denied" in logged

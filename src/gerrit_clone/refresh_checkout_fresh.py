@@ -13,9 +13,11 @@ branches.  So a new one is filtered through a staged copy, the steps of
 2. Its refs are published without the follow check: the checkout's
    branch holds the unfiltered history the filtered one replaces.
 3. If the filters rewrote anything, the checkout's current branch, with
-   no work of its own, is reset to its filtered upstream, and every
-   unfiltered object purged.  A filter matching nothing records nothing
-   and leaves the checkout as it was.
+   no work of its own, is reset to its filtered upstream -- or a
+   detached ``HEAD`` moved to the filtered form of the tag it was on --
+   and every unfiltered object purged.  Its tags are then the copy's
+   exactly, so a tag the filters removed entirely goes too.  A filter
+   matching nothing records nothing and leaves the checkout as it was.
 
 Anything that fails leaves a checkout that may hold unfiltered content:
 the caller deletes it.
@@ -43,8 +45,8 @@ NO_UPSTREAM_REFUSAL = (
 
 #: Why a fresh working copy detached on rewritten history cannot be filtered.
 DETACHED_REWRITTEN_REFUSAL = (
-    "Its detached HEAD is on a commit the filters rewrote, so it could not "
-    "be moved to the filtered history"
+    "Its detached HEAD is on a commit the filters rewrote, and on no tag "
+    "they kept, so it could not be moved to the filtered history"
 )
 
 
@@ -84,6 +86,10 @@ class FreshCheckoutMixin(StagedCheckoutMixin):
         """:meth:`_filter_fresh_checkout`, with *stage* as the copy."""
         if self._stage_and_filter(repo_path, stage, result, fetch=False) is not None:
             return False
+        # Before publishing replaces them: a detached HEAD follows its tag.
+        on_tags = run_git(
+            ["git", "tag", "--points-at", "HEAD"], repo_path, timeout=10
+        ).stdout.split()
         try:
             rewrote = not stored_policy(stage).empty
         except PolicyRecordError as exc:
@@ -95,16 +101,19 @@ class FreshCheckoutMixin(StagedCheckoutMixin):
         ):
             return False
         return not rewrote or (
-            self._reset_fresh_branch(repo_path, result)
+            self._reset_fresh_branch(repo_path, result, on_tags)
             and self._purge_unfiltered(repo_path, git_dir, result)
         )
 
-    def _reset_fresh_branch(self, repo_path: Path, result: RefreshResult) -> bool:
+    def _reset_fresh_branch(
+        self, repo_path: Path, result: RefreshResult, on_tags: list[str]
+    ) -> bool:
         """Put a fresh checkout's current branch on its filtered upstream.
 
         It has no work of its own to lose.  An unborn branch has nothing
-        to reset; a detached ``HEAD`` is kept only if the filtered refs
-        still hold its commit.
+        to reset.  A detached ``HEAD`` stays if the filtered refs still
+        hold its commit; otherwise it moves to the filtered form of a tag
+        it was on, *on_tags* (a clone of a single tag), or is refused.
         """
         head = run_git(
             ["git", "rev-parse", "-q", "--verify", "HEAD"], repo_path, timeout=10
@@ -127,8 +136,7 @@ class FreshCheckoutMixin(StagedCheckoutMixin):
             )
             if holding.returncode == 0 and holding.stdout.strip():
                 return True
-            result.error_message = DETACHED_REWRITTEN_REFUSAL
-            return False
+            return self._follow_tag(repo_path, result, on_tags)
         upstream = run_git(
             ["git", "rev-parse", "-q", "--verify", "@{upstream}"],
             repo_path,
@@ -148,6 +156,32 @@ class FreshCheckoutMixin(StagedCheckoutMixin):
                 f"{reset.stderr.strip()}"
             )
         return reset.returncode == 0
+
+    def _follow_tag(
+        self, repo_path: Path, result: RefreshResult, on_tags: list[str]
+    ) -> bool:
+        """Move a detached ``HEAD`` to the filtered form of a tag it was on."""
+        for tag in on_tags:
+            target = run_git(
+                ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"],
+                repo_path,
+                timeout=10,
+            )
+            if target.returncode != 0:
+                continue  # The filters removed this tag entirely.
+            moved = run_git(
+                ["git", "checkout", "--quiet", "--detach", target.stdout.strip()],
+                repo_path,
+                timeout=self.timeout,
+            )
+            if moved.returncode != 0:
+                result.error_message = (
+                    f"Could not move HEAD to the filtered tag {tag}: "
+                    f"{moved.stderr.strip()}"
+                )
+            return moved.returncode == 0
+        result.error_message = DETACHED_REWRITTEN_REFUSAL
+        return False
 
     def _purge_unfiltered(
         self, repo_path: Path, git_dir: Path, result: RefreshResult

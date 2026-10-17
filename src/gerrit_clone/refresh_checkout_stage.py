@@ -60,6 +60,7 @@ from gerrit_clone.refresh_checkout_refs import (
     as_upstream_copy,
     configured_upstream,
     copy_tags,
+    publish_command,
 )
 from gerrit_clone.refresh_filtered import OVERTAKEN_REFUSAL, FilteredRefreshMixin
 from gerrit_clone.refresh_git_env import run_git
@@ -266,6 +267,7 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
         gone: for a checkout that was just cloned, whose branch holds the
         unfiltered history.  Every other check still runs, and any filters
         that rewrote the copy are still recorded, with pushing blocked.
+        Its tags are then the copy's exactly (see :meth:`_publish_to_checkout`).
         """
         spec = self.content_filters
         assert spec is not None  # Checked by the caller.
@@ -289,7 +291,9 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
                     else nullcontext(lambda: None)
                 )
                 with guard as published:
-                    if not self._publish_to_checkout(repo_path, stage, result):
+                    if not self._publish_to_checkout(
+                        repo_path, stage, result, prune_tags=not follow
+                    ):
                         return _Staged.FAILED
                     published()
                 return None
@@ -309,7 +313,7 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
 
         With *tags*, it then takes *repo_path*'s (see :func:`copy_tags`).
         """
-        failure = as_upstream_copy(repo_path, stage, self.timeout)
+        failure = as_upstream_copy(repo_path, stage, self.timeout, fetching=not tags)
         if failure is None and tags:
             failure = copy_tags(repo_path, stage, self.timeout)
         if failure is not None:
@@ -367,29 +371,16 @@ class StagedCheckoutMixin(FilteredRefreshMixin):
         return None if ancestor.returncode == 0 else CANNOT_FOLLOW_REFUSAL
 
     def _publish_to_checkout(
-        self, repo_path: Path, stage: Path, result: RefreshResult
+        self,
+        repo_path: Path,
+        stage: Path,
+        result: RefreshResult,
+        *,
+        prune_tags: bool = False,
     ) -> bool:
-        """Give *repo_path* the copy's refs, as remote-tracking refs and tags.
-
-        With ``--prune``, remote-tracking refs the copy no longer has go in
-        the same atomic transaction, so a failure leaves every ref as it
-        was.  Left behind, one would keep history the filters now remove,
-        in a checkout recorded as filtered.
-        """
-        prune = ["--prune"] if self.prune else []
+        """Give *repo_path* the copy's refs (see :func:`publish_command`)."""
         published = run_git(
-            [
-                "git",
-                "fetch",
-                "--atomic",
-                *prune,
-                # Rewritten tags replace their originals; through --tags
-                # rather than a refspec, --prune spares local-only tags.
-                "--force",
-                "--tags",
-                str(stage),
-                "+refs/heads/*:refs/remotes/*",
-            ],
+            publish_command(stage, prune=self.prune, prune_tags=prune_tags),
             repo_path,
             timeout=self.timeout,
         )

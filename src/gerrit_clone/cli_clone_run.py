@@ -28,6 +28,7 @@ from gerrit_clone.cli_app import is_github_actions_context
 from gerrit_clone.cli_clone_banner import show_startup_banner
 from gerrit_clone.content_stage import filter_repository
 from gerrit_clone.error_codes import DiscoveryError, ExitCode
+from gerrit_clone.logging import get_logger
 from gerrit_clone.models import CloneStatus, RefreshResult, RefreshStatus
 from gerrit_clone.refresh_worker import RefreshWorker
 from gerrit_clone.rich_status import (
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     from gerrit_clone.cli_session import CliSession
     from gerrit_clone.content_spec import ContentFilterSpec
     from gerrit_clone.models import BatchResult, CloneResult, Config
+
+
+logger = get_logger(__name__)
 
 
 def run_clone(request: CloneRequest, session: CliSession) -> None:
@@ -197,7 +201,17 @@ def _filter_new_working_copy(
             part for part in (result.error_message, str(exc) or repr(exc)) if part
         )
     except BaseException:
-        _delete_working_copy(cr.path)
+        # Interrupted: delete it, and say so if that fails, then go on.
+        failure = _delete_working_copy(cr.path)
+        if failure is not None:
+            logger.error(
+                "Interrupted while filtering %s; the working copy, which may "
+                "hold unfiltered content, could not be deleted; delete %s by "
+                "hand: %s",
+                cr.project.name,
+                cr.path,
+                failure,
+            )
         raise
     if filtered:
         cr.content_filtered = True
