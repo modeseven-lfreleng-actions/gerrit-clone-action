@@ -450,10 +450,6 @@ ALIAS_INPUT_PAIRS: list[tuple[str, str]] = [
     ("force-refresh", "force"),
 ]
 
-ALIAS_INPUT_XFAIL = pytest.mark.xfail(
-    strict=True, reason="force and https inputs not yet defined"
-)
-
 EXPRESSION_PATTERN = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
 
@@ -465,7 +461,6 @@ def _reads_input(expression: str, name: str) -> bool:
 class TestAliasInputs:
     """``force`` and ``https`` behave exactly like their older spellings."""
 
-    @ALIAS_INPUT_XFAIL
     @pytest.mark.parametrize(("old", "new"), ALIAS_INPUT_PAIRS)
     def test_alias_input_defined(
         self, action_yaml: dict[str, Any], old: str, new: str
@@ -477,7 +472,6 @@ class TestAliasInputs:
         assert inputs[new].get("default") == "false"
         assert inputs[old].get("default") == "false"
 
-    @ALIAS_INPUT_XFAIL
     @pytest.mark.parametrize(("old", "new"), ALIAS_INPUT_PAIRS)
     def test_every_read_honours_both_spellings(self, old: str, new: str) -> None:
         """Each expression that reads the old input reads the new one too."""
@@ -492,7 +486,6 @@ class TestAliasInputs:
             assert _reads_input(expr, old), f"{expr!r} ignores inputs.{old}"
             assert _reads_input(expr, new), f"{expr!r} ignores inputs.{new}"
 
-    @ALIAS_INPUT_XFAIL
     def test_env_mappings_read_both_spellings(
         self, action_yaml: dict[str, Any]
     ) -> None:
@@ -515,7 +508,6 @@ class TestAliasInputs:
                 assert "||" in value, (name, value)
         assert seen == set(env_names)
 
-    @ALIAS_INPUT_XFAIL
     def test_ssh_setup_skipped_for_either_https_input(
         self, action_yaml: dict[str, Any]
     ) -> None:

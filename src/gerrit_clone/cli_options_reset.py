@@ -22,7 +22,8 @@ ORG = typer.Option(
 )
 PATH = typer.Option(
     Path(),
-    "--path",
+    "--output-path",
+    "--path",  # Backward-compatible alias
     help="Local Gerrit clone folder hierarchy (default: current directory)",
     envvar="GERRIT_CLONE_PATH",
     file_okay=False,

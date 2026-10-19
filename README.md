@@ -634,8 +634,8 @@ gerrit-clone reset --org my-test-org
 
 **Optional:**
 
-- `--output-path DIRECTORY`: Local Gerrit clone folder hierarchy (default: current
-  directory)
+- `--output-path DIRECTORY` (alias `--path`): Local Gerrit clone folder
+  hierarchy (default: current directory)
 - `--compare`: Compare local Gerrit clone with remote GitHub repositories
   before deletion
 - `--github-token TEXT`: GitHub personal access token (or use
@@ -655,7 +655,9 @@ gerrit-clone reset --org my-test-org
 Usage: gerrit-clone clone [OPTIONS]
 
 Options:
-  -h, --host TEXT                 Gerrit server hostname [required]
+  --host, -h TEXT                 Source hostname (Gerrit server or GitHub
+                                  URL like github.com/ORG) [required]
+  --org, --github-org TEXT        GitHub organization or user name
   -p, --port INTEGER              Gerrit SSH port [default: 29418]
   --base-url TEXT                 Base URL for Gerrit API
   -u, --ssh-user TEXT             SSH username for clone operations
@@ -664,8 +666,10 @@ Options:
   --skip-archived / --include-archived
                                   Skip archived and inactive repositories
                                   [default: skip-archived]
-  --include-projects TEXT         Restrict cloning to specific project(s)
-  --exclude-projects TEXT         Exclude project(s); supports wildcard and
+  --include-projects, --include-project TEXT
+                                  Restrict cloning to specific project(s)
+  --exclude-projects, --exclude-project TEXT
+                                  Exclude project(s); supports wildcard and
                                   hierarchical (path-style) matching
   --discovery-method TEXT         Method for discovering projects: ssh (default),
                                   http (REST API), or both (union of both methods
@@ -689,7 +693,8 @@ Options:
   --keep-remote-protocol          Keep original clone protocol for remote
   --strict-host / --accept-unknown-host
                                   SSH strict host key checking [default: strict-host]
-  --clone-timeout INTEGER         Timeout per clone operation in seconds
+  --timeout, --clone-timeout INTEGER
+                                  Timeout per clone operation in seconds
                                   [default: 600]
   --retry-attempts INTEGER        Max retry attempts per repository
                                   [default: 3]
@@ -717,7 +722,7 @@ Options:
 
 **Discovery and Connection:**
 
-- `--server TEXT`: Gerrit server hostname (required)
+- `--host TEXT` (alias `--server`): Gerrit server hostname (required)
 - `--port INTEGER`: Gerrit SSH port (default: 29418)
 - `--ssh-user TEXT` / `-u`: SSH username for Gerrit clone operations (env: `GERRIT_SSH_USER`)
 - `--ssh-identity-file PATH` / `-i`: SSH identity (private key) file path
@@ -742,7 +747,10 @@ Options:
 
 **Project Filtering:**
 
-- `--projects TEXT`: Comma-separated list of project hierarchies to mirror
+- `--include-projects TEXT` (aliases `--include-project`, `--projects`):
+  Comma-separated list of project hierarchies to mirror
+- `--exclude-projects TEXT` (alias `--exclude-project`): Projects to leave
+  out; applied after include filters
 
 **Performance:**
 
@@ -1286,12 +1294,14 @@ jobs:
 | `exit-on-error`        | No       | `false`               | Exit when first error occurs                                                                                                                                       |
 | `no-refresh`           | No       | `false`               | Skip refreshing existing repositories                                                                                                                              |
 | `force-refresh`        | No       | `false`               | Force refresh all existing repos (auto-stash, fix detached HEAD)                                                                                                   |
+| `force`                | No       | `false`               | Same as `force-refresh`: force refresh all existing repos (auto-stash, fix detached HEAD)                                                                          |
 | `fetch-only`           | No       | `false`               | Only fetch changes without merging (existing repos)                                                                                                                |
 | `skip-conflicts`       | No       | `true`                | Skip repos with uncommitted changes during refresh                                                                                                                 |
 | `threads`              | No       | auto                  | Number of concurrent clone threads                                                                                                                                 |
 | `depth`                | No       |                       | Create shallow clone with given depth                                                                                                                              |
 | `branch`               | No       |                       | Clone specific branch instead of default                                                                                                                           |
 | `use-https`            | No       | `false`               | Use HTTPS for cloning instead of SSH                                                                                                                               |
+| `https`                | No       | `false`               | Same as `use-https`: use HTTPS for cloning instead of SSH                                                                                                          |
 | `http-user`            | No       |                       | HTTP username for Gerrit HTTPS authentication                                                                                                                      |
 | `http-password`        | No       |                       | HTTP password for Gerrit HTTPS authentication                                                                                                                      |
 | `no-netrc`             | No       | `false`               | Disable .netrc credential lookup for HTTP auth                                                                                                                     |

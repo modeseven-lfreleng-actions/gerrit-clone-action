@@ -38,7 +38,8 @@ GITHUB_TOKEN = typer.Option(
 )
 GITHUB_ORG = typer.Option(
     None,
-    "--github-org",
+    "--org",
+    "--github-org",  # Backward-compatible alias
     help="GitHub organization or user name (auto-detected from host if not specified)",
     envvar="GITHUB_ORG",
 )
@@ -212,7 +213,8 @@ STRICT_HOST_CHECKING = typer.Option(
 )
 CLONE_TIMEOUT = typer.Option(
     600,
-    "--clone-timeout",
+    "--timeout",
+    "--clone-timeout",  # Backward-compatible alias
     help="Timeout per clone operation in seconds (min: 30, max: 1800)",
     envvar="GERRIT_CLONE_TIMEOUT",
     min=30,

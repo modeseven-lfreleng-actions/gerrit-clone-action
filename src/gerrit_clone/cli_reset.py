@@ -64,7 +64,7 @@ def reset(
         gerrit-clone reset --org my-test-org --include-automation-prs
 
         # Compare with local clone before deletion
-        gerrit-clone reset --org my-test-org --path /tmp/gerrit-mirror --compare
+        gerrit-clone reset --org my-test-org --output-path /tmp/gerrit-mirror --compare
 
         # Delete immediately without prompt (DANGEROUS!)
         gerrit-clone reset --org my-test-org --no-confirm

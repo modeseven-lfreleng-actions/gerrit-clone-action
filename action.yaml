@@ -106,6 +106,12 @@ inputs:
       HEAD)
     required: false
     default: "false"
+  force:
+    description: >-
+      Force refresh all existing repos (auto-stash, fix detached
+      HEAD); same as force-refresh
+    required: false
+    default: "false"
   fetch-only:
     description: "Only fetch changes without merging (existing repos)"
     required: false
@@ -153,6 +159,10 @@ inputs:
     description: "Use HTTPS for cloning instead of SSH"
     required: false
     default: "false"
+  https:
+    description: "Use HTTPS for cloning instead of SSH; same as use-https"
+    required: false
+    default: "false"
   http-user:
     description: "HTTP username for Gerrit HTTPS authentication"
     required: false
@@ -175,8 +185,8 @@ inputs:
   discovery-method:
     description: >-
       Discovery method: ssh, http, both, or github_api. Leave empty to
-      derive from the clone protocol (http with use-https, otherwise ssh;
-      github_api for GitHub sources).
+      derive from the clone protocol (http with use-https or https,
+      otherwise ssh; github_api for GitHub sources).
     required: false
     default: ""
   keep-remote-protocol:
@@ -305,7 +315,8 @@ runs:
         INPUT_HOST: ${{ inputs.host }}
         INPUT_VERBOSE: ${{ inputs.verbose }}
         INPUT_QUIET: ${{ inputs.quiet }}
-        INPUT_USE_HTTPS: ${{ inputs.use-https }}
+        INPUT_USE_HTTPS: >-
+          ${{ inputs.use-https == 'true' || inputs.https == 'true' }}
       run: |
         if [ -z "${INPUT_HOST}" ]; then
           echo "::error::host input is required"
@@ -320,10 +331,10 @@ runs:
         fi
 
         echo "Gerrit host: ${INPUT_HOST}"
-        echo "DEBUG: use-https input value: '${INPUT_USE_HTTPS}'"
+        echo "DEBUG: use-https/https effective value: '${INPUT_USE_HTTPS}'"
 
     - name: "Setup SSH authentication"
-      if: ${{ inputs.use-https != 'true' }}
+      if: ${{ inputs.use-https != 'true' && inputs.https != 'true' }}
       shell: bash
       run: |
         # Extract bare hostname (strip path like /ORG from github.com/ORG)
@@ -440,7 +451,8 @@ runs:
         INPUT_HOST: ${{ inputs.host }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_HTTP_PASSWORD: ${{ inputs.http-password }}
-        INPUT_USE_HTTPS: ${{ inputs.use-https }}
+        INPUT_USE_HTTPS: >-
+          ${{ inputs.use-https == 'true' || inputs.https == 'true' }}
         INPUT_SSH_USER: ${{ inputs.ssh-user }}
         # Only a boolean is needed here (the key material itself is
         # consumed by the earlier SSH-agent setup step); avoid placing
@@ -474,7 +486,8 @@ runs:
         INPUT_MOVE_CONFLICTING: ${{ inputs.move-conflicting }}
         INPUT_EXIT_ON_ERROR: ${{ inputs.exit-on-error }}
         INPUT_NO_REFRESH: ${{ inputs.no-refresh }}
-        INPUT_FORCE_REFRESH: ${{ inputs.force-refresh }}
+        INPUT_FORCE_REFRESH: >-
+          ${{ inputs.force-refresh == 'true' || inputs.force == 'true' }}
         INPUT_FETCH_ONLY: ${{ inputs.fetch-only }}
         INPUT_SKIP_CONFLICTS: ${{ inputs.skip-conflicts }}
         INPUT_RETRY_FACTOR: ${{ inputs.retry-factor }}
@@ -520,7 +533,7 @@ runs:
         fi
 
         # Debug protocol selection
-        echo "DEBUG: Protocol selection - use-https: '${INPUT_USE_HTTPS}'"
+        echo "DEBUG: Protocol selection - use-https/https: '${INPUT_USE_HTTPS}'"
         if [ "${INPUT_USE_HTTPS}" = "true" ]; then
           echo "Using HTTPS for cloning"
         else

@@ -30,10 +30,6 @@ ORG = "example-org"
 PATH_TOKEN = "<path>"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
-NEW_SPELLING = pytest.mark.xfail(
-    strict=True, reason="Canonical flag name not yet accepted"
-)
-
 # Patch target of each command's run function, and the base arguments
 # that satisfy its other required options.
 COMMANDS: dict[str, tuple[tuple[str, ...], list[str]]] = {
@@ -103,7 +99,6 @@ SPELLINGS = [
         "server",
         HOST,
         id="mirror --host",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "clone",
@@ -120,7 +115,6 @@ SPELLINGS = [
         "github_org",
         ORG,
         id="clone --org",
-        marks=NEW_SPELLING,
     ),
     pytest.param("mirror", True, _value("--org", ORG), "org", ORG, id="mirror --org"),
     pytest.param("reset", False, _value("--org", ORG), "org", ORG, id="reset --org"),
@@ -156,7 +150,6 @@ SPELLINGS = [
         "path",
         PATH_TOKEN,
         id="reset --output-path",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "clone",
@@ -173,7 +166,6 @@ SPELLINGS = [
         "clone_timeout",
         120,
         id="clone --timeout",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "refresh",
@@ -238,7 +230,6 @@ SPELLINGS = [
         "include_projects",
         "a",
         id="mirror --include-project",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "clone",
@@ -287,7 +278,6 @@ SPELLINGS = [
         "exclude_projects",
         "b",
         id="mirror --exclude-project",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "clone",
@@ -337,28 +327,20 @@ def test_spelling_reaches_run_function(
 
 # (command, canonical name, alias listed after it)
 HELP_ORDER = [
-    pytest.param(
-        "mirror", "--host", "--server", id="mirror --host", marks=NEW_SPELLING
-    ),
-    pytest.param(
-        "clone", "--org", "--github-org", id="clone --org", marks=NEW_SPELLING
-    ),
-    pytest.param(
-        "reset", "--output-path", "--path", id="reset --output-path", marks=NEW_SPELLING
-    ),
+    pytest.param("mirror", "--host", "--server", id="mirror --host"),
+    pytest.param("clone", "--org", "--github-org", id="clone --org"),
+    pytest.param("reset", "--output-path", "--path", id="reset --output-path"),
     pytest.param(
         "clone",
         "--timeout",
         "--clone-timeout",
         id="clone --timeout",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "mirror",
         "--include-projects",
         "--include-project",
         id="mirror --include-project",
-        marks=NEW_SPELLING,
     ),
     pytest.param("mirror", "--include-projects", "--projects", id="mirror --projects"),
     pytest.param(
@@ -366,7 +348,6 @@ HELP_ORDER = [
         "--exclude-projects",
         "--exclude-project",
         id="mirror --exclude-project",
-        marks=NEW_SPELLING,
     ),
     pytest.param(
         "clone", "--include-projects", "--include-project", id="clone --include-project"
@@ -412,7 +393,6 @@ def test_help_lists_canonical_name_first(
     assert first.start() < alias_match.start()
 
 
-@NEW_SPELLING
 def test_config_host_help_matches_clone() -> None:
     """``config --host`` describes the option as ``clone --host`` does."""
     assert cli_config.HOST.help == cli_options_clone.HOST.help
