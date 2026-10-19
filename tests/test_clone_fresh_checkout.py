@@ -520,7 +520,6 @@ def _filtered_in_place(upstream: Path, tree: Path) -> Path:
 class TestFilteredInPlace:
     """A working copy an earlier release filtered in place."""
 
-    @pytest.mark.xfail(strict=True, reason="The refusal names no remedy yet")
     def test_refresh_says_to_delete_and_clone_it_again(
         self, upstream: Path, tree: Path
     ) -> None:
@@ -536,7 +535,6 @@ class TestFilteredInPlace:
         assert REMEDY in output
         assert _git("rev-parse", "HEAD", cwd=checkout) == before
 
-    @pytest.mark.xfail(strict=True, reason="The refusal names no remedy yet")
     def test_cloning_over_it_says_the_same(self, upstream: Path, tree: Path) -> None:
         """Clone refreshes an existing working copy rather than replace it."""
         checkout = _filtered_in_place(upstream, tree)
