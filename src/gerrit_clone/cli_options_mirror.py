@@ -18,7 +18,8 @@ from gerrit_clone.ssh_identity import parse_identity_file
 
 SERVER = typer.Option(
     ...,
-    "--server",
+    "--host",
+    "--server",  # Backward-compatible alias
     help="Gerrit server hostname",
     envvar="GERRIT_HOST",
 )
@@ -34,6 +35,7 @@ ORG = typer.Option(
 INCLUDE_PROJECTS = typer.Option(
     None,
     "--include-projects",
+    "--include-project",  # Alias matching clone and refresh
     "--projects",  # Backward-compatible alias
     help=(
         "Include only matching projects. Supports shell-style wildcards "
@@ -45,6 +47,7 @@ INCLUDE_PROJECTS = typer.Option(
 EXCLUDE_PROJECTS = typer.Option(
     None,
     "--exclude-projects",
+    "--exclude-project",  # Alias matching clone and refresh
     help=(
         "Exclude matching projects. Applied after include filters. "
         "Supports shell-style wildcards (*, ?, [seq]), hierarchical matching, "

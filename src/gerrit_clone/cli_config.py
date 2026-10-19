@@ -25,7 +25,7 @@ from gerrit_clone.models import Config
 HOST = typer.Option(
     None,
     "--host",
-    help="Gerrit server hostname",
+    help="Source hostname (Gerrit server or GitHub URL like github.com/ORG)",
     envvar="GERRIT_HOST",
 )
 CONFIG_FILE = typer.Option(
