@@ -412,6 +412,8 @@ class TestActionInputToCLIMapping:
         ("log-file", "log-file"),
         ("disable-log-file", "disable-log-file"),
         ("log-level", "log-level"),
+        ("force", "force"),
+        ("https", "https"),
     ]
 
     def test_action_inputs_have_matching_cli_options(
@@ -441,6 +443,89 @@ class TestActionInputToCLIMapping:
         assert "path" not in cli_option_names, (
             "CLI should NOT have standalone '--path' option"
         )
+
+
+ALIAS_INPUT_PAIRS: list[tuple[str, str]] = [
+    ("use-https", "https"),
+    ("force-refresh", "force"),
+]
+
+ALIAS_INPUT_XFAIL = pytest.mark.xfail(
+    strict=True, reason="force and https inputs not yet defined"
+)
+
+EXPRESSION_PATTERN = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+
+
+def _reads_input(expression: str, name: str) -> bool:
+    """Return whether *expression* reads ``inputs.<name>``."""
+    return re.search(rf"\binputs\.{re.escape(name)}(?![\w-])", expression) is not None
+
+
+class TestAliasInputs:
+    """``force`` and ``https`` behave exactly like their older spellings."""
+
+    @ALIAS_INPUT_XFAIL
+    @pytest.mark.parametrize(("old", "new"), ALIAS_INPUT_PAIRS)
+    def test_alias_input_defined(
+        self, action_yaml: dict[str, Any], old: str, new: str
+    ) -> None:
+        """The new input exists, is optional and defaults like the old one."""
+        inputs = action_yaml["inputs"]
+        assert new in inputs
+        assert inputs[new].get("required") is False
+        assert inputs[new].get("default") == "false"
+        assert inputs[old].get("default") == "false"
+
+    @ALIAS_INPUT_XFAIL
+    @pytest.mark.parametrize(("old", "new"), ALIAS_INPUT_PAIRS)
+    def test_every_read_honours_both_spellings(self, old: str, new: str) -> None:
+        """Each expression that reads the old input reads the new one too."""
+        text = ACTION_YAML_PATH.read_text(encoding="utf-8")
+        reads = [
+            expr
+            for expr in EXPRESSION_PATTERN.findall(text)
+            if _reads_input(expr, old) or _reads_input(expr, new)
+        ]
+        assert reads, f"No expression reads inputs.{old}"
+        for expr in reads:
+            assert _reads_input(expr, old), f"{expr!r} ignores inputs.{old}"
+            assert _reads_input(expr, new), f"{expr!r} ignores inputs.{new}"
+
+    @ALIAS_INPUT_XFAIL
+    def test_env_mappings_read_both_spellings(
+        self, action_yaml: dict[str, Any]
+    ) -> None:
+        """INPUT_USE_HTTPS and INPUT_FORCE_REFRESH are true for either input."""
+        env_names = {
+            "INPUT_USE_HTTPS": "use-https",
+            "INPUT_FORCE_REFRESH": "force-refresh",
+        }
+        partners = dict(ALIAS_INPUT_PAIRS)
+        seen: set[str] = set()
+        for step in action_yaml["runs"]["steps"]:
+            for name, value in (step.get("env") or {}).items():
+                if name not in env_names:
+                    continue
+                seen.add(name)
+                old = env_names[name]
+                new = partners[old]
+                assert f"inputs.{old} == 'true'" in value, (name, value)
+                assert f"inputs.{new} == 'true'" in value, (name, value)
+                assert "||" in value, (name, value)
+        assert seen == set(env_names)
+
+    @ALIAS_INPUT_XFAIL
+    def test_ssh_setup_skipped_for_either_https_input(
+        self, action_yaml: dict[str, Any]
+    ) -> None:
+        """The SSH setup step runs only when neither HTTPS input is true."""
+        steps = action_yaml["runs"]["steps"]
+        ssh = next(s for s in steps if s.get("name") == "Setup SSH authentication")
+        condition = ssh["if"]
+        assert "inputs.use-https != 'true'" in condition
+        assert "inputs.https != 'true'" in condition
+        assert "&&" in condition
 
 
 class TestNoEmptyExpressions:
