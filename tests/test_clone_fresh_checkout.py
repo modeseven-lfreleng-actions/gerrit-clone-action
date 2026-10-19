@@ -8,7 +8,9 @@ remote-tracking refs into local branches, and no later refresh could
 follow it.  It is filtered through a staged copy instead, keeps its
 remote-tracking refs and branch tracking, and holds no unfiltered object
 afterwards -- through its tags or its reflogs either.  One whose
-filtering fails is deleted, never left unfiltered.
+filtering fails is deleted, never left unfiltered.  One an earlier
+release filtered in place stays refused, and the refusal says how to
+replace it with one a refresh can follow.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from typer.testing import CliRunner
 from gerrit_clone import refresh_checkout_stage
 from gerrit_clone.cli import app
 from gerrit_clone.cli_clone_run import _delete_working_copy
+from gerrit_clone.content_filter import apply_content_filters
 from gerrit_clone.content_origin import NO_PUSH_URL
 from gerrit_clone.content_policy import stored_policy
 from gerrit_clone.content_spec import ContentFilterSpec
@@ -38,6 +41,7 @@ from gerrit_clone.models import (
     RefreshStatus,
 )
 from gerrit_clone.refresh_checkout_fresh import NO_UPSTREAM_REFUSAL
+from gerrit_clone.refresh_filtered import FILTERED_WORKING_COPY_REFUSAL
 from gerrit_clone.refresh_worker import RefreshWorker
 
 if TYPE_CHECKING:
@@ -492,3 +496,70 @@ class TestInterruptedDeletion:
         logged = logger.error.call_args.args
         assert tree / "proj" in logged
         assert "permission denied" in logged
+
+
+#: The remedy the refusal of a working copy filtered in place gives.
+REMEDY = "Delete it, then clone it again with the same filters"
+
+
+def _filtered_in_place(upstream: Path, tree: Path) -> Path:
+    """A working copy filtered where it stands, as before 2.4.3."""
+    checkout = tree / "proj"
+    _git("clone", "-q", upstream.as_uri(), str(checkout))
+    # What clone --no-mirror ran on each new checkout before 2.4.3.
+    success, error = apply_content_filters(
+        checkout, "proj", remove_patterns=["secret.txt"]
+    )
+    assert success, error
+    assert not _git("for-each-ref", "refs/remotes", cwd=checkout)
+    assert not stored_policy(checkout).empty
+    return checkout
+
+
+@needs_filter_repo
+class TestFilteredInPlace:
+    """A working copy an earlier release filtered in place."""
+
+    def test_refresh_says_to_delete_and_clone_it_again(
+        self, upstream: Path, tree: Path
+    ) -> None:
+        checkout = _filtered_in_place(upstream, tree)
+        before = _git("rev-parse", "HEAD", cwd=checkout)
+        _commit(upstream, "file.txt", "three\n")
+
+        result = _refresh(tree, "--remove-files", "secret.txt")
+
+        output = " ".join(result.output.split())
+        assert FILTERED_WORKING_COPY_REFUSAL in output
+        assert "Skipped: 1" in output
+        assert REMEDY in output
+        assert _git("rev-parse", "HEAD", cwd=checkout) == before
+
+    def test_cloning_over_it_says_the_same(self, upstream: Path, tree: Path) -> None:
+        """Clone refreshes an existing working copy rather than replace it."""
+        checkout = _filtered_in_place(upstream, tree)
+        before = _git("rev-parse", "HEAD", cwd=checkout)
+        _commit(upstream, "file.txt", "three\n")
+
+        result = _clone(upstream, tree, "--remove-files", "secret.txt")
+
+        output = " ".join(result.output.split())
+        assert FILTERED_WORKING_COPY_REFUSAL in output
+        assert REMEDY in output
+        assert _git("rev-parse", "HEAD", cwd=checkout) == before
+
+    def test_deleting_and_cloning_it_again_lets_refresh_follow(
+        self, upstream: Path, tree: Path
+    ) -> None:
+        checkout = _filtered_in_place(upstream, tree)
+        shutil.rmtree(checkout)
+
+        cloned = _clone(upstream, tree, "--remove-files", "secret.txt")
+        assert cloned.exit_code == 0, cloned.output
+        _commit(upstream, "file.txt", "three\n")
+        result = _refresh(tree, "--remove-files", "secret.txt")
+
+        assert result.exit_code == 0, result.output
+        assert (checkout / "file.txt").read_text() == "three\n"
+        assert "secret.txt" not in _history(checkout)
+        assert SECRET not in _blobs(checkout)

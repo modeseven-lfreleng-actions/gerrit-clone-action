@@ -257,7 +257,11 @@ the filtered tag), its tags become exactly the filtered ones, and the tool
 purges the unfiltered objects. When filtering a new working copy fails, the tool
 deletes it, so no unfiltered checkout remains. A working copy that content
 filtering rewrote in place, as earlier releases' `clone --no-mirror` did, has
-lost the remote-tracking branch a refresh follows, and gets skipped.
+lost the remote-tracking branch a refresh follows, and gets skipped. `clone`
+over it refreshes it rather than replacing it, and skips it the same way, so
+delete it first, then clone it again with the same filters: the new working
+copy of a branch keeps its remote-tracking branch, and later refreshes follow
+it.
 Every remote of a filtered repository refuses pushes. A tree filtered before
 the tree-level file existed gains one from these per-repository records on
 its next run. Releases up to v2.2.4 recorded no filters at all, so refresh

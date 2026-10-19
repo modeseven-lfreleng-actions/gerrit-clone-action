@@ -62,7 +62,11 @@ FILTERED_REFRESH_REFUSAL = (
 FILTERED_WORKING_COPY_REFUSAL = (
     "Content filtering rewrote this working copy, and its branch has no "
     "remote-tracking branch for a refresh to follow -- filtering a working "
-    "copy in place removes them -- so it cannot be refreshed"
+    "copy in place, as clone --no-mirror did before 2.4.3, removes them -- "
+    "so it cannot be refreshed. Delete it, then clone it again with the "
+    "same filters: since 2.4.3, clone --no-mirror filters a new working "
+    "copy of a branch through a copy, so it keeps its remote-tracking "
+    "branch and later refreshes follow it"
 )
 
 #: Why a staged copy is not published over a mirror another run refreshed.

@@ -149,7 +149,10 @@ leaves the checkout unchanged. A new working copy whose filtering fails,
 or gets refused, at any step may hold unfiltered content, so the run
 deletes it and reports the failure. A working copy an earlier release
 filtered in place has lost its remote-tracking refs to
-`git filter-repo`, and stays refused.
+`git filter-repo`, and stays refused. `clone` over it refreshes it and
+meets the same refusal, so the refusal tells the operator to delete it
+and clone it again with the same filters; the new working copy of a
+branch keeps its remote-tracking refs, and later refreshes follow it.
 
 ### Journal
 
